@@ -9,7 +9,7 @@ export type Verdict = 'PASS' | 'CHANGES' | 'pending' | 'invalid'
 export type GateVerdict = 'PASS' | 'FAIL'
 
 /** `spec` (first round), `gate` (last gate failed), `review` (reviews want changes), or `feedback:<file>` */
-export type RoundReason = 'spec' | 'gate' | 'review' | `feedback:${string}`
+export type RoundReason = 'spec' | 'gate' | 'review' | 'sync' | `feedback:${string}`
 
 export interface IntakeInfo {
   decision: string | null

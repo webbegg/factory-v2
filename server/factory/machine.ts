@@ -17,7 +17,7 @@ export const TRANSITIONS: Partial<Record<Stage, readonly Stage[]>> = {
   'gate': ['review', 'build', 'needs-human'],
   'review': ['approve', 'build', 'needs-human'],
   'approve': ['merging', 'needs-human'],
-  'merging': ['needs-human'],
+  'merging': ['build', 'needs-human'],
   'needs-human': ['build', 'rejected']
 }
 
@@ -256,6 +256,17 @@ export class Machine {
       const want = stage === 'merging' ? 'APPROVE' : 'ESCALATE'
       const line = firstLine(await this.read(job, 'decision.md') ?? '')
       require(line === want, `decision.md starts with '${line}', not ${want}`)
+    } else if (old === 'merging') {
+      const sync = `${this.roundRel(job)}/sync.md`
+      const conflicted = await this.read(job, sync) !== null
+      if (stage === 'build') {
+        require(conflicted, `${sync} doesn't exist`)
+        this.lastRoundCheck(job, stage)
+        await this.nextRound(job, 'sync')
+      } else if (conflicted) {
+        // other merge failures (gate after the sync, gh pr merge) escalate on any round
+        this.lastRoundCheck(job, stage)
+      }
     } else if (old === 'needs-human') { // → build
       require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
       job.roundLimit = job.round + this.config.maxRounds
