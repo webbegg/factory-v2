@@ -3,7 +3,9 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultConfig } from './config'
+import { Gate } from './gate'
 import { Machine } from './machine'
+import { Merger } from './merge'
 import { GitHubIssues } from './issue'
 import type { GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
 import { Queue } from './queue'
@@ -70,6 +72,13 @@ export class FakeGitHub implements GitHubPort {
     this.calls.push(['close', number])
   }
 
+  mergeError: string | null = null
+  async prMerge(number: number, method: string) {
+    if (this.mergeError) throw new Error(this.mergeError)
+    this.prStates.set(number, 'MERGED')
+    this.calls.push(['merge', number, method])
+  }
+
   async openPrsForBranch(branch: string) {
     return this.openPrs.get(branch) ?? []
   }
@@ -117,6 +126,21 @@ export class FakeGit implements GitPort {
   async commitsAhead() {
     return this.ahead
   }
+
+  changed: Array<{ status: string, path: string }> = []
+  mergeResult = { ok: true, output: '' }
+  async changedFiles() {
+    return this.changed
+  }
+
+  async push(cwd: string, branch: string) {
+    this.calls.push(['push', cwd, branch])
+  }
+
+  async merge(cwd: string, ref: string) {
+    this.calls.push(['merge', cwd, ref])
+    return this.mergeResult
+  }
 }
 
 export interface TestEnv {
@@ -128,6 +152,8 @@ export interface TestEnv {
   ports: Ports
   machine: Machine
   queue: Queue
+  gate: Gate
+  merger: Merger
 }
 
 export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
@@ -146,7 +172,9 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<T
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
   const queue = new Queue({ paths, config, store, ports, machine })
-  return { paths, config, store, github, git, ports, machine, queue }
+  const gate = new Gate({ paths, config, store, ports })
+  const merger = new Merger({ config, store, ports, machine, gate })
+  return { paths, config, store, github, git, ports, machine, queue, gate, merger }
 }
 
 export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {

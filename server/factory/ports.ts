@@ -33,6 +33,7 @@ export interface GitHubPort {
   prIsDraft(number: number): Promise<boolean>
   prReady(number: number): Promise<void>
   prClose(number: number): Promise<void>
+  prMerge(number: number, method: 'merge' | 'squash' | 'rebase'): Promise<void>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
 }
 
@@ -48,6 +49,11 @@ export interface GitPort {
   /** sha of origin/<branch>, or null when it doesn't exist */
   remoteHead(cwd: string, branch: string): Promise<string | null>
   commitsAhead(cwd: string, base: string): Promise<number>
+  /** files changed since forking from `base`; status is the git letter (A, M, D, R…) */
+  changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>>
+  push(cwd: string, branch: string): Promise<void>
+  /** merges `ref` into the worktree's branch, aborting on conflict */
+  merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }>
 }
 
 /** Refreshes a job's issue.md from GitHub (quoted as data). */
