@@ -37,6 +37,12 @@ view; this file is for whoever changes the code.
   panels fill it with `h-full` / `min-h-0` and scroll their own panels;
   in a wide panel JobDetail shows Live activity as a right-hand column that
   scrolls its own lines, and stacks it below the document when narrower.
+  Every scroll region is a `UScrollArea` (use `as` for semantic elements);
+  never put raw `overflow-*-auto` on a new one. The shared thin, hidden-until-
+  scrolling bar is the `scrollbar-auto-hide` utility in `app/assets/css/main.css`,
+  applied to all of them by `ui.scrollArea` in `app/app.config.ts` (and to
+  `.md pre`); `app/plugins/scrollbars.client.ts` sets `data-scrolling` while a
+  region scrolls.
 
 ## Rules
 
