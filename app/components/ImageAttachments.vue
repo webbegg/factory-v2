@@ -74,15 +74,17 @@ function onDrop(e: DragEvent) {
 
 async function capture() {
   if (images.value.length >= MAX_IMAGES) return refuse(FULL)
+  // Busy from the picker on, so a second click can't open another one.
+  capturing.value = true
   let stream: MediaStream
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
   } catch (err) {
+    capturing.value = false
     // Cancelling the picker rejects with NotAllowedError; that is not a failure.
     if ((err as DOMException).name !== 'NotAllowedError') refuse(String(err))
     return
   }
-  capturing.value = true
   try {
     const video = document.createElement('video')
     video.muted = true
@@ -124,9 +126,10 @@ function remove(i: number) {
         variant="subtle"
         size="sm"
         :loading="capturing"
+        :disabled="capturing"
         @click="capture"
       />
-      <span class="text-xs text-dimmed">
+      <span class="text-xs text-muted">
         or paste / drop images: PNG, JPEG or WebP, up to {{ MAX_IMAGES }}, 5 MB each
       </span>
     </div>
