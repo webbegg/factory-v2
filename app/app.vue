@@ -7,10 +7,14 @@ useHead({
 })
 
 const { state, connected, connect, refresh, act } = useBoard()
+const { checks, recheck } = useSetup()
 onMounted(() => {
   connect()
   void refresh()
+  void recheck()
 })
+
+const failing = computed(() => summarizeDoctor(checks.value).failures.length)
 
 const waiting = computed(() => state.value?.jobs.filter(j => j.stage === 'needs-human' || j.stage === 'needs-info').length ?? 0)
 const projectName = computed(() => state.value?.project.split('/').pop() ?? '…')
@@ -19,7 +23,8 @@ const links = computed(() => [
   { label: 'Board', to: '/', icon: 'i-lucide-kanban' },
   { label: 'Inbox', to: '/inbox', icon: 'i-lucide-inbox', badge: waiting.value || undefined },
   { label: 'New request', to: '/new', icon: 'i-lucide-plus' },
-  { label: 'Settings', to: '/settings', icon: 'i-lucide-settings' }
+  { label: 'Settings', to: '/settings', icon: 'i-lucide-settings' },
+  { label: 'Setup', to: '/setup', icon: 'i-lucide-wrench', badge: failing.value ? { label: String(failing.value), color: 'warning' as const } : undefined }
 ])
 </script>
 

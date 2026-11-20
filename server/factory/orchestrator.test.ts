@@ -6,6 +6,7 @@ import { isWritable } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import type { AgentName } from './agents/prompts'
 import { Orchestrator } from './orchestrator'
+import type { FactoryEvent } from './orchestrator'
 import { makeEnv } from './testing'
 import type { TestEnv } from './testing'
 
@@ -233,6 +234,29 @@ describe('orchestrator', () => {
     expect(reviews.map(t => [t.agent, t.model]).sort()).toEqual([['reviewer-code', 'sonnet'], ['reviewer-ui', 'haiku'], ['reviewer-ux', 'sonnet']])
     expect(reviews.find(t => t.agent === 'reviewer-ux')!.message).toContain('Port: 5111.')
     expect(runner.maxActive).toBe(3)
+  })
+
+  test('each review verdict reaches the board as soon as its reviewer finishes', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n'),
+      'reviewer-ux': async (t) => {
+        await Bun.sleep(80)
+        await write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n')
+      },
+      'reviewer-ui': async (t) => {
+        await Bun.sleep(80)
+        await write(t, `round-${t.round}/review-ui.md`, 'VERDICT: PASS\n')
+      }
+    })
+    const seen: Array<Record<string, string>> = []
+    orch.on('event', (e: FactoryEvent) => {
+      if (e.type === 'job' && e.job.stage === 'review') seen.push({ ...e.job.reviews })
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    expect(seen).toContainEqual({ code: 'PASS', ux: 'pending', ui: 'pending' })
   })
 
   test('concurrency caps running jobs and the drain finishes them all', async () => {

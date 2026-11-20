@@ -295,9 +295,15 @@ export class Orchestrator extends EventEmitter {
 
   private async review(job: Job, signal: AbortSignal): Promise<boolean> {
     const { machine, store } = this.o
+    // a resumed review may already have some verdicts on disk
+    this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     const lenses = Object.keys(job.agents?.reviewers ?? {})
     const missing = lenses.filter(r => !existsSync(store.path(job.id, `round-${job.round}/review-${r}.md`)))
-    await Promise.all(missing.map(r => this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)))
+    await Promise.all(missing.map(async (r) => {
+      await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
+      // show each verdict on the board as it lands, not when the slowest reviewer ends
+      this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
+    }))
     const synced = await machine.sync(await store.load(job.id))
     const changes = Object.values(synced.reviews).some(v => v === 'CHANGES')
     if (!changes) await machine.advance(job.id, 'approve')

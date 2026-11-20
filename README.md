@@ -38,12 +38,16 @@ bun ~/code/factory-v2/bin/factory.ts doctor
 bun ~/code/factory-v2/bin/factory.ts          # board on http://localhost:4400
 ```
 
+The board's **Setup** page (`/setup`) runs the same checks as `factory doctor`,
+can run `factory init` for you and shows `.factory/checks.sh`; it works before
+the project has a `.factory/`.
+
 | Command | |
 |---|---|
 | `factory [ui] [--port n] [--no-open]` | the board: run the queue, follow jobs, answer what waits on you |
 | `factory run [issue]` | headless: drain the queue (or one issue) and exit |
 | `factory status` | jobs, stages, PRs, cost |
-| `factory init` / `factory doctor` | set up / check a project |
+| `factory init` / `factory doctor` | set up / check a project (also on the board's Setup page) |
 | `factory --version` / `-v` | print the factory version |
 
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until

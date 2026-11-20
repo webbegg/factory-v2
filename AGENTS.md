@@ -14,6 +14,8 @@ view; this file is for whoever changes the code.
   `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share).
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
+  The setup routes (`server/api/setup/`) use `projectDir()` instead of
+  `useFactory()` so they work before `.factory/config.json` exists.
   `server/middleware/local-only.ts` rejects foreign Host headers and non-JSON
   writes: keep every new write route a JSON POST.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
