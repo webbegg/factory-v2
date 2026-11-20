@@ -20,7 +20,8 @@ export default defineEventHandler(async (event) => {
         }
       }
       const listener = (e: FactoryEvent) => push(e)
-      const ping = setInterval(() => push({ type: 'ping' }), 15000)
+      // Bun.serve closes a request after 10s without bytes; keep the stream warm.
+      const ping = setInterval(() => push({ type: 'ping' }), 5000)
       stop = () => {
         if (!open) return
         open = false

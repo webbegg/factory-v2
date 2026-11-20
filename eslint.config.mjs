@@ -14,6 +14,10 @@ export default withNuxt(
           ['^v-bind:ui$', [{ match: 'objectValues' }]]
         ]
       }
+    },
+    rules: {
+      // `.md` styles rendered markdown; it is defined in main.css
+      'better-tailwindcss/no-unknown-classes': ['error', { ignore: ['^md$'] }]
     }
   }
 )

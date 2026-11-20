@@ -31,5 +31,12 @@ export default defineNuxtConfig({
         braceStyle: '1tbs'
       }
     }
+  },
+
+  // No server icon endpoint in a SPA: ship every icon the source uses in the client bundle.
+  icon: {
+    mode: 'svg',
+    provider: 'none',
+    clientBundle: { scan: true }
   }
 })
