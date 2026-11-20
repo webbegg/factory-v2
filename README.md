@@ -53,7 +53,8 @@ the project has a `.factory/`.
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until
 you trust it. Commit `.factory/config.json`, `.factory/checks.sh` and any
 `.factory/agents/<agent>.md` prompt overrides; job state and worktrees are
-gitignored.
+gitignored. The board's Settings page edits `.factory/config.json` and applies
+it to the running factory without a restart; the change still needs committing.
 
 ## Guardrails
 
