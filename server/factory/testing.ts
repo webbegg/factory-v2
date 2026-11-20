@@ -1,0 +1,163 @@
+// Test doubles and a scratch environment for the factory engine.
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { defaultConfig } from './config'
+import { Machine } from './machine'
+import type { GitHubPort, GitPort, IssuePort, Ports, PrState, ThreadKind } from './ports'
+import { JobStore } from './store'
+import type { FactoryConfig, FactoryPaths, Job } from './types'
+
+export type Call = [string, ...unknown[]]
+
+export class FakeGitHub implements GitHubPort {
+  calls: Call[] = []
+  prStates = new Map<number, PrState>()
+  drafts = new Set<number>()
+  openPrs = new Map<string, Array<{ number: number, url: string }>>()
+
+  async comment(kind: ThreadKind, number: number, body: string) {
+    this.calls.push(['comment', kind, number, body])
+  }
+
+  async editLabels(kind: ThreadKind, number: number, change: { add?: string[], remove?: string[] }) {
+    this.calls.push(['labels', kind, number, change])
+  }
+
+  async prState(number: number) {
+    return this.prStates.get(number) ?? 'OPEN'
+  }
+
+  async prIsDraft(number: number) {
+    return this.drafts.has(number)
+  }
+
+  async prReady(number: number) {
+    this.drafts.delete(number)
+    this.calls.push(['ready', number])
+  }
+
+  async prClose(number: number) {
+    this.calls.push(['close', number])
+  }
+
+  async openPrsForBranch(branch: string) {
+    return this.openPrs.get(branch) ?? []
+  }
+}
+
+export class FakeGit implements GitPort {
+  calls: Call[] = []
+  clean = true
+  headSha = 'a'.repeat(40)
+  remoteSha: string | null = 'a'.repeat(40)
+  ahead = 1
+
+  async fetch(cwd: string, ref: string) {
+    this.calls.push(['fetch', cwd, ref])
+  }
+
+  async addWorktree(path: string, branch: string, from: string) {
+    this.calls.push(['addWorktree', path, branch, from])
+  }
+
+  async removeWorktree(path: string) {
+    this.calls.push(['removeWorktree', path])
+  }
+
+  async deleteBranch(branch: string) {
+    this.calls.push(['deleteBranch', branch])
+  }
+
+  async deleteRemoteBranch(branch: string) {
+    this.calls.push(['deleteRemoteBranch', branch])
+  }
+
+  async isClean() {
+    return this.clean
+  }
+
+  async head() {
+    return this.headSha
+  }
+
+  async remoteHead() {
+    return this.remoteSha
+  }
+
+  async commitsAhead() {
+    return this.ahead
+  }
+}
+
+export class FakeIssues implements IssuePort {
+  refreshed: string[] = []
+  async refresh(job: Job) {
+    this.refreshed.push(job.id)
+  }
+}
+
+export interface TestEnv {
+  paths: FactoryPaths
+  config: FactoryConfig
+  store: JobStore
+  github: FakeGitHub
+  git: FakeGit
+  issues: FakeIssues
+  ports: Ports
+  machine: Machine
+}
+
+export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
+  const repo = await mkdtemp(join(tmpdir(), 'factory-test-'))
+  const paths: FactoryPaths = {
+    repo,
+    factory: join(repo, '.factory'),
+    jobs: join(repo, '.factory', 'jobs'),
+    worktrees: join(repo, '.worktrees')
+  }
+  const config = { ...defaultConfig(), ...overrides }
+  const store = new JobStore(paths)
+  const github = new FakeGitHub()
+  const git = new FakeGit()
+  const issues = new FakeIssues()
+  const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
+  const machine = new Machine({ paths, config, store, ports })
+  return { paths, config, store, github, git, issues, ports, machine }
+}
+
+export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {
+  const id = fields.id ?? '001-add-a-thing'
+  return {
+    id,
+    issue: 1,
+    title: 'Add a thing',
+    issueUrl: 'https://github.com/o/r/issues/1',
+    pr: null,
+    prUrl: null,
+    branch: `factory/${id}`,
+    worktree: join(env.paths.worktrees, id),
+    stage: 'intake',
+    round: 0,
+    roundLimit: env.config.maxRounds,
+    intake: null,
+    agents: null,
+    gate: null,
+    reviews: {},
+    sessions: {},
+    costUsd: 0,
+    started: '2026-11-20T11:00:00Z',
+    ended: null,
+    ...fields
+  }
+}
+
+/** Saves a job plus the files that justify its current state. */
+export async function seed(env: TestEnv, fields: Partial<Job> = {}, files: Record<string, string> = {}) {
+  const job = newJob(env, fields)
+  await env.store.save(job)
+  for (const [rel, text] of Object.entries(files)) await env.store.write(job.id, rel, text)
+  return job
+}
+
+export const ACCEPT = 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n\n## Summary\n- ok\n\n## Scope\nBuild it.\n'
