@@ -284,6 +284,42 @@ describe('approve', () => {
   })
 })
 
+describe('merging', () => {
+  const conflict = '# Conflict with main\n\n```\nCONFLICT (content): a.txt\n```\n'
+
+  test('a conflict with rounds left → build opens the next round; needs sync.md', async () => {
+    const env = await makeEnv({ maxRounds: 2 })
+    await seed(env, { stage: 'merging', round: 1, roundLimit: 2, pr: 9, agents: REVIEWERS })
+    await expect(env.machine.advance(ID, 'build')).rejects.toThrow('round-1/sync.md doesn\'t exist')
+    await env.store.write(ID, 'round-1/sync.md', conflict)
+    await env.store.write(ID, 'decision.md', 'ESCALATE\n\n## Why\nconflict\n')
+    await expect(env.machine.advance(ID, 'needs-human')).rejects.toThrow('round 1 of 2: go to build')
+    const job = await env.machine.advance(ID, 'build')
+    expect(job).toMatchObject({ stage: 'build', round: 2, roundReason: 'sync', gate: null, reviews: {} })
+    expect(existsSync(env.store.path(ID, 'round-2'))).toBe(true)
+    expect(env.github.calls).toEqual([])
+  })
+
+  test('a conflict on the last round must go to needs-human', async () => {
+    const env = await makeEnv({ maxRounds: 2 })
+    await seed(env, { stage: 'merging', round: 2, roundLimit: 2, pr: 9, agents: REVIEWERS }, {
+      'round-2/sync.md': conflict, 'decision.md': 'ESCALATE\n\n## Why\nThe branch conflicts with main.\n'
+    })
+    await expect(env.machine.advance(ID, 'build')).rejects.toThrow('round 2 of 2: go to needs-human')
+    const job = await env.machine.advance(ID, 'needs-human')
+    expect(job.stage).toBe('needs-human')
+    expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+  })
+
+  test('other merge failures escalate on any round', async () => {
+    const env = await makeEnv({ maxRounds: 2 })
+    await seed(env, { stage: 'merging', round: 1, roundLimit: 2, pr: 9, agents: REVIEWERS }, {
+      'decision.md': 'ESCALATE\n\n## Why\nThe merge failed.\n'
+    })
+    expect((await env.machine.advance(ID, 'needs-human')).stage).toBe('needs-human')
+  })
+})
+
 describe('merged', () => {
   test('any unfinished job moves to merged once its PR is merged, and its worktree goes', async () => {
     const env = await makeEnv()

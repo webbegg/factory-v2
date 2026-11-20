@@ -256,6 +256,10 @@ export class Orchestrator extends EventEmitter {
     const prev = job.round - 1
     const reason = job.roundReason ?? 'spec'
     if (reason === 'gate') return `The gate failed: read round-${prev}/checks.md and checks.log, fix it, push, and update build.md.`
+    if (reason === 'sync') {
+      const base = `origin/${this.o.config.baseBranch}`
+      return `The branch conflicts with ${base}: read round-${prev}/sync.md, merge ${base}, resolve the conflicts, push, and update build.md for round ${job.round}.`
+    }
     if (reason === 'review') return `Round ${prev} reviews are in round-${prev}/. Address every VERDICT: CHANGES, push, and update build.md for round ${job.round}.`
     if (reason.startsWith('feedback:')) {
       return `The user gave feedback: read ${reason.slice('feedback:'.length)} and address it, push, and update build.md for round ${job.round}.`
