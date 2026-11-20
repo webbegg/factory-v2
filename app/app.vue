@@ -62,7 +62,7 @@ const links = computed(() => [
       </template>
     </UHeader>
 
-    <UMain>
+    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0 overflow-y-auto">
       <NuxtPage />
     </UMain>
   </UApp>
