@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultConfig } from './config'
 import { Machine } from './machine'
-import type { GitHubPort, GitPort, IssuePort, Ports, PrState, ThreadKind } from './ports'
+import { GitHubIssues } from './issue'
+import type { GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
+import { Queue } from './queue'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, Job } from './types'
 
@@ -15,6 +17,33 @@ export class FakeGitHub implements GitHubPort {
   prStates = new Map<number, PrState>()
   drafts = new Set<number>()
   openPrs = new Map<string, Array<{ number: number, url: string }>>()
+  issues = new Map<number, IssueData>()
+  login = 'operator'
+
+  addIssue(fields: Partial<IssueData> & { number: number }): IssueData {
+    const issue: IssueData = {
+      title: `Issue ${fields.number}`, body: 'Please build it.', author: 'alice', labels: ['factory'],
+      state: 'OPEN', url: `https://github.com/o/r/issues/${fields.number}`, comments: [], ...fields
+    }
+    this.issues.set(issue.number, issue)
+    return issue
+  }
+
+  async operator() {
+    return this.login
+  }
+
+  async listIssues(label: string) {
+    return [...this.issues.values()]
+      .filter(i => i.state === 'OPEN' && i.labels.includes(label))
+      .map(i => ({ number: i.number, title: i.title }))
+  }
+
+  async fetchIssue(number: number) {
+    const issue = this.issues.get(number)
+    if (!issue) throw new Error(`no issue #${number}`)
+    return issue
+  }
 
   async comment(kind: ThreadKind, number: number, body: string) {
     this.calls.push(['comment', kind, number, body])
@@ -90,22 +119,15 @@ export class FakeGit implements GitPort {
   }
 }
 
-export class FakeIssues implements IssuePort {
-  refreshed: string[] = []
-  async refresh(job: Job) {
-    this.refreshed.push(job.id)
-  }
-}
-
 export interface TestEnv {
   paths: FactoryPaths
   config: FactoryConfig
   store: JobStore
   github: FakeGitHub
   git: FakeGit
-  issues: FakeIssues
   ports: Ports
   machine: Machine
+  queue: Queue
 }
 
 export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
@@ -120,10 +142,11 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<T
   const store = new JobStore(paths)
   const github = new FakeGitHub()
   const git = new FakeGit()
-  const issues = new FakeIssues()
+  const issues = new GitHubIssues(github, store)
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
-  return { paths, config, store, github, git, issues, ports, machine }
+  const queue = new Queue({ paths, config, store, ports, machine })
+  return { paths, config, store, github, git, ports, machine, queue }
 }
 
 export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {

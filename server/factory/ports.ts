@@ -3,8 +3,30 @@ import type { Job } from './types'
 export type PrState = 'OPEN' | 'CLOSED' | 'MERGED'
 export type ThreadKind = 'issue' | 'pr'
 
+export interface IssueComment {
+  author: string
+  body: string
+  createdAt: string
+}
+
+export interface IssueData {
+  number: number
+  title: string
+  body: string
+  author: string
+  labels: string[]
+  state: 'OPEN' | 'CLOSED'
+  url: string
+  comments: IssueComment[]
+}
+
 /** Every GitHub side effect the state machine needs. */
 export interface GitHubPort {
+  /** login of the user running the factory */
+  operator(): Promise<string>
+  listIssues(label: string): Promise<Array<{ number: number, title: string }>>
+  fetchIssue(number: number): Promise<IssueData>
+  /** posts `body` prefixed with the factory marker */
   comment(kind: ThreadKind, number: number, body: string): Promise<void>
   editLabels(kind: ThreadKind, number: number, change: { add?: string[], remove?: string[] }): Promise<void>
   prState(number: number): Promise<PrState>

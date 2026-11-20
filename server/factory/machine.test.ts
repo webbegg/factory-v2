@@ -110,13 +110,14 @@ describe('needs-info → intake', () => {
   test('archives the old intake, refreshes the issue and removes the label', async () => {
     const env = await makeEnv()
     await seed(env, { stage: 'needs-info' }, { 'intake.md': 'DECISION: NEEDS-INFO\n' })
+    env.github.addIssue({ number: 1, comments: [{ author: 'alice', body: 'Use blue.', createdAt: '2026-11-20T11:30:00Z' }] })
     const job = await env.machine.advance(ID, 'intake')
     expect(job.stage).toBe('intake')
     expect(job.intake).toBeNull()
     expect(job.ended).toBeNull()
     expect(await env.store.read(ID, 'intake.md')).toBeNull()
     expect(await env.store.read(ID, 'intake-1.md')).toBe('DECISION: NEEDS-INFO\n')
-    expect(env.issues.refreshed).toEqual([ID])
+    expect(await env.store.read(ID, 'issue.md')).toContain('> Use blue.')
     expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { remove: ['factory:needs-info'] }])
   })
 
