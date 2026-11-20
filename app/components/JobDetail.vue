@@ -318,13 +318,14 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               <span class="text-dimmed">{{ l.at }} {{ l.agent }}</span> {{ l.text }}
             </li>
           </ol>
+          <!-- Inside the region so it frames something to focus while idle. -->
+          <p
+            v-if="!lines.length"
+            class="text-xs text-dimmed"
+          >
+            Agent activity appears here while this board is open.
+          </p>
         </UScrollArea>
-        <p
-          v-if="!lines.length"
-          class="text-xs text-dimmed"
-        >
-          Agent activity appears here while this board is open.
-        </p>
       </UCard>
     </div>
   </div>

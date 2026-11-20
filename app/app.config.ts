@@ -6,8 +6,8 @@ export default defineAppConfig({
     },
     scrollArea: {
       slots: {
-        // The inset outline keeps the focus ring visible inside clipping parents.
-        root: 'scrollbar-auto-hide focus-visible:-outline-offset-3'
+        // Full-strength and inset, so the focus ring is readable and not clipped by parents.
+        root: 'scrollbar-auto-hide focus-visible:outline-primary focus-visible:-outline-offset-3'
       }
     }
   }
