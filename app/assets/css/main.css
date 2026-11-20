@@ -17,6 +17,30 @@
   --color-green-950: #052E16;
 }
 
+/* Registered so the thumb colour can fade; not inherited so nested regions fade on their own. */
+@property --scrollbar-thumb {
+  syntax: '<color>';
+  inherits: false;
+  initial-value: transparent;
+}
+
+/* Every UScrollArea (app.config.ts) and .md pre: a thin bar shown only while
+   data-scrolling is set (plugins/scrollbars.client.ts). The gutter stays
+   reserved on both edges, so content never shifts and padding stays even. */
+@utility scrollbar-auto-hide {
+  /* Touch devices keep their native overlay bars. */
+  @media (pointer: fine) {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    transition: --scrollbar-thumb 300ms ease-out;
+
+    &[data-scrolling] { --scrollbar-thumb: var(--ui-text-dimmed); }
+    &[data-orientation="vertical"] { scrollbar-gutter: stable both-edges; }
+
+    @media (prefers-reduced-motion: reduce) { transition: none; }
+  }
+}
+
 /* Agent files rendered by MarkdownDoc */
 .md { @apply text-sm leading-relaxed text-default; overflow-wrap: anywhere; }
 .md > * + * { @apply mt-3; }
@@ -27,7 +51,7 @@
 .md ol { @apply list-decimal ps-5; }
 .md li + li { @apply mt-1; }
 .md code { @apply rounded bg-elevated px-1 font-mono text-xs; }
-.md pre { @apply overflow-auto rounded-md bg-elevated p-3 text-xs; }
+.md pre { @apply scrollbar-auto-hide overflow-auto rounded-md bg-elevated p-3 text-xs; }
 .md pre code { @apply bg-transparent p-0; }
 .md blockquote { @apply border-s-2 border-default ps-3 text-muted; }
 .md a { @apply text-primary underline; }
