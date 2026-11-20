@@ -4,7 +4,7 @@ import type { ConfigUpdate } from '~~/server/factory/config'
 import type { FactoryConfig, Risk } from '~~/server/factory/types'
 
 const { act } = useBoard()
-const { data } = await useFetch<{ config: FactoryConfig, prompts: { name: AgentName, overridden: boolean }[] }>('/api/settings')
+const { data, error } = await useFetch<{ config: FactoryConfig, prompts: { name: AgentName, overridden: boolean }[] }>('/api/settings')
 
 const form = ref<ConfigUpdate | null>(null)
 const paths = ref('')
@@ -38,9 +38,18 @@ async function save() {
 
 <template>
   <UContainer class="max-w-2xl py-6 space-y-4">
+    <UAlert
+      v-if="error && !data"
+      color="error"
+      variant="subtle"
+      title="Couldn't load settings"
+      :description="error.statusMessage ?? error.message"
+    />
     <UCard v-if="form">
+      <!-- novalidate: the server's message, not the browser's popup, explains a bad value -->
       <form
         class="space-y-4"
+        novalidate
         @submit.prevent="save"
       >
         <div>
@@ -51,7 +60,7 @@ async function save() {
             Edits <code>.factory/config.json</code>. New values apply to the running factory right away; jobs already running keep their round limit.
           </p>
         </div>
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <UFormField label="Concurrency">
             <UInput
               v-model.number="form.concurrency"
@@ -88,7 +97,7 @@ async function save() {
         <h2 class="text-sm font-semibold text-highlighted">
           Models
         </h2>
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <UFormField
             v-for="key in modelKeys"
             :key="key"
@@ -104,7 +113,7 @@ async function save() {
         <h2 class="text-sm font-semibold text-highlighted">
           Reviewers by risk
         </h2>
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <template
             v-for="risk in risks"
             :key="risk"
