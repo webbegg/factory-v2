@@ -89,9 +89,9 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 <template>
   <div
     v-if="job"
-    class="@container space-y-4 md:flex md:h-full md:flex-col"
+    class="@container space-y-4 md:flex md:h-full md:flex-col md:@4xl:grid md:@4xl:grid-cols-[11rem_minmax(0,1fr)_18rem] md:@4xl:grid-rows-[auto_auto_auto_minmax(12rem,1fr)] md:@4xl:gap-x-4"
   >
-    <div class="flex flex-wrap items-center gap-3 md:shrink-0">
+    <div class="flex flex-wrap items-center gap-3 md:shrink-0 md:@4xl:col-span-3">
       <div class="min-w-0">
         <p class="font-mono text-xs text-muted">
           {{ job.id }} · {{ job.stage }}<span v-if="job.round"> · round {{ job.round }}/{{ job.roundLimit }}</span>
@@ -146,7 +146,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 
     <UAlert
       v-if="detail?.error"
-      class="md:shrink-0"
+      class="md:shrink-0 md:@4xl:col-span-3"
       color="error"
       variant="subtle"
       title="Stalled"
@@ -155,7 +155,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 
     <UCard
       v-if="job.stage === 'needs-human' || job.stage === 'needs-info'"
-      class="md:shrink-0"
+      class="md:shrink-0 md:@4xl:col-span-3"
     >
       <div class="space-y-3">
         <p class="text-sm text-highlighted">
@@ -208,8 +208,8 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
       </div>
     </UCard>
 
-    <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)] md:shrink-0 md:@xl:min-h-48 md:@xl:flex-1 md:@xl:shrink md:@xl:grid-rows-[minmax(0,1fr)]">
-      <nav class="space-y-3 md:@xl:overflow-y-auto">
+    <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)] md:shrink-0 md:@xl:min-h-48 md:@xl:flex-1 md:@xl:shrink md:@xl:grid-rows-[minmax(0,1fr)] md:@4xl:contents">
+      <nav class="space-y-3 md:@xl:overflow-y-auto md:@4xl:col-start-1 md:@4xl:row-start-4">
         <div
           v-for="g in groups"
           :key="g.label"
@@ -244,7 +244,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 
       <UCard
         v-if="!detail || current"
-        class="min-w-0 md:@xl:overflow-y-auto"
+        class="min-w-0 md:@xl:overflow-y-auto md:@4xl:col-start-2 md:@4xl:row-start-4"
       >
         <div
           v-if="failed"
@@ -286,7 +286,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
     </div>
 
     <UCard
-      class="md:shrink-0 md:@xl:flex md:@xl:min-h-32 md:@xl:shrink md:@xl:basis-1/3 md:@xl:flex-col"
+      class="md:shrink-0 md:@xl:flex md:@xl:min-h-32 md:@xl:shrink md:@xl:basis-1/3 md:@xl:flex-col md:@4xl:col-start-3 md:@4xl:row-start-4 md:@4xl:min-h-0 md:@4xl:min-w-0"
       :ui="{ body: 'p-3 sm:p-3 md:@xl:flex md:@xl:min-h-0 md:@xl:flex-1 md:@xl:flex-col' }"
     >
       <p class="mb-2 text-xs font-semibold text-dimmed uppercase">
