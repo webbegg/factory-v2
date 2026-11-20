@@ -42,6 +42,11 @@ The board's **Setup** page (`/setup`) runs the same checks as `factory doctor`,
 can run `factory init` for you and shows `.factory/checks.sh`; it works before
 the project has a `.factory/`.
 
+The **New request** form and a job's feedback / answer box accept screenshots:
+**Add screenshot** captures one frame of a screen or window, and you can paste
+or drop images too. Up to 5 images per message, 5 MB each, PNG, JPEG or WebP.
+They are uploaded when you send and appended to the text as markdown images.
+
 | Command | |
 |---|---|
 | `factory [ui] [--port n] [--no-open]` | the board: run the queue, follow jobs, answer what waits on you |
@@ -68,6 +73,11 @@ it to the running factory without a restart; the change still needs committing.
   and a second gate. The factory never deploys.
 - The board listens on 127.0.0.1, refuses foreign `Host` headers and non-JSON
   writes.
+- Attached screenshots are uploaded to GitHub as user attachments of the
+  project's repository (the way `gh issue create --attach` does it); nothing is
+  committed or released. Anyone who can see the repository can open them:
+  everyone for a public repo, people with access for a private one. They are
+  never deleted by the factory.
 
 ## Develop
 

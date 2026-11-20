@@ -2,6 +2,7 @@
 import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { UploadImage } from './attachments'
 import { defaultConfig } from './config'
 import { Gate } from './gate'
 import { Machine } from './machine'
@@ -81,6 +82,11 @@ export class FakeGitHub implements GitHubPort {
 
   async openPrsForBranch(branch: string) {
     return this.openPrs.get(branch) ?? []
+  }
+
+  async uploadImages(images: UploadImage[]) {
+    this.calls.push(['uploadImages', images.map(i => i.name)])
+    return images.map((img, i) => `https://github.com/user-attachments/assets/fake-${i + 1}-${img.name}`)
   }
 }
 
