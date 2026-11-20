@@ -211,7 +211,11 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
       </UCard>
 
       <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)] md:shrink-0 md:@xl:min-h-48 md:@xl:flex-1 md:@xl:shrink md:@xl:grid-rows-[minmax(0,1fr)] md:@4xl:contents">
-        <nav class="space-y-3 md:@xl:overflow-y-auto md:@4xl:col-start-1 md:@4xl:row-start-4">
+        <UScrollArea
+          as="nav"
+          class="max-md:overflow-visible @max-xl:overflow-visible md:@4xl:col-start-1 md:@4xl:row-start-4"
+          :ui="{ viewport: 'gap-3' }"
+        >
           <div
             v-for="g in groups"
             :key="g.label"
@@ -242,48 +246,54 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
           >
             No files yet.
           </p>
-        </nav>
+        </UScrollArea>
 
         <UCard
           v-if="!detail || current"
-          class="min-w-0 md:@xl:overflow-y-auto md:@4xl:col-start-2 md:@4xl:row-start-4"
+          class="min-w-0 md:@xl:flex md:@xl:flex-col md:@4xl:col-start-2 md:@4xl:row-start-4"
+          :ui="{ body: 'p-0 sm:p-0 md:@xl:flex md:@xl:min-h-0 md:@xl:flex-1 md:@xl:flex-col' }"
         >
-          <div
-            v-if="failed"
-            class="flex flex-wrap items-center gap-3"
+          <UScrollArea
+            tabindex="0"
+            class="p-4 sm:p-6 md:@xl:min-h-0 md:@xl:flex-1"
           >
-            <p class="text-sm text-error">
-              Couldn't load this job.
-            </p>
-            <UButton
-              label="Try again"
-              icon="i-lucide-rotate-ccw"
-              color="neutral"
-              variant="subtle"
-              size="sm"
-              @click="refresh()"
+            <div
+              v-if="failed"
+              class="flex flex-wrap items-center gap-3"
+            >
+              <p class="text-sm text-error">
+                Couldn't load this job.
+              </p>
+              <UButton
+                label="Try again"
+                icon="i-lucide-rotate-ccw"
+                color="neutral"
+                variant="subtle"
+                size="sm"
+                @click="refresh()"
+              />
+            </div>
+            <div
+              v-else-if="loading || !detail"
+              class="space-y-3"
+              aria-label="Loading"
+            >
+              <USkeleton class="h-5 w-1/3" />
+              <USkeleton class="h-4 w-full" />
+              <USkeleton class="h-4 w-5/6" />
+              <USkeleton class="h-4 w-2/3" />
+            </div>
+            <MarkdownDoc
+              v-else-if="file"
+              :text="file"
             />
-          </div>
-          <div
-            v-else-if="loading || !detail"
-            class="space-y-3"
-            aria-label="Loading"
-          >
-            <USkeleton class="h-5 w-1/3" />
-            <USkeleton class="h-4 w-full" />
-            <USkeleton class="h-4 w-5/6" />
-            <USkeleton class="h-4 w-2/3" />
-          </div>
-          <MarkdownDoc
-            v-else-if="file"
-            :text="file"
-          />
-          <p
-            v-else
-            class="text-sm text-dimmed"
-          >
-            {{ empty }}
-          </p>
+            <p
+              v-else
+              class="text-sm text-dimmed"
+            >
+              {{ empty }}
+            </p>
+          </UScrollArea>
         </UCard>
       </div>
 
@@ -294,15 +304,21 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
         <p class="mb-2 text-xs font-semibold text-dimmed uppercase">
           Live activity
         </p>
-        <ol class="space-y-1 overflow-auto font-mono text-xs md:@xl:min-h-0">
-          <li
-            v-for="(l, i) in lines"
-            :key="i"
-            :class="l.kind === 'error' ? 'text-error' : l.kind === 'tool' ? 'text-muted' : 'text-default'"
-          >
-            <span class="text-dimmed">{{ l.at }} {{ l.agent }}</span> {{ l.text }}
-          </li>
-        </ol>
+        <!-- Wrapped, not as="ol": the viewport div would sit between the list and its items. -->
+        <UScrollArea
+          tabindex="0"
+          class="md:@xl:min-h-0"
+        >
+          <ol class="space-y-1 font-mono text-xs">
+            <li
+              v-for="(l, i) in lines"
+              :key="i"
+              :class="l.kind === 'error' ? 'text-error' : l.kind === 'tool' ? 'text-muted' : 'text-default'"
+            >
+              <span class="text-dimmed">{{ l.at }} {{ l.agent }}</span> {{ l.text }}
+            </li>
+          </ol>
+        </UScrollArea>
         <p
           v-if="!lines.length"
           class="text-xs text-dimmed"

@@ -29,14 +29,15 @@ const open = ref(false)
 watch(selected, (id) => {
   if (id) open.value = true
 }, { immediate: true })
-const strip = ref<HTMLElement | null>(null)
-const panel = ref<HTMLElement | null>(null)
+// Both are UScrollArea instances; their elements are on $el.
+const strip = ref<{ $el: HTMLElement } | null>(null)
+const panel = ref<{ $el: HTMLElement } | null>(null)
 
 const close = () => navigateTo('/')
 
 function follow(id: string) {
   void nextTick(() => {
-    const card = strip.value?.querySelector(`[data-job="${CSS.escape(id)}"]`)
+    const card = strip.value?.$el.querySelector(`[data-job="${CSS.escape(id)}"]`)
     const behavior = matchMedia('(prefers-reduced-motion: no-preference)').matches ? 'smooth' : 'auto'
     card?.scrollIntoView({ inline: 'start', block: 'nearest', behavior })
   })
@@ -66,7 +67,7 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   // Nuxt UI overlays render in a portal; one still in the DOM gets this Esc.
   const overlayOpen = e.defaultPrevented || [...document.querySelectorAll('[role="dialog"], [role="menu"], [role="listbox"]')]
-    .some(el => !panel.value?.contains(el))
+    .some(el => !panel.value?.$el.contains(el))
   const active = document.activeElement
   const action = escapeAction({ overlayOpen, inTextField: inTextField(active), hasSelection: !!selected.value })
   if (action === 'blur') (active as HTMLElement).blur()
@@ -122,9 +123,12 @@ onUnmounted(() => {
       class="md:flex md:min-h-0 md:flex-1 md:gap-4"
       :class="open ? 'overflow-x-clip' : ''"
     >
-      <div
+      <UScrollArea
         ref="strip"
-        :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:overflow-x-auto md:p-1' : 'md:min-w-0 md:flex-1 md:overflow-y-auto'"
+        :orientation="open ? 'horizontal' : 'vertical'"
+        class="max-md:overflow-visible"
+        :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:p-1' : 'md:min-w-0 md:flex-1'"
+        :ui="{ viewport: 'md:h-full' }"
       >
         <div
           class="grid grid-cols-1 gap-3 md:h-full"
@@ -143,7 +147,11 @@ onUnmounted(() => {
               <span class="text-xs text-dimmed">{{ c.who }}</span>
               <span class="ms-auto text-xs text-muted">{{ c.jobs.length || '' }}</span>
             </header>
-            <div class="flex flex-col gap-2 md:-m-1 md:min-h-0 md:flex-1 md:overflow-y-auto md:p-1">
+            <!-- Where the gutter shows, the list widens into the column padding and keeps ring-2 room. -->
+            <UScrollArea
+              class="-m-1 p-1 max-md:overflow-visible md:min-h-0 md:flex-1 md:pointer-fine:-mx-2 md:pointer-fine:px-0.5"
+              :ui="{ viewport: 'gap-2' }"
+            >
               <JobCard
                 v-for="job in c.jobs"
                 :key="job.id"
@@ -159,10 +167,10 @@ onUnmounted(() => {
               >
                 —
               </p>
-            </div>
+            </UScrollArea>
           </section>
         </div>
-      </div>
+      </UScrollArea>
 
       <Transition
         enter-active-class="motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out"
@@ -171,17 +179,19 @@ onUnmounted(() => {
         leave-to-class="motion-safe:translate-x-full"
         @after-leave="open = false"
       >
-        <aside
+        <UScrollArea
           v-if="selected"
           ref="panel"
+          as="aside"
           aria-label="Job details"
-          class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 overflow-y-auto bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:bg-transparent md:p-1"
+          class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:bg-transparent md:p-1"
+          :ui="{ viewport: 'md:h-full' }"
         >
           <JobDetail
             :job-id="selected"
             @close="close"
           />
-        </aside>
+        </UScrollArea>
       </Transition>
     </div>
 
@@ -190,7 +200,14 @@ onUnmounted(() => {
       class="md:shrink-0"
       :ui="{ body: 'p-3 sm:p-3' }"
     >
-      <pre class="max-h-48 overflow-auto text-xs text-muted">{{ log.slice(-40).join('\n') }}</pre>
+      <!-- overflow-x-scroll: the log scrolls both ways, and its bar keeps its space. -->
+      <UScrollArea
+        as="pre"
+        tabindex="0"
+        class="max-h-48 overflow-x-scroll text-xs text-muted"
+      >
+        {{ log.slice(-40).join('\n') }}
+      </UScrollArea>
     </UCard>
   </UContainer>
 </template>

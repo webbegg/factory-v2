@@ -125,7 +125,14 @@ async function runInit() {
         <p class="mb-2 text-sm text-muted">
           The gate runs this script in every worktree. Review it and commit it.
         </p>
-        <pre class="overflow-x-auto rounded-md bg-elevated p-3 text-xs">{{ checksScript }}</pre>
+        <UScrollArea
+          as="pre"
+          orientation="horizontal"
+          tabindex="0"
+          class="rounded-md bg-elevated p-3 text-xs"
+        >
+          {{ checksScript }}
+        </UScrollArea>
       </template>
       <p
         v-else-if="loaded"

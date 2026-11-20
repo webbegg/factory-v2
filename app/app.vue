@@ -62,8 +62,13 @@ const links = computed(() => [
       </template>
     </UHeader>
 
-    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0 overflow-y-auto">
-      <NuxtPage />
+    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0">
+      <UScrollArea
+        class="h-full"
+        :ui="{ viewport: 'h-full' }"
+      >
+        <NuxtPage />
+      </UScrollArea>
     </UMain>
   </UApp>
 </template>
