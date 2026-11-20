@@ -1,5 +1,8 @@
 # Nuxt dev/build outputs
 .output
+# the running board's copy of .output (see snapshotBuild)
+/.board/
+/.board-test-*
 .data
 .nuxt
 .nitro

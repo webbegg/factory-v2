@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { cp, mkdir, mkdtemp } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import type { FactoryEvent } from './orchestrator'
@@ -58,9 +57,11 @@ function version(): string {
  * Copies the built board to a private directory and returns its server entry.
  * Nitro loads route chunks and serves client assets lazily from disk, so a
  * board served straight from .output breaks as soon as the package is rebuilt,
- * which happens whenever the factory works on itself.
+ * which happens whenever the factory works on itself. The copy stays inside
+ * the package (`.board/`) so module resolution still reaches its node_modules,
+ * where the agent SDK finds its native Claude binary.
  */
-export async function snapshotBuild(output: string, parent = tmpdir()): Promise<string> {
+export async function snapshotBuild(output: string, parent = join(dirname(output), '.board')): Promise<string> {
   await mkdir(parent, { recursive: true })
   const dir = await mkdtemp(join(parent, 'factory-board-'))
   await cp(output, dir, { recursive: true })
@@ -73,6 +74,7 @@ async function ui(repo: string, args: string[]) {
   const output = [resolve(here, '../../.output'), resolve(here, '../.output')].find(p => existsSync(join(p, 'server/index.mjs')))
   if (!output) throw new Error('the UI is not built: run `bun run build` in the factory-v2 package')
   const entry = await snapshotBuild(output)
+  process.once('exit', () => rmSync(dirname(dirname(entry)), { recursive: true, force: true }))
   const port = flag(args, '--port') ?? process.env.PORT ?? '4400'
   process.env.FACTORY_PROJECT = repo
   process.env.NITRO_HOST = '127.0.0.1'
