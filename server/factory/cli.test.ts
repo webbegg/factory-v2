@@ -1,5 +1,8 @@
-import { describe, expect, test } from 'bun:test'
-import { table } from './cli'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { main, table } from './cli'
 import { makeEnv, newJob } from './testing'
 
 describe('status table', () => {
@@ -13,5 +16,32 @@ describe('status table', () => {
       '002-longer  #12    needs-human  3      -   $1.25  1h30m',
       'total $1.75 (API-equivalent estimate, factory agents only)'
     ].join('\n'))
+  })
+})
+
+describe('version flag', () => {
+  let log: ReturnType<typeof spyOn<Console, 'log'>> | undefined
+  afterEach(() => log?.mockRestore())
+
+  async function decoyRepo() {
+    const repo = await mkdtemp(join(tmpdir(), 'factory-cli-'))
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'decoy', version: '9.9.9' }))
+    return repo
+  }
+
+  for (const flag of ['--version', '-v']) {
+    test(`${flag} prints the factory package version, not the project's`, async () => {
+      const pkg = JSON.parse(await readFile(resolve(import.meta.dir, '../../package.json'), 'utf8')) as { version: string }
+      const repo = await decoyRepo()
+      log = spyOn(console, 'log').mockImplementation(() => {})
+      await main([flag], repo)
+      expect(log.mock.calls).toEqual([[pkg.version]])
+    })
+  }
+
+  test('--help mentions --version', async () => {
+    log = spyOn(console, 'log').mockImplementation(() => {})
+    await main(['--help'], await decoyRepo())
+    expect(String(log.mock.calls[0]?.[0])).toContain('--version')
   })
 })
