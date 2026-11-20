@@ -1,3 +1,4 @@
+import type { UploadImage } from './attachments'
 import type { Job } from './types'
 
 export type PrState = 'OPEN' | 'CLOSED' | 'MERGED'
@@ -35,6 +36,8 @@ export interface GitHubPort {
   prClose(number: number): Promise<void>
   prMerge(number: number, method: 'merge' | 'squash' | 'rebase'): Promise<void>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
+  /** hosts images for issue bodies and comments; one URL per image, in order */
+  uploadImages(images: UploadImage[]): Promise<string[]>
 }
 
 /** Every git side effect the state machine needs. `cwd` is a worktree. */

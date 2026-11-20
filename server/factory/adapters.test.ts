@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec } from './exec'
@@ -50,6 +50,41 @@ describe('GhCli', () => {
       ['issue', 'edit', '7', '--add-label', 'a', '--remove-label', 'b,c'],
       ['pr', 'merge', '9', '--squash']
     ])
+  })
+
+  test('uploadImages posts each image from a temp file, never on the command line, and removes it', async () => {
+    const sent: Array<{ args: string[], bytes: number[] }> = []
+    let n = 0
+    const up = new GhCli(async (args) => {
+      if (args[1] === 'repos/{owner}/{repo}') return '42\n'
+      const file = args[args.indexOf('--input') + 1]!
+      sent.push({ args, bytes: [...await readFile(file)] })
+      return `https://github.com/user-attachments/assets/u${++n}\n`
+    })
+    const urls = await up.uploadImages([
+      { name: 'screenshot-1.png', type: 'image/png', bytes: new Uint8Array([0x89, 0x50, 0x4E, 0x47]) },
+      { name: 'screenshot-2.jpg', type: 'image/jpeg', bytes: new Uint8Array([0xFF, 0xD8, 0xFF]) }
+    ])
+    expect(urls).toEqual(['https://github.com/user-attachments/assets/u1', 'https://github.com/user-attachments/assets/u2'])
+    expect(sent.map(s => s.bytes)).toEqual([[0x89, 0x50, 0x4E, 0x47], [0xFF, 0xD8, 0xFF]])
+    const file = sent[0]!.args[7]!
+    expect(sent[0]!.args).toEqual(['api', '--method', 'POST',
+      'https://uploads.github.com/user-attachments/assets?content_type=image%2Fpng&name=screenshot-1.png&repository_id=42',
+      '--header', 'Content-Type: application/octet-stream', '--input', file, '--jq', '.url'])
+    expect(existsSync(file)).toBe(false)
+  })
+
+  test('uploadImages removes its temp files when gh fails', async () => {
+    let file = ''
+    const up = new GhCli(async (args) => {
+      if (args[1] === 'repos/{owner}/{repo}') return '42\n'
+      file = args[args.indexOf('--input') + 1]!
+      throw new Error('gh: not logged in')
+    })
+    expect(up.uploadImages([{ name: 'screenshot-1.png', type: 'image/png', bytes: new Uint8Array([1]) }])).rejects.toThrow('not logged in')
+    await Bun.sleep(10)
+    expect(file).not.toBe('')
+    expect(existsSync(file)).toBe(false)
   })
 })
 

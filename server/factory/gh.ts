@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { UploadImage } from './attachments'
 import { exec } from './exec'
 import { MARKER } from './issue'
 import type { GitHubPort, IssueData, PrState, ThreadKind } from './ports'
@@ -23,6 +27,7 @@ interface RawIssue {
 /** GitHubPort over the `gh` CLI, in the target project's checkout. */
 export class GhCli implements GitHubPort {
   private login: string | null = null
+  private repoId: string | null = null
 
   constructor(private gh: GhRunner) {}
 
@@ -100,5 +105,29 @@ export class GhCli implements GitHubPort {
   async createIssue(title: string, body: string, label: string): Promise<number> {
     const url = (await this.gh(['issue', 'create', '--label', label, '--title', title, '--body', body])).trim()
     return Number(url.split('/').pop())
+  }
+
+  /**
+   * Uploads through the endpoint `gh issue create --attach` uses, without posting
+   * anything: the image belongs to the repo, so it is visible to whoever can see
+   * the repo's issues. `gh api --input` needs a file (stdin gets no Content-Length);
+   * the bytes go through a temp file that is always removed.
+   */
+  async uploadImages(images: UploadImage[]): Promise<string[]> {
+    this.repoId ??= (await this.gh(['api', 'repos/{owner}/{repo}', '--jq', '.id'])).trim()
+    const dir = await mkdtemp(join(tmpdir(), 'factory-upload-'))
+    try {
+      const urls: string[] = []
+      for (const img of images) {
+        const file = join(dir, img.name)
+        await writeFile(file, img.bytes)
+        const query = new URLSearchParams({ content_type: img.type, name: img.name, repository_id: this.repoId })
+        urls.push((await this.gh(['api', '--method', 'POST', `https://uploads.github.com/user-attachments/assets?${query}`,
+          '--header', 'Content-Type: application/octet-stream', '--input', file, '--jq', '.url'])).trim())
+      }
+      return urls
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   }
 }
