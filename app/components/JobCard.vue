@@ -3,7 +3,6 @@ import type { Job } from '~/composables/useBoard'
 
 const props = defineProps<{ job: Job, error?: string, running?: boolean }>()
 
-const SHORT: Record<string, string> = { code: 'code', ux: 'ux', ui: 'ui', security: 'sec' }
 const num = computed(() => props.job.id.split('-')[0])
 const flag = computed(() => {
   if (props.error) return { label: 'stalled', color: 'error' as const }
@@ -12,7 +11,7 @@ const flag = computed(() => {
   if (props.job.stage === 'rejected') return { label: 'rejected', color: 'neutral' as const }
   return null
 })
-const reviewers = computed(() => Object.keys(props.job.agents?.reviewers ?? {}))
+const chips = computed(() => roundChips(props.job))
 </script>
 
 <template>
@@ -46,23 +45,15 @@ const reviewers = computed(() => Object.keys(props.job.agents?.reviewers ?? {}))
         {{ job.title }}
       </p>
       <div
-        v-if="job.round"
+        v-if="chips.length"
         class="flex flex-wrap items-center gap-1"
       >
         <span class="text-xs text-dimmed">R{{ job.round }}</span>
-        <UBadge
-          label="gate"
-          :color="verdictColor(job.gate)"
-          variant="soft"
-          size="sm"
-        />
-        <UBadge
-          v-for="r in reviewers"
-          :key="r"
-          :label="SHORT[r] ?? r"
-          :color="verdictColor(job.reviews[r])"
-          variant="soft"
-          size="sm"
+        <RoundChip
+          v-for="c in chips"
+          :key="c.key"
+          :label="c.label"
+          :state="c.state"
         />
       </div>
       <div class="flex items-center gap-2 text-xs text-muted">
