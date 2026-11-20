@@ -6,6 +6,7 @@ export default defineEventHandler(async () => {
     config: f.config,
     draining: f.orchestrator.isDraining,
     running: f.orchestrator.runningJobs(),
+    queued: f.orchestrator.queuedIssues(),
     errors: Object.fromEntries(f.orchestrator.errors),
     jobs: await f.store.list()
   }

@@ -6,7 +6,7 @@ export default defineEventHandler(async (event) => {
   const { run } = await readBody<{ run?: boolean }>(event)
   return guarded(async () => {
     const issue = await f.github.createIssue(title.trim(), text.trim(), f.config.labels.queue)
-    const job = run ? await f.orchestrator.runIssue(issue) : null
-    return { issue, job }
+    const { job, queued } = run ? await f.orchestrator.runIssue(issue) : { job: null, queued: false }
+    return { issue, job, queued }
   })
 })
