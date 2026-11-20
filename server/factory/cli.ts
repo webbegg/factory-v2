@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import type { FactoryEvent } from './orchestrator'
@@ -14,6 +14,7 @@ const USAGE = `factory — issue-to-PR software factory for the project in the c
   factory status                          jobs, stages, PRs and cost
   factory init                            scaffold .factory/, .gitignore lines and GitHub labels
   factory doctor                          check that this project can run the factory
+  factory --version | -v                  print the factory version
 `
 
 function elapsed(job: Job): string {
@@ -43,6 +44,12 @@ function printEvent(e: FactoryEvent) {
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
   return i >= 0 ? args[i + 1] : undefined
+}
+
+// The factory's own package.json, never the project's in repo / cwd
+function version(): string {
+  const here = dirname(fileURLToPath(import.meta.url))
+  return (JSON.parse(readFileSync(resolve(here, '../../package.json'), 'utf8')) as { version: string }).version
 }
 
 async function ui(repo: string, args: string[]) {
@@ -88,6 +95,8 @@ export async function main(argv: string[], repo = process.cwd()): Promise<void> 
   const [cmd = 'ui', ...args] = argv
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') {
     console.log(USAGE)
+  } else if (cmd === '--version' || cmd === '-v') {
+    console.log(version())
   } else if (cmd === 'ui' || cmd.startsWith('--')) {
     await ui(repo, cmd.startsWith('--') ? argv : args)
   } else if (cmd === 'run') {

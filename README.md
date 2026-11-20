@@ -44,6 +44,7 @@ bun ~/code/factory-v2/bin/factory.ts          # board on http://localhost:4400
 | `factory run [issue]` | headless: drain the queue (or one issue) and exit |
 | `factory status` | jobs, stages, PRs, cost |
 | `factory init` / `factory doctor` | set up / check a project |
+| `factory --version` / `-v` | print the factory version |
 
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until
 you trust it. Commit `.factory/config.json`, `.factory/checks.sh` and any
