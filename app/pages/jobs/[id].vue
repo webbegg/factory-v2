@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Job } from '~/composables/useBoard'
+import type { PendingImage } from '~~/server/factory/attachments'
 
 interface JobFile { path: string, first: string, tone: 'good' | 'warn' | 'stop' | null }
 interface Detail { job: Job, files: JobFile[], error: string | null, running: boolean }
@@ -7,6 +8,7 @@ interface Detail { job: Job, files: JobFile[], error: string | null, running: bo
 const route = useRoute()
 const id = computed(() => String(route.params.id))
 const { state, activity, act } = useBoard()
+const { withImages } = useAttachments()
 
 const { data, refresh } = await useFetch<Detail>(() => `/api/jobs/${id.value}`)
 const selected = ref<string | null>(null)
@@ -37,9 +39,16 @@ const toneColor = (t: JobFile['tone']) => t === 'good' ? 'bg-success' : t === 'w
 
 const lines = computed(() => activity.value[id.value] ?? [])
 const text = ref('')
+const images = ref<PendingImage[]>([])
+const sending = ref<'feedback' | 'reject' | 'answer' | null>(null)
 async function send(action: 'feedback' | 'reject' | 'answer') {
-  if (await act(`/api/jobs/${id.value}/${action}`, { text: text.value })) {
+  sending.value = action
+  const body = await withImages(text.value, images.value)
+  const ok = body !== null && await act(`/api/jobs/${id.value}/${action}`, { text: body })
+  sending.value = null
+  if (ok) {
     text.value = ''
+    images.value = []
     await refresh()
   }
 }
@@ -129,22 +138,26 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               Intake asked the author a question on the issue. Answer it here (posted as you) to send the job back to intake, or reject it.
             </template>
           </p>
-          <UTextarea
-            v-model="text"
-            :rows="4"
-            class="w-full"
-            :placeholder="job.stage === 'needs-human' ? 'What should change?' : 'Your answer'"
-          />
+          <ImageAttachments v-model="images">
+            <UTextarea
+              v-model="text"
+              :rows="4"
+              class="w-full"
+              :placeholder="job.stage === 'needs-human' ? 'What should change?' : 'Your answer'"
+            />
+          </ImageAttachments>
           <div class="flex gap-2">
             <UButton
               v-if="job.stage === 'needs-human'"
               label="Send feedback"
+              :loading="sending === 'feedback'"
               :disabled="!text.trim()"
               @click="send('feedback')"
             />
             <UButton
               v-else
               label="Answer"
+              :loading="sending === 'answer'"
               :disabled="!text.trim()"
               @click="send('answer')"
             />
@@ -152,6 +165,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               label="Reject"
               color="error"
               variant="subtle"
+              :loading="sending === 'reject'"
               :disabled="!text.trim()"
               @click="send('reject')"
             />
