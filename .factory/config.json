@@ -1,0 +1,47 @@
+{
+  "concurrency": 1,
+  "maxRounds": 3,
+  "baseBranch": "master",
+  "mergeMethod": "merge",
+  "labels": {
+    "queue": "factory",
+    "needsInfo": "factory:needs-info",
+    "needsHuman": "factory:needs-human"
+  },
+  "models": {
+    "intake": "fable",
+    "spec": "opus",
+    "builder": "opus",
+    "approver": "opus"
+  },
+  "routing": {
+    "low": {
+      "code": "haiku"
+    },
+    "medium": {
+      "code": "sonnet"
+    },
+    "high": {
+      "code": "sonnet"
+    }
+  },
+  "surfaceReviewers": {
+    "ui": {
+      "ux": "sonnet",
+      "ui": "haiku"
+    },
+    "security": {
+      "security": "opus"
+    }
+  },
+  "protectedPaths": [
+    ".factory/checks.sh",
+    ".factory/config.json",
+    ".github/*",
+    "server/factory/agents/runner.ts"
+  ],
+  "ports": {
+    "base": 5100,
+    "step": 10
+  }
+}
