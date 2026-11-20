@@ -25,18 +25,6 @@ type ServerEvent
     | { type: 'log', message: string }
     | { type: 'idle' | 'hello' | 'ping' }
 
-export const COLUMNS: Array<{ label: string, who: string, stages: Stage[], human?: boolean }> = [
-  { label: 'Intake', who: 'intake', stages: ['intake', 'needs-info'] },
-  { label: 'Spec', who: 'spec writer', stages: ['spec'] },
-  { label: 'Build', who: 'builder · gate', stages: ['build', 'gate'] },
-  { label: 'Review', who: 'routed reviewers', stages: ['review'] },
-  { label: 'Approve', who: 'approver · merge', stages: ['approve', 'merging'] },
-  { label: 'Needs you', who: 'you', stages: ['needs-human'], human: true },
-  { label: 'Done', who: 'merged · rejected', stages: ['merged', 'rejected'] }
-]
-
-export const LIVE_STAGES = new Set<Stage>(['intake', 'spec', 'build', 'gate', 'review', 'approve', 'merging'])
-
 const state = ref<FactoryState | null>(null)
 const activity = ref<Record<string, ActivityLine[]>>({})
 const log = ref<string[]>([])
