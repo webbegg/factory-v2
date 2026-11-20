@@ -18,7 +18,8 @@ const projectName = computed(() => state.value?.project.split('/').pop() ?? '…
 const links = computed(() => [
   { label: 'Board', to: '/', icon: 'i-lucide-kanban' },
   { label: 'Inbox', to: '/inbox', icon: 'i-lucide-inbox', badge: waiting.value || undefined },
-  { label: 'New request', to: '/new', icon: 'i-lucide-plus' }
+  { label: 'New request', to: '/new', icon: 'i-lucide-plus' },
+  { label: 'Settings', to: '/settings', icon: 'i-lucide-settings' }
 ])
 </script>
 
