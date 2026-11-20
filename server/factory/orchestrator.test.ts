@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { isWritable } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import type { AgentName } from './agents/prompts'
+import { Refused } from './machine'
 import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
 import { makeEnv } from './testing'
@@ -53,6 +54,25 @@ const happy: Partial<Record<AgentName, Script>> = {
   },
   'reviewer-code': t => write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n'),
   'approver': t => write(t, 'decision.md', 'APPROVE\n\n## Why\nok\n')
+}
+
+function latch() {
+  let resolve = () => {}
+  const promise = new Promise<undefined>((r) => {
+    resolve = () => r(undefined)
+  })
+  return { promise, resolve }
+}
+
+/** happy, except the first job's intake waits until `release` resolves */
+function heldIntake(release: Promise<unknown>): Partial<Record<AgentName, Script>> {
+  return {
+    ...happy,
+    intake: async (t, n) => {
+      if (t.jobId.startsWith('001-')) await release
+      return happy.intake!(t, n)
+    }
+  }
 }
 
 async function factory(scripts: Partial<Record<AgentName, Script>>, overrides = {}) {
@@ -311,5 +331,95 @@ describe('orchestrator', () => {
     expect((await env.store.list())[0]!.stage).toBe('merged')
     expect(runner.tasks.filter(t => t.agent === 'builder').at(-1)!.message).toContain('The user gave feedback: read feedback-1.md')
     expect(existsSync(join(env.paths.jobs, '001-issue-1', 'feedback-1.md'))).toBe(true)
+  })
+
+  test('a single issue run while every slot is busy queues, then starts when the slot frees', async () => {
+    const hold = latch()
+    const { env, runner, orch } = await factory({ ...heldIntake(hold.promise) }, { concurrency: 1 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2 })
+    expect((await orch.runIssue(1)).job?.issue).toBe(1)
+    expect(await orch.runIssue(2)).toEqual({ job: null, queued: true })
+    expect((await env.store.list()).map(j => j.issue)).toEqual([1])
+    expect(orch.queuedIssues()).toEqual([2])
+    hold.resolve()
+    await orch.idle()
+    expect((await env.store.list()).map(j => [j.issue, j.stage])).toEqual([[1, 'merged'], [2, 'merged']])
+    expect(orch.isDraining).toBe(false)
+    expect(runner.maxActive).toBeLessThanOrEqual(1)
+    expect(orch.queuedIssues()).toEqual([])
+  })
+
+  test('queued issues start first in, first out, and only once', async () => {
+    const hold = latch()
+    const { env, runner, orch } = await factory({ ...heldIntake(hold.promise) }, { concurrency: 1 })
+    for (const n of [1, 2, 3]) env.github.addIssue({ number: n })
+    await orch.runIssue(1)
+    await orch.runIssue(3)
+    await orch.runIssue(2)
+    expect(await orch.runIssue(3)).toEqual({ job: null, queued: true })
+    expect(orch.queuedIssues()).toEqual([3, 2])
+    hold.resolve()
+    await orch.idle()
+    const jobs = await env.store.list()
+    expect(jobs.map(j => j.issue)).toEqual([1, 3, 2])
+    const intakes = runner.tasks.filter(t => t.agent === 'intake').map(t => t.jobId)
+    expect(intakes).toEqual(jobs.map(j => j.id))
+  })
+
+  test('closed, unlabeled and already-running issues are refused at once and not queued', async () => {
+    const hold = latch()
+    const { env, orch } = await factory({ ...heldIntake(hold.promise) }, { concurrency: 1 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2, state: 'CLOSED' })
+    env.github.addIssue({ number: 3, labels: ['bug'] })
+    const first = await orch.runIssue(1)
+    await expect(orch.runIssue(2)).rejects.toThrow(new Refused('issue #2 is closed'))
+    await expect(orch.runIssue(3)).rejects.toThrow(new Refused('issue #3 isn\'t labeled factory'))
+    expect(await orch.runIssue(1)).toEqual(first)
+    expect(orch.queuedIssues()).toEqual([])
+    hold.resolve()
+    await orch.idle()
+    expect((await env.store.list()).map(j => j.issue)).toEqual([1])
+  })
+
+  test('a queued issue closed or unlabeled before its turn is dropped with a log line', async () => {
+    const hold = latch()
+    const { env, orch } = await factory({ ...heldIntake(hold.promise) }, { concurrency: 1 })
+    for (const n of [1, 2, 3, 4]) env.github.addIssue({ number: n })
+    const events: FactoryEvent[] = []
+    orch.on('event', (e: FactoryEvent) => events.push(e))
+    for (const n of [1, 2, 3, 4]) await orch.runIssue(n)
+    env.github.issues.get(2)!.state = 'CLOSED'
+    env.github.issues.get(3)!.labels = []
+    hold.resolve()
+    await orch.idle()
+    expect((await env.store.list()).map(j => j.issue)).toEqual([1, 4])
+    const logs = events.flatMap(e => e.type === 'log' ? [e.message] : [])
+    expect(logs).toContain('queue: dropped issue #2: issue #2 is closed')
+    expect(logs).toContain('queue: dropped issue #3: issue #3 isn\'t labeled factory')
+    // issue 1 passes through the list: a free slot is taken inside the tick, not by runIssue
+    expect(events.filter(e => e.type === 'queued')).toEqual([
+      { type: 'queued', issues: [1] },
+      { type: 'queued', issues: [] },
+      { type: 'queued', issues: [2] },
+      { type: 'queued', issues: [2, 3] },
+      { type: 'queued', issues: [2, 3, 4] },
+      { type: 'queued', issues: [3, 4] },
+      { type: 'queued', issues: [4] },
+      { type: 'queued', issues: [] }
+    ])
+  })
+
+  test('a queued issue takes the free slot ahead of the drain', async () => {
+    const hold = latch()
+    const { env, runner, orch } = await factory({ ...heldIntake(hold.promise) }, { concurrency: 1 })
+    for (const n of [1, 2, 3, 9]) env.github.addIssue({ number: n })
+    await orch.drain()
+    expect(await orch.runIssue(9)).toEqual({ job: null, queued: true })
+    hold.resolve()
+    await orch.idle()
+    expect((await env.store.list()).map(j => [j.issue, j.stage])).toEqual([[1, 'merged'], [9, 'merged'], [2, 'merged'], [3, 'merged']])
+    expect(runner.maxActive).toBeLessThanOrEqual(1)
   })
 })
