@@ -34,7 +34,9 @@ view; this file is for whoever changes the code.
   inside the board's panel at `/?job=<id>`; `/jobs/:id` only redirects there.
   Layout: the shell (`app/app.vue`) gives pages a viewport-tall scroll
   region under the header, and pages that want fixed headers with scrolling
-  panels fill it with `h-full` / `min-h-0` and scroll their own panels.
+  panels fill it with `h-full` / `min-h-0` and scroll their own panels;
+  in a wide panel JobDetail shows Live activity as a right-hand column that
+  scrolls its own lines, and stacks it below the document when narrower.
 
 ## Rules
 
