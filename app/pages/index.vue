@@ -15,8 +15,12 @@ const issueToRun = ref<number | undefined>()
 
 async function runOne() {
   if (!issueToRun.value) return
-  const res = await act<{ job: { id: string } }>('/api/run', { issue: issueToRun.value })
-  if (res) await navigateTo({ path: '/', query: { job: res.job.id } })
+  const issue = issueToRun.value
+  const res = await act<{ job: { id: string } | null, queued: boolean }>('/api/run', { issue })
+  if (!res) return
+  if (res.job) return navigateTo({ path: '/', query: { job: res.job.id } })
+  useToast().add({ title: `Issue #${issue} queued`, description: 'It starts when a slot frees up', color: 'info' })
+  issueToRun.value = undefined
 }
 
 const selected = computed(() => selectedJobId(route.query.job, state.value?.jobs.map(j => j.id)))
@@ -87,6 +91,12 @@ onUnmounted(() => {
       <p class="text-sm text-muted">
         {{ running }} running · {{ state?.config.concurrency ?? '–' }} at a time ·
         ${{ total.toFixed(2) }} API-equivalent estimate
+      </p>
+      <p
+        v-if="state?.queued.length"
+        class="text-sm text-muted"
+      >
+        Queued: {{ state.queued.map(n => `#${n}`).join(', ') }} · waiting for a free slot
       </p>
       <form
         class="ms-auto flex items-center gap-2"
