@@ -89,9 +89,9 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 <template>
   <div
     v-if="job"
-    class="@container space-y-4"
+    class="@container space-y-4 md:flex md:h-full md:flex-col"
   >
-    <div class="flex flex-wrap items-center gap-3">
+    <div class="flex flex-wrap items-center gap-3 md:shrink-0">
       <div class="min-w-0">
         <p class="font-mono text-xs text-muted">
           {{ job.id }} · {{ job.stage }}<span v-if="job.round"> · round {{ job.round }}/{{ job.roundLimit }}</span>
@@ -146,13 +146,17 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 
     <UAlert
       v-if="detail?.error"
+      class="md:shrink-0"
       color="error"
       variant="subtle"
       title="Stalled"
       :description="detail.error"
     />
 
-    <UCard v-if="job.stage === 'needs-human' || job.stage === 'needs-info'">
+    <UCard
+      v-if="job.stage === 'needs-human' || job.stage === 'needs-info'"
+      class="md:shrink-0"
+    >
       <div class="space-y-3">
         <p class="text-sm text-highlighted">
           <template v-if="job.stage === 'needs-human'">
@@ -204,8 +208,8 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
       </div>
     </UCard>
 
-    <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)]">
-      <nav class="space-y-3">
+    <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)] md:shrink-0 md:@xl:min-h-48 md:@xl:flex-1 md:@xl:shrink md:@xl:grid-rows-[minmax(0,1fr)]">
+      <nav class="space-y-3 md:@xl:overflow-y-auto">
         <div
           v-for="g in groups"
           :key="g.label"
@@ -238,7 +242,10 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
         </p>
       </nav>
 
-      <UCard v-if="!detail || current">
+      <UCard
+        v-if="!detail || current"
+        class="min-w-0 md:@xl:overflow-y-auto"
+      >
         <div
           v-if="failed"
           class="flex flex-wrap items-center gap-3"
@@ -278,11 +285,14 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
       </UCard>
     </div>
 
-    <UCard :ui="{ body: 'p-3 sm:p-3' }">
+    <UCard
+      class="md:shrink-0 md:@xl:flex md:@xl:min-h-32 md:@xl:shrink md:@xl:basis-1/3 md:@xl:flex-col"
+      :ui="{ body: 'p-3 sm:p-3 md:@xl:flex md:@xl:min-h-0 md:@xl:flex-1 md:@xl:flex-col' }"
+    >
       <p class="mb-2 text-xs font-semibold text-dimmed uppercase">
         Live activity
       </p>
-      <ol class="max-h-80 space-y-1 overflow-auto font-mono text-xs">
+      <ol class="space-y-1 overflow-auto font-mono text-xs md:@xl:min-h-0">
         <li
           v-for="(l, i) in lines"
           :key="i"

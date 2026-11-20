@@ -86,8 +86,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <UContainer class="max-w-none py-6 space-y-4">
-    <div class="flex flex-wrap items-center gap-3">
+  <UContainer class="max-w-none py-6 space-y-4 md:flex md:h-full md:flex-col">
+    <div class="flex flex-wrap items-center gap-3 md:shrink-0">
       <p class="text-sm text-muted">
         {{ running }} running · {{ state?.config.concurrency ?? '–' }} at a time ·
         ${{ total.toFixed(2) }} API-equivalent estimate
@@ -119,16 +119,16 @@ onUnmounted(() => {
     </div>
 
     <div
-      class="md:flex md:items-start md:gap-4"
+      class="md:flex md:min-h-0 md:flex-1 md:gap-4"
       :class="open ? 'overflow-x-clip' : ''"
     >
       <div
         ref="strip"
-        :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:overflow-x-auto md:p-1' : ''"
+        :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:overflow-x-auto md:p-1' : 'md:min-w-0 md:flex-1 md:overflow-y-auto'"
       >
         <div
-          class="grid grid-cols-1 gap-3"
-          :class="open ? 'md:flex' : 'md:grid-cols-4 xl:grid-cols-7'"
+          class="grid grid-cols-1 gap-3 md:h-full"
+          :class="open ? 'md:flex' : 'md:auto-rows-[minmax(10rem,1fr)] md:grid-cols-4 xl:grid-cols-7'"
         >
           <section
             v-for="c in columns"
@@ -143,21 +143,23 @@ onUnmounted(() => {
               <span class="text-xs text-dimmed">{{ c.who }}</span>
               <span class="ms-auto text-xs text-muted">{{ c.jobs.length || '' }}</span>
             </header>
-            <JobCard
-              v-for="job in c.jobs"
-              :key="job.id"
-              :data-job="job.id"
-              :job="job"
-              :error="state?.errors[job.id]"
-              :running="state?.running.includes(job.id)"
-              :selected="job.id === selected"
-            />
-            <p
-              v-if="!c.jobs.length"
-              class="px-1 text-xs text-dimmed"
-            >
-              —
-            </p>
+            <div class="flex flex-col gap-2 md:-m-1 md:min-h-0 md:flex-1 md:overflow-y-auto md:p-1">
+              <JobCard
+                v-for="job in c.jobs"
+                :key="job.id"
+                :data-job="job.id"
+                :job="job"
+                :error="state?.errors[job.id]"
+                :running="state?.running.includes(job.id)"
+                :selected="job.id === selected"
+              />
+              <p
+                v-if="!c.jobs.length"
+                class="px-1 text-xs text-dimmed"
+              >
+                —
+              </p>
+            </div>
           </section>
         </div>
       </div>
@@ -173,7 +175,7 @@ onUnmounted(() => {
           v-if="selected"
           ref="panel"
           aria-label="Job details"
-          class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 overflow-y-auto bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:overflow-visible md:bg-transparent md:p-1"
+          class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 overflow-y-auto bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:bg-transparent md:p-1"
         >
           <JobDetail
             :job-id="selected"
@@ -185,6 +187,7 @@ onUnmounted(() => {
 
     <UCard
       v-if="log.length"
+      class="md:shrink-0"
       :ui="{ body: 'p-3 sm:p-3' }"
     >
       <pre class="max-h-48 overflow-auto text-xs text-muted">{{ log.slice(-40).join('\n') }}</pre>
