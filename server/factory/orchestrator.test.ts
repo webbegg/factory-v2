@@ -9,7 +9,7 @@ import { Orchestrator } from './orchestrator'
 import { makeEnv } from './testing'
 import type { TestEnv } from './testing'
 
-/** returns an error message to fail the agent, anything else to succeed */
+/** returns an error message to fail the agent, `{ reply }` to answer with text, anything else to succeed */
 type Script = (task: AgentTask, call: number) => unknown
 
 /** Plays each agent by writing the file it would write. */
@@ -30,7 +30,8 @@ class FakeRunner implements AgentRunner {
     try {
       const error: unknown = await this.scripts[task.agent]?.(task, n)
       if (typeof error === 'string') return { ok: false, reply: '', sessionId: null, costUsd: 0, error }
-      return { ok: true, reply: 'done', sessionId: task.resume ?? `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25 }
+      const reply = (error as { reply?: string } | undefined)?.reply ?? 'done'
+      return { ok: true, reply, sessionId: task.resume ?? `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25 }
     } finally {
       this.active -= 1
     }
@@ -80,6 +81,38 @@ describe('isWritable', () => {
 })
 
 describe('orchestrator', () => {
+  test('every agent is told the exact path of its report', async () => {
+    const { env, runner, orch } = await factory({ ...happy })
+    env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await orch.drain()
+    await orch.idle()
+    const review = runner.tasks.find(t => t.agent === 'reviewer-code')!
+    expect(review.message).toContain(`Write your report to ${join(review.jobDir, 'round-1/review-code.md')}.`)
+    const build = runner.tasks.find(t => t.agent === 'builder')!
+    expect(build.message).toContain(`Write your report to ${join(build.jobDir, 'build.md')}.`)
+  })
+
+  test('a report answered as the final reply instead of written is saved for the agent', async () => {
+    const report = 'VERDICT: PASS\n\n## Summary\n- fine'
+    const { env, orch } = await factory({ ...happy, 'reviewer-code': () => ({ reply: report }) })
+    env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('merged')
+    expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe(`${report}\n`)
+  })
+
+  test('a final reply that is not a report is not saved, and the job stalls', async () => {
+    const { env, orch } = await factory({ ...happy, 'reviewer-code': () => ({ reply: 'Looks good to me!' }) })
+    env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('review')
+    expect(orch.errors.get(job.id)).toContain('missing reviews from: code')
+  })
+
   test('drains one issue from intake to a merged PR', async () => {
     const { env, runner, orch } = await factory({ ...happy })
     env.github.addIssue({ number: 1, title: 'Add subtract' })

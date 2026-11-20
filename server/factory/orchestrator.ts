@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
@@ -44,6 +44,24 @@ const TOOLS: Record<AgentName, string[]> = {
   'reviewer-ux': ['Read', 'Grep', 'Glob', 'Bash', 'Write'],
   'reviewer-ui': ['Read', 'Grep', 'Glob', 'Bash', 'Write'],
   'approver': ['Read', 'Grep', 'Glob', 'Bash', 'Write']
+}
+
+const REPORT_FILE: Partial<Record<AgentName, string>> = {
+  'intake': 'intake.md',
+  'spec-writer': 'spec.md',
+  'builder': 'build.md',
+  'approver': 'decision.md'
+}
+
+/** First line of a valid report, per agent; the spec has no verdict line, so it has no fallback. */
+const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
+  'intake': /^DECISION: (ACCEPT|NEEDS-INFO|REJECT)$/,
+  'builder': /^STATUS: (READY|BLOCKED)$/,
+  'approver': /^(APPROVE|ESCALATE)$/,
+  'reviewer-code': /^VERDICT: (PASS|CHANGES)$/,
+  'reviewer-security': /^VERDICT: (PASS|CHANGES)$/,
+  'reviewer-ux': /^VERDICT: (PASS|CHANGES)$/,
+  'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
 }
 
 /**
@@ -319,13 +337,29 @@ export class Orchestrator extends EventEmitter {
     return model
   }
 
+  /** The one file each agent reports in. */
+  private report(job: Job, agent: AgentName): string {
+    const file = REPORT_FILE[agent] ?? `round-${job.round}/review-${agent.slice('reviewer-'.length)}.md`
+    return join(this.o.paths.jobs, job.id, file)
+  }
+
   private writable(job: Job, agent: AgentName): string[] {
-    const dir = join(this.o.paths.jobs, job.id)
-    if (agent === 'intake') return [`${dir}/intake.md`]
-    if (agent === 'spec-writer') return [`${dir}/spec.md`]
-    if (agent === 'builder') return [`${job.worktree}/`, `${dir}/build.md`]
-    if (agent === 'approver') return [`${dir}/decision.md`]
-    return [`${dir}/round-${job.round}/review-${agent.slice('reviewer-'.length)}.md`]
+    const report = this.report(job, agent)
+    return agent === 'builder' ? [`${job.worktree}/`, report] : [report]
+  }
+
+  /**
+   * Agents sometimes end with their report as the final reply instead of
+   * writing it. When the reply is a well-formed report, keep it rather than
+   * stalling the job over a missing file.
+   */
+  private async keepRepliedReport(job: Job, agent: AgentName, reply: string) {
+    const report = this.report(job, agent)
+    const head = REPORT_HEAD[agent]
+    if (existsSync(report) || !head?.test(firstLine(reply))) return
+    await mkdir(dirname(report), { recursive: true })
+    await writeFile(report, `${reply.trimEnd()}\n`)
+    this.send({ type: 'log', message: `${job.id}: ${agent} replied with its report instead of writing it; saved it` })
   }
 
   private async agent(job: Job, agent: AgentName, signal: AbortSignal, purpose = '',
@@ -333,7 +367,8 @@ export class Orchestrator extends EventEmitter {
     const { store, paths } = this.o
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
-    const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose].filter(Boolean).join(' ')
+    const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
+      `Write your report to ${this.report(job, agent)}.`].filter(Boolean).join(' ')
     const resume = agent === 'builder' ? job.sessions.builder : undefined
     const task: AgentTask = {
       agent,
@@ -365,6 +400,7 @@ export class Orchestrator extends EventEmitter {
     })
     if (signal.aborted) throw new Error(`${agent} cancelled`)
     if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
+    await this.keepRepliedReport(job, agent, result.reply)
     this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
     return result
   }
