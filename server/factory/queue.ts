@@ -96,21 +96,42 @@ export class Queue {
     return [...running, ...slotted, ...others]
   }
 
-  /** A new job for an open, labeled issue, starting at intake. */
-  async create(number: number): Promise<Job> {
-    const { store, ports, config, paths } = this.o
-    const jobs = await store.list()
+  /** Refuses an issue that could never get a job, whatever the free slots. */
+  async admit(number: number): Promise<void> {
+    this.refuseExisting(await this.o.store.list(), number)
+    await this.openLabeled(number)
+  }
+
+  /** Slots not held by a job; negative when the limit was lowered below the running count. */
+  async freeSlots(): Promise<number> {
+    return this.o.config.concurrency - (await this.o.store.list()).filter(holdsSlot).length
+  }
+
+  private refuseExisting(jobs: Job[], number: number) {
     const existing = jobs.find(j => j.issue === number)
     if (existing) throw new Refused(`issue #${number} already has job ${existing.id} (${existing.stage})`)
-    const busy = jobs.filter(holdsSlot).map(j => j.id)
-    if (busy.length >= config.concurrency) {
-      throw new Refused(`concurrency ${config.concurrency} reached; running: ${busy.join(', ')}`)
-    }
+  }
+
+  private async openLabeled(number: number) {
+    const { ports, config } = this.o
     const issue = await ports.github.fetchIssue(number)
     if (issue.state !== 'OPEN') throw new Refused(`issue #${number} is ${issue.state.toLowerCase()}`)
     if (!issue.labels.includes(config.labels.queue)) {
       throw new Refused(`issue #${number} isn't labeled ${config.labels.queue}`)
     }
+    return issue
+  }
+
+  /** A new job for an open, labeled issue, starting at intake. */
+  async create(number: number): Promise<Job> {
+    const { store, ports, config, paths } = this.o
+    const jobs = await store.list()
+    this.refuseExisting(jobs, number)
+    const busy = jobs.filter(holdsSlot).map(j => j.id)
+    if (busy.length >= config.concurrency) {
+      throw new Refused(`concurrency ${config.concurrency} reached; running: ${busy.join(', ')}`)
+    }
+    const issue = await this.openLabeled(number)
     const next = Math.max(0, ...jobs.map(j => Number.parseInt(j.id, 10)).filter(Number.isFinite)) + 1
     const id = `${String(next).padStart(3, '0')}-${slugify(issue.title)}`
     const job: Job = {
