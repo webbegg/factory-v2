@@ -27,7 +27,7 @@ const question = computed(() => {
         />
         <span class="font-mono text-xs text-muted">{{ job.id }} · #{{ job.issue }}</span>
         <UButton
-          :to="`/jobs/${job.id}`"
+          :to="{ path: '/', query: { job: job.id } }"
           label="Open"
           trailing-icon="i-lucide-arrow-right"
           size="sm"
