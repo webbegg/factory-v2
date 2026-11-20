@@ -14,6 +14,7 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
                        reviewers (code; + ux/ui on UI; + security) ─CHANGES→ build
                          ▼ all PASS
                        approver ─ APPROVE  → sync with base, gate again, gh pr merge
+                                │            └ conflict with base → build while rounds remain
                                 └ ESCALATE → PR ready, you decide (merge, feedback, reject)
 ```
 
