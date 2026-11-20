@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { main, table } from './cli'
+import { main, snapshotBuild, table } from './cli'
 import { makeEnv, newJob } from './testing'
 
 describe('status table', () => {
@@ -43,5 +43,21 @@ describe('version flag', () => {
     log = spyOn(console, 'log').mockImplementation(() => {})
     await main(['--help'], await decoyRepo())
     expect(String(log.mock.calls[0]?.[0])).toContain('--version')
+  })
+})
+
+describe('snapshotBuild', () => {
+  test('serves a private copy, so rebuilding the package does not break a running board', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'factory-build-'))
+    const output = join(root, '.output')
+    await mkdir(join(output, 'server/chunks'), { recursive: true })
+    await writeFile(join(output, 'server/index.mjs'), 'entry')
+    await writeFile(join(output, 'server/chunks/a.mjs'), 'chunk-a')
+    const entry = await snapshotBuild(output, join(root, 'runtime'))
+    expect(entry.startsWith(join(root, 'runtime'))).toBe(true)
+    expect(await readFile(entry, 'utf8')).toBe('entry')
+    // a rebuild replaces the package's chunks; the snapshot keeps the ones its entry imports
+    await rm(output, { recursive: true })
+    expect(await readFile(join(entry, '../chunks/a.mjs'), 'utf8')).toBe('chunk-a')
   })
 })

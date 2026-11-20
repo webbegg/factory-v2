@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { cp, mkdir, mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { FactoryEvent } from './orchestrator'
 import { acquireLock, createFactory } from './service'
 import { doctor, init } from './setup'
@@ -52,12 +54,25 @@ function version(): string {
   return (JSON.parse(readFileSync(resolve(here, '../../package.json'), 'utf8')) as { version: string }).version
 }
 
+/**
+ * Copies the built board to a private directory and returns its server entry.
+ * Nitro loads route chunks and serves client assets lazily from disk, so a
+ * board served straight from .output breaks as soon as the package is rebuilt,
+ * which happens whenever the factory works on itself.
+ */
+export async function snapshotBuild(output: string, parent = tmpdir()): Promise<string> {
+  await mkdir(parent, { recursive: true })
+  const dir = await mkdtemp(join(parent, 'factory-board-'))
+  await cp(output, dir, { recursive: true })
+  return join(dir, 'server/index.mjs')
+}
+
 async function ui(repo: string, args: string[]) {
   const here = dirname(fileURLToPath(import.meta.url))
   // bin/ and .output/ sit at the package root; this file is in server/factory/ when run from source
-  const candidates = [resolve(here, '../../.output/server/index.mjs'), resolve(here, '../.output/server/index.mjs')]
-  const entry = candidates.find(p => existsSync(p))
-  if (!entry) throw new Error('the UI is not built: run `bun run build` in the factory-v2 package')
+  const output = [resolve(here, '../../.output'), resolve(here, '../.output')].find(p => existsSync(join(p, 'server/index.mjs')))
+  if (!output) throw new Error('the UI is not built: run `bun run build` in the factory-v2 package')
+  const entry = await snapshotBuild(output)
   const port = flag(args, '--port') ?? process.env.PORT ?? '4400'
   process.env.FACTORY_PROJECT = repo
   process.env.NITRO_HOST = '127.0.0.1'

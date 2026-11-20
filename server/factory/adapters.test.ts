@@ -73,7 +73,7 @@ describe('GitCli against a real repo', () => {
     await sh(repo, 'commit', '-qm', 'init')
     await sh(repo, 'push', '-q', 'origin', 'main')
     git = new GitCli(repo)
-  })
+  }, 30_000) // a dozen real git processes; slow machines and busy gates exceed the 5s default
 
   test('worktree lifecycle, cleanliness, ahead count, push and remote head', async () => {
     await git.fetch(repo, 'main')
@@ -96,7 +96,7 @@ describe('GitCli against a real repo', () => {
     await git.deleteBranch('factory/001-x')
     await git.deleteRemoteBranch('factory/001-x')
     expect(existsSync(wt)).toBe(false)
-  })
+  }, 30_000)
 
   test('exec failures name the command and its stderr', async () => {
     expect(exec('git', ['rev-parse', 'nope'], { cwd: repo })).rejects.toThrow('`git rev-parse nope` failed')
