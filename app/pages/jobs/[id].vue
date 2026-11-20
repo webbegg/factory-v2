@@ -42,6 +42,8 @@ const text = ref('')
 const images = ref<PendingImage[]>([])
 const sending = ref<'feedback' | 'reject' | 'answer' | null>(null)
 async function send(action: 'feedback' | 'reject' | 'answer') {
+  // One action per job at a time: a second click would upload and send again.
+  if (sending.value) return
   sending.value = action
   const body = await withImages(text.value, images.value)
   const ok = body !== null && await act(`/api/jobs/${id.value}/${action}`, { text: body })
@@ -151,14 +153,14 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               v-if="job.stage === 'needs-human'"
               label="Send feedback"
               :loading="sending === 'feedback'"
-              :disabled="!text.trim()"
+              :disabled="!text.trim() || !!sending"
               @click="send('feedback')"
             />
             <UButton
               v-else
               label="Answer"
               :loading="sending === 'answer'"
-              :disabled="!text.trim()"
+              :disabled="!text.trim() || !!sending"
               @click="send('answer')"
             />
             <UButton
@@ -166,7 +168,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               color="error"
               variant="subtle"
               :loading="sending === 'reject'"
-              :disabled="!text.trim()"
+              :disabled="!text.trim() || !!sending"
               @click="send('reject')"
             />
           </div>
