@@ -11,13 +11,17 @@ view; this file is for whoever changes the code.
   `store.ts` (job.json + per-step markdown), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts`, `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
-  `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share).
+  `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
+  `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
+  the board imports it too).
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
   `useFactory()` so they work before `.factory/config.json` exists.
   `server/middleware/local-only.ts` rejects foreign Host headers and non-JSON
-  writes: keep every new write route a JSON POST.
+  writes: keep every new write route a JSON POST. `server/api/uploads.post.ts`
+  takes images as base64 JSON and returns GitHub URLs, which the board appends
+  to the text it then sends to the existing routes.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
   `useBoard()` in `app/composables/useBoard.ts` (state + SSE + `act()` for
   POSTs that toast refusals). The UI imports engine types from
