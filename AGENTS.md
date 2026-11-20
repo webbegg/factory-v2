@@ -9,7 +9,9 @@ view; this file is for whoever changes the code.
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk),
   `store.ts` (job.json + per-step markdown), `queue.ts`, `gate.ts`,
-  `route.ts`, `merge.ts`, `orchestrator.ts`, `agents/` (prompts and the
+  `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
+  queued by `runIssue` while every slot is busy, started by `fill()` ahead of
+  the drain, sent as the `queued` event), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
   `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
@@ -24,7 +26,8 @@ view; this file is for whoever changes the code.
   to the text it then sends to the existing routes.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
   `useBoard()` in `app/composables/useBoard.ts` (state + SSE + `act()` for
-  POSTs that toast refusals). The UI imports engine types from
+  POSTs that toast refusals); `state.queued` comes from `/api/state` and the
+  `queued` event. The UI imports engine types from
   `~~/server/factory/types`. `COLUMNS` and the board's selection helpers
   (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
   `app/utils/board.ts`. Job details render in `app/components/JobDetail.vue`

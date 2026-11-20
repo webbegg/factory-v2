@@ -62,6 +62,11 @@ you trust it. Commit `.factory/config.json`, `.factory/checks.sh` and any
 gitignored. The board's Settings page edits `.factory/config.json` and applies
 it to the running factory without a restart; the change still needs committing.
 
+Running one issue (**Run issue** on the board, or **Run it now** on New request)
+while every slot is busy queues it: the board shows it as queued, and it starts on
+its own when a slot frees up, ahead of what the drain would pick. The queue lives
+in the running factory and is not kept across a restart.
+
 ## Guardrails
 
 - Only issues labeled `factory` run; labels need triage access. Issue text
