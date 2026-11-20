@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Job } from '~/composables/useBoard'
 
-const props = defineProps<{ job: Job, error?: string, running?: boolean }>()
+const props = defineProps<{ job: Job, error?: string, running?: boolean, selected?: boolean }>()
 
 const num = computed(() => props.job.id.split('-')[0])
 const flag = computed(() => {
@@ -16,12 +16,12 @@ const chips = computed(() => roundChips(props.job))
 
 <template>
   <NuxtLink
-    :to="`/jobs/${job.id}`"
+    :to="{ path: '/', query: { job: job.id } }"
     class="block"
   >
     <UCard
       :ui="{ body: 'p-3 sm:p-3 space-y-2' }"
-      :class="[job.stage === 'needs-human' ? 'ring-2 ring-warning' : '', job.stage === 'merged' || job.stage === 'rejected' ? 'opacity-70' : '']"
+      :class="[selected ? 'ring-2 ring-primary' : job.stage === 'needs-human' ? 'ring-2 ring-warning' : '', job.stage === 'merged' || job.stage === 'rejected' ? 'opacity-70' : '']"
     >
       <div class="flex items-center gap-2 text-xs text-muted">
         <span

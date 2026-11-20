@@ -25,7 +25,10 @@ view; this file is for whoever changes the code.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
   `useBoard()` in `app/composables/useBoard.ts` (state + SSE + `act()` for
   POSTs that toast refusals). The UI imports engine types from
-  `~~/server/factory/types`.
+  `~~/server/factory/types`. `COLUMNS` and the board's selection helpers
+  (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
+  `app/utils/board.ts`. Job details render in `app/components/JobDetail.vue`
+  inside the board's panel at `/?job=<id>`; `/jobs/:id` only redirects there.
 
 ## Rules
 

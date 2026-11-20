@@ -29,7 +29,7 @@ const stalled = computed(() => (state.value?.jobs ?? []).filter(j => state.value
         />
         <span class="text-sm text-highlighted">{{ job.title }}</span>
         <UButton
-          :to="`/jobs/${job.id}`"
+          :to="{ path: '/', query: { job: job.id } }"
           label="Open"
           size="sm"
           class="ms-auto"

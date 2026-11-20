@@ -17,7 +17,7 @@ async function submit() {
   if (!res) return
   images.value = []
   useToast().add({ title: `Filed issue #${res.issue}`, color: 'success' })
-  await navigateTo(res.job ? `/jobs/${res.job.id}` : '/')
+  await navigateTo(res.job ? { path: '/', query: { job: res.job.id } } : '/')
 }
 </script>
 
