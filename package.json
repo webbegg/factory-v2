@@ -2,6 +2,9 @@
   "name": "factory-v2",
   "private": true,
   "type": "module",
+  "bin": {
+    "factory": "bin/factory.ts"
+  },
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",

@@ -1,0 +1,45 @@
+import type { H3Event } from 'h3'
+import { acquireLock, createFactory } from '../factory/service'
+import type { Factory } from '../factory/service'
+
+let instance: Promise<Factory> | null = null
+
+/** The project's factory, created once per server process with its orchestrator lock. */
+export function useFactory(): Promise<Factory> {
+  instance ??= (async () => {
+    const repo = process.env.FACTORY_PROJECT || process.cwd()
+    const factory = await createFactory(repo)
+    const release = await acquireLock(factory.paths)
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+      process.once(signal, () => {
+        void release().finally(() => process.exit(0))
+      })
+    }
+    process.once('exit', () => {
+      void release()
+    })
+    return factory
+  })()
+  return instance
+}
+
+/** Body field `text`, required and non-empty. */
+export async function readText(event: H3Event, field = 'text'): Promise<string> {
+  const body = await readBody<Record<string, unknown>>(event)
+  const value = body?.[field]
+  if (typeof value !== 'string' || !value.trim()) {
+    throw createError({ statusCode: 400, statusMessage: `${field} is required` })
+  }
+  return value
+}
+
+/** Runs an engine call and turns its refusals into a 409 with the reason. */
+export async function guarded<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    const e = err as Error
+    if ('statusCode' in e) throw e
+    throw createError({ statusCode: 409, statusMessage: e.message.split('\n')[0], data: { message: e.message } })
+  }
+}

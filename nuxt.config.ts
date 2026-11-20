@@ -5,17 +5,24 @@ export default defineNuxtConfig({
     '@nuxt/ui'
   ],
 
+  // A local single-page board served by the `factory` CLI.
+  ssr: false,
+
   devtools: {
     enabled: true
   },
 
   css: ['~/assets/css/main.css'],
 
-  routeRules: {
-    '/': { prerender: true }
+  devServer: {
+    host: '127.0.0.1'
   },
 
   compatibilityDate: '2026-06-30',
+
+  nitro: {
+    preset: 'bun'
+  },
 
   eslint: {
     config: {
