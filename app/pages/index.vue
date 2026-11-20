@@ -162,6 +162,7 @@ onUnmounted(() => {
         <aside
           v-if="selected"
           ref="panel"
+          aria-label="Job details"
           class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 overflow-y-auto bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:overflow-visible md:bg-transparent md:p-1"
         >
           <JobDetail

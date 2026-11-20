@@ -11,9 +11,10 @@ const { state, activity, act } = useBoard()
 const { withImages } = useAttachments()
 
 // Not awaited: opening the panel must never hold up the board.
-const { data, refresh } = useFetch<Detail>(() => `/api/jobs/${props.jobId}`)
+const { data, error, refresh } = useFetch<Detail>(() => `/api/jobs/${props.jobId}`)
 // The previous job's response stays in `data` until the new one arrives.
 const detail = computed(() => data.value?.job.id === props.jobId ? data.value : null)
+const failed = computed(() => !detail.value && !!error.value)
 const selected = ref<string | null>(null)
 const file = ref<string | null>(null)
 const loading = ref(false)
@@ -88,7 +89,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 <template>
   <div
     v-if="job"
-    class="space-y-4"
+    class="@container space-y-4"
   >
     <div class="flex flex-wrap items-center gap-3">
       <div class="min-w-0">
@@ -96,9 +97,9 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
           {{ job.id }} · {{ job.stage }}<span v-if="job.round"> · round {{ job.round }}/{{ job.roundLimit }}</span>
           · ${{ job.costUsd.toFixed(2) }} · {{ elapsed(job) }}
         </p>
-        <h1 class="text-lg font-semibold text-highlighted">
+        <h2 class="text-lg font-semibold break-words text-highlighted">
           {{ job.title }}
-        </h1>
+        </h2>
       </div>
       <div class="ms-auto flex flex-wrap items-center gap-2">
         <UButton
@@ -203,7 +204,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
       </div>
     </UCard>
 
-    <div class="grid gap-4 sm:grid-cols-[11rem_minmax(0,1fr)]">
+    <div class="grid gap-4 @xl:grid-cols-[11rem_minmax(0,1fr)]">
       <nav class="space-y-3">
         <div
           v-for="g in groups"
@@ -219,6 +220,7 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
             type="button"
             class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-start text-sm hover:bg-elevated"
             :class="current === f.path ? 'bg-elevated text-highlighted' : 'text-muted'"
+            :aria-current="current === f.path ? 'true' : undefined"
             @click="selected = f.path"
           >
             <span
@@ -238,7 +240,23 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
 
       <UCard v-if="!detail || current">
         <div
-          v-if="loading || !detail"
+          v-if="failed"
+          class="flex flex-wrap items-center gap-3"
+        >
+          <p class="text-sm text-error">
+            Couldn't load this job.
+          </p>
+          <UButton
+            label="Try again"
+            icon="i-lucide-rotate-ccw"
+            color="neutral"
+            variant="subtle"
+            size="sm"
+            @click="refresh()"
+          />
+        </div>
+        <div
+          v-else-if="loading || !detail"
           class="space-y-3"
           aria-label="Loading"
         >
