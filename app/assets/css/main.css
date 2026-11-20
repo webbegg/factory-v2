@@ -18,7 +18,7 @@
 }
 
 /* Agent files rendered by MarkdownDoc */
-.md { @apply text-sm leading-relaxed text-default; }
+.md { @apply text-sm leading-relaxed text-default; overflow-wrap: anywhere; }
 .md > * + * { @apply mt-3; }
 .md h1 { @apply text-lg font-semibold text-highlighted; }
 .md h2 { @apply text-base font-semibold text-highlighted; }
