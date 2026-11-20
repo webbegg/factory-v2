@@ -177,6 +177,35 @@ describe('orchestrator', () => {
     expect(runner.tasks[3]!.message).toContain('The gate failed: read round-1/checks.md and checks.log')
   })
 
+  test('a conflict with the base at merge goes back to the builder, then merges', async () => {
+    const { env, runner, orch } = await factory({
+      ...happy,
+      builder: async (t, n) => {
+        if (n === 2) env.git.mergeResult = { ok: true, output: '' }
+        await write(t, 'build.md', 'STATUS: READY\n')
+      }
+    })
+    env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    expect((await env.store.list())[0]!.stage).toBe('merged')
+    expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver', 'builder', 'reviewer-code', 'approver'])
+    expect(runner.tasks[5]!.message).toContain('The branch conflicts with origin/main: read round-1/sync.md, merge origin/main, resolve the conflicts, push, and update build.md for round 2.')
+  })
+
+  test('a conflict with the base on the last round escalates without another build', async () => {
+    const { env, runner, orch } = await factory({ ...happy }, { maxRounds: 1 })
+    env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('needs-human')
+    expect(await env.store.read(job.id, 'decision.md')).toContain('The branch conflicts with')
+    expect(runner.agents().filter(a => a === 'builder')).toHaveLength(1)
+  })
+
   test('NEEDS-INFO parks the job and the drain goes idle', async () => {
     const { env, runner, orch } = await factory({
       ...happy,

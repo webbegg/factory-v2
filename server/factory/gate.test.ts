@@ -5,6 +5,7 @@ import { globToRegExp } from './gate'
 import { route } from './route'
 import { makeEnv, seed } from './testing'
 import type { TestEnv } from './testing'
+import type { Job } from './types'
 
 const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
@@ -101,9 +102,9 @@ describe('route', () => {
 })
 
 describe('merge', () => {
-  async function approved(env: TestEnv) {
+  async function approved(env: TestEnv, fields: Partial<Job> = {}) {
     await withChecks(env, 'true')
-    const job = await seed(env, { stage: 'approve', round: 1, pr: 9, agents: AGENTS }, {
+    const job = await seed(env, { stage: 'approve', round: 1, pr: 9, agents: AGENTS, ...fields }, {
       'decision.md': 'APPROVE\n\n## Why\nfine\n'
     })
     await mkdir(job.worktree, { recursive: true })
@@ -123,13 +124,25 @@ describe('merge', () => {
     expect(await env.store.read(ID, 'round-1/merge-checks.md')).toStartWith('GATE: PASS')
   })
 
-  test('a conflict with the base escalates to a human', async () => {
+  test('a conflict with the base goes back to the builder while rounds remain', async () => {
     const env = await makeEnv()
     await approved(env)
     env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
     const job = await env.merger.merge(ID)
+    expect(job).toMatchObject({ stage: 'build', round: 2, roundReason: 'sync' })
+    expect(await env.store.read(ID, 'round-1/sync.md')).toContain('CONFLICT (content): a.txt')
+    expect(await env.store.read(ID, 'decision.md')).toStartWith('APPROVE')
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+  })
+
+  test('a conflict with the base on the last round escalates to a human', async () => {
+    const env = await makeEnv()
+    await approved(env, { roundLimit: 1 })
+    env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
+    const job = await env.merger.merge(ID)
     expect(job.stage).toBe('needs-human')
     expect(await env.store.read(ID, 'decision.md')).toContain('The branch conflicts with main:\n\n```\nCONFLICT (content): a.txt\n```')
+    expect(await env.store.read(ID, 'round-1/sync.md')).toContain('CONFLICT (content): a.txt')
     expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
   })
 
