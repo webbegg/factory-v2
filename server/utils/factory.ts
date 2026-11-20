@@ -1,14 +1,19 @@
+import { resolve } from 'node:path'
 import type { H3Event } from 'h3'
 import { acquireLock, createFactory } from '../factory/service'
 import type { Factory } from '../factory/service'
 
 let instance: Promise<Factory> | null = null
 
+/** The project the server runs on; usable before `.factory/` exists. */
+export function projectDir(): string {
+  return resolve(process.env.FACTORY_PROJECT || process.cwd())
+}
+
 /** The project's factory, created once per server process with its orchestrator lock. */
 export function useFactory(): Promise<Factory> {
   instance ??= (async () => {
-    const repo = process.env.FACTORY_PROJECT || process.cwd()
-    const factory = await createFactory(repo)
+    const factory = await createFactory(projectDir())
     const release = await acquireLock(factory.paths)
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.once(signal, () => {
@@ -19,7 +24,11 @@ export function useFactory(): Promise<Factory> {
       void release()
     })
     return factory
-  })()
+  })().catch((err: unknown) => {
+    // Forget a failed start (e.g. no config yet) so the board works after Initialize.
+    instance = null
+    throw err
+  })
   return instance
 }
 

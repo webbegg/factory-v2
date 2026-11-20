@@ -88,7 +88,8 @@ export function useBoard() {
   }
 
   function connect() {
-    if (source || import.meta.server) return
+    // A stream refused before init stays closed; Initialize reopens it.
+    if ((source && source.readyState !== EventSource.CLOSED) || import.meta.server) return
     source = new EventSource('/api/events')
     source.onopen = () => {
       connected.value = true
