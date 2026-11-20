@@ -23,6 +23,7 @@ const links = computed(() => [
   { label: 'Board', to: '/', icon: 'i-lucide-kanban' },
   { label: 'Inbox', to: '/inbox', icon: 'i-lucide-inbox', badge: waiting.value || undefined },
   { label: 'New request', to: '/new', icon: 'i-lucide-plus' },
+  { label: 'Settings', to: '/settings', icon: 'i-lucide-settings' },
   { label: 'Setup', to: '/setup', icon: 'i-lucide-wrench', badge: failing.value ? { label: String(failing.value), color: 'warning' as const } : undefined }
 ])
 </script>
