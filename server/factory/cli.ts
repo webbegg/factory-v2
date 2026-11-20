@@ -92,8 +92,10 @@ async function headless(repo: string, issue?: string) {
   const release = await acquireLock(f.paths)
   try {
     f.orchestrator.on('event', printEvent)
-    if (issue) await f.orchestrator.runIssue(Number(issue))
-    else await f.orchestrator.drain()
+    if (issue) {
+      const { queued } = await f.orchestrator.runIssue(Number(issue))
+      if (queued) console.log(`issue #${issue} is queued: every slot is busy, and the queue ends with this process, so it won't start here`)
+    } else await f.orchestrator.drain()
     await f.orchestrator.idle()
     console.log(`\n${table(await f.store.list())}`)
     const waiting = (await f.store.list()).filter(j => j.stage === 'needs-human' || j.stage === 'needs-info')

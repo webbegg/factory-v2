@@ -5,7 +5,7 @@ export default defineEventHandler(async (event) => {
   if (body?.issue !== undefined) {
     const issue = Number(body.issue)
     if (!Number.isInteger(issue) || issue < 1) throw createError({ statusCode: 400, statusMessage: 'issue must be a number' })
-    return guarded(async () => ({ job: await f.orchestrator.runIssue(issue) }))
+    return guarded(() => f.orchestrator.runIssue(issue))
   }
   await guarded(() => f.orchestrator.drain())
   return { draining: true }

@@ -7,6 +7,7 @@ export interface FactoryState {
   config: FactoryConfig
   draining: boolean
   running: string[]
+  queued: number[]
   errors: Record<string, string>
   jobs: Job[]
 }
@@ -23,6 +24,7 @@ type ServerEvent
     | { type: 'agent', jobId: string, agent: string, event: { kind: string, text: string } }
     | { type: 'error', jobId: string, message: string }
     | { type: 'log', message: string }
+    | { type: 'queued', issues: number[] }
     | { type: 'idle' | 'hello' | 'ping' }
 
 const state = ref<FactoryState | null>(null)
@@ -70,6 +72,8 @@ export function useBoard() {
       push(log.value, `${new Date().toLocaleTimeString()}  ${e.jobId}: ${e.message}`)
       toast.add({ title: `${e.jobId} stalled`, description: e.message, color: 'error' })
       refreshSoon()
+    } else if (e.type === 'queued') {
+      if (state.value) state.value.queued = e.issues
     } else if (e.type === 'idle') {
       refreshSoon()
     }

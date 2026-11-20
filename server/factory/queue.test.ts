@@ -93,4 +93,28 @@ describe('create', () => {
     await expect(env.queue.create(1)).rejects.toThrow('issue #1 already has job 001-issue-1 (intake)')
     await expect(env.queue.create(4)).rejects.toThrow('concurrency 1 reached; running: 001-issue-1')
   })
+
+  test('admit refuses what create would, except a full factory, and creates nothing', async () => {
+    const env = await makeEnv({ concurrency: 1 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2, state: 'CLOSED' })
+    env.github.addIssue({ number: 3, labels: ['bug'] })
+    env.github.addIssue({ number: 4 })
+    await expect(env.queue.admit(2)).rejects.toThrow('issue #2 is closed')
+    await expect(env.queue.admit(3)).rejects.toThrow('issue #3 isn\'t labeled factory')
+    await env.queue.create(1)
+    await expect(env.queue.admit(1)).rejects.toThrow('issue #1 already has job 001-issue-1 (intake)')
+    await env.queue.admit(4)
+    expect((await env.store.list()).map(j => j.issue)).toEqual([1])
+  })
+
+  test('free slots count only the jobs that hold one', async () => {
+    const env = await makeEnv({ concurrency: 3 })
+    expect(await env.queue.freeSlots()).toBe(3)
+    await seed(env, { id: '001-a', issue: 1, stage: 'build', round: 1 })
+    await seed(env, { id: '002-b', issue: 2, stage: 'needs-human' })
+    await seed(env, { id: '003-c', issue: 3, stage: 'merged' })
+    await seed(env, { id: '004-d', issue: 4, stage: 'intake' })
+    expect(await env.queue.freeSlots()).toBe(1)
+  })
 })

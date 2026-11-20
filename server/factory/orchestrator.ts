@@ -33,6 +33,7 @@ export type FactoryEvent
     | { type: 'agent', jobId: string, agent: AgentName, event: AgentEvent }
     | { type: 'error', jobId: string, message: string }
     | { type: 'log', message: string }
+    | { type: 'queued', issues: number[] }
     | { type: 'idle' }
 
 const TOOLS: Record<AgentName, string[]> = {
@@ -77,6 +78,8 @@ export class Orchestrator extends EventEmitter {
   private ticking: Promise<void> = Promise.resolve()
   /** last failure per job; the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
+  /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
+  private pending: number[] = []
 
   constructor(private o: OrchestratorOptions) {
     super()
@@ -88,6 +91,10 @@ export class Orchestrator extends EventEmitter {
 
   runningJobs(): string[] {
     return [...this.active.keys()]
+  }
+
+  queuedIssues(): number[] {
+    return [...this.pending]
   }
 
   private send(e: FactoryEvent) {
@@ -107,12 +114,22 @@ export class Orchestrator extends EventEmitter {
     this.draining = false
   }
 
-  /** Run (or resume) the job for one issue now. */
-  async runIssue(issue: number): Promise<Job> {
+  /** Run (or resume) the job for one issue, or queue it until a slot is free. */
+  async runIssue(issue: number): Promise<{ job: Job | null, queued: boolean }> {
     const existing = (await this.o.store.list()).find(j => j.issue === issue)
-    const job = existing ?? await this.o.queue.create(issue)
-    this.start(job.id)
-    return job
+    if (existing) {
+      this.start(existing.id)
+      return { job: existing, queued: false }
+    }
+    await this.o.queue.admit(issue)
+    if (!this.pending.includes(issue)) {
+      this.pending.push(issue)
+      this.sendQueued()
+    }
+    // starting goes through the serialized tick so earlier queued issues keep their turn
+    await this.tick()
+    const job = (await this.o.store.list()).find(j => j.issue === issue) ?? null
+    return { job, queued: !job }
   }
 
   async feedback(id: string, text: string): Promise<Job> {
@@ -163,6 +180,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async fill() {
+    await this.startPending()
     if (!this.draining) return
     for (const row of await this.o.queue.rows()) {
       if (row.action === 'new') {
@@ -172,6 +190,38 @@ export class Orchestrator extends EventEmitter {
         if (row.stage === 'needs-info') await this.o.machine.advance(row.job, 'intake')
         this.start(row.job)
       }
+    }
+  }
+
+  private sendQueued() {
+    this.send({ type: 'queued', issues: this.queuedIssues() })
+  }
+
+  /** Queued issues get free slots before the drain, whether or not it runs. */
+  private async startPending() {
+    const { queue } = this.o
+    while (this.pending.length && await queue.freeSlots() > 0) {
+      const issue = this.pending[0]!
+      try {
+        await queue.admit(issue)
+      } catch (err) {
+        if (!(err instanceof Refused)) throw err
+        this.pending.shift()
+        this.sendQueued()
+        this.send({ type: 'log', message: `queue: dropped issue #${issue}: ${err.message}` })
+        continue
+      }
+      let job: Job
+      try {
+        job = await queue.create(issue)
+      } catch (err) {
+        // a slot taken outside the tick (feedback, retry) since we counted; wait for the next one
+        if (err instanceof Refused) return
+        throw err
+      }
+      this.pending.shift()
+      this.sendQueued()
+      this.start(job.id)
     }
   }
 

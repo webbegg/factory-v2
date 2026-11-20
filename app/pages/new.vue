@@ -12,11 +12,11 @@ const busy = ref(false)
 async function submit() {
   busy.value = true
   const body = await withImages(text.value, images.value)
-  const res = body === null ? null : await act<{ issue: number, job: { id: string } | null }>('/api/issues', { title: title.value, text: body, run: runNow.value })
+  const res = body === null ? null : await act<{ issue: number, job: { id: string } | null, queued: boolean }>('/api/issues', { title: title.value, text: body, run: runNow.value })
   busy.value = false
   if (!res) return
   images.value = []
-  useToast().add({ title: `Filed issue #${res.issue}`, color: 'success' })
+  useToast().add({ title: res.queued ? `Filed issue #${res.issue} and queued it` : `Filed issue #${res.issue}`, color: 'success' })
   await navigateTo(res.job ? { path: '/', query: { job: res.job.id } } : '/')
 }
 </script>
