@@ -103,7 +103,7 @@ async function runInit() {
             :label="STATE[checkState(c)].label"
             :color="STATE[checkState(c)].color"
             variant="subtle"
-            class="shrink-0"
+            class="w-16 shrink-0 justify-center"
           />
           <div class="min-w-0">
             <p class="text-sm text-highlighted">
@@ -125,7 +125,7 @@ async function runInit() {
         <p class="mb-2 text-sm text-muted">
           The gate runs this script in every worktree. Review it and commit it.
         </p>
-        <pre class="overflow-x-auto rounded bg-elevated p-3 text-xs">{{ checksScript }}</pre>
+        <pre class="overflow-x-auto rounded-md bg-elevated p-3 text-xs">{{ checksScript }}</pre>
       </template>
       <p
         v-else-if="loaded"
@@ -133,6 +133,16 @@ async function runInit() {
       >
         .factory/checks.sh does not exist yet. Initialize creates it.
       </p>
+      <div
+        v-else
+        class="flex items-center gap-2 text-sm text-muted"
+      >
+        <UIcon
+          name="i-lucide-loader-circle"
+          class="animate-spin"
+        />
+        Running doctor…
+      </div>
     </UCard>
   </UContainer>
 </template>
