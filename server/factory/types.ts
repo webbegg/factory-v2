@@ -8,6 +8,9 @@ export type Risk = 'low' | 'medium' | 'high'
 export type Verdict = 'PASS' | 'CHANGES' | 'pending' | 'invalid'
 export type GateVerdict = 'PASS' | 'FAIL'
 
+/** `spec` (first round), `gate` (last gate failed), `review` (reviews want changes), or `feedback:<file>` */
+export type RoundReason = 'spec' | 'gate' | 'review' | `feedback:${string}`
+
 export interface IntakeInfo {
   decision: string | null
   rescoped: boolean
@@ -36,8 +39,13 @@ export interface Job {
   agents: JobAgents | null
   gate: GateVerdict | null
   reviews: Record<string, Verdict>
+  /** why the current round exists: what the builder must address */
+  roundReason: RoundReason | null
   /** agent name → Agent SDK session id, so a later round can resume it */
   sessions: Record<string, string>
+  /** session id → that session's latest cumulative cost (a resumed session reports its running total) */
+  costs: Record<string, number>
+  /** sum of `costs` */
   costUsd: number
   started: string
   ended: string | null

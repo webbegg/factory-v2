@@ -129,7 +129,9 @@ export class Queue {
       agents: null,
       gate: null,
       reviews: {},
+      roundReason: null,
       sessions: {},
+      costs: {},
       costUsd: 0,
       started: ports.now(),
       ended: null

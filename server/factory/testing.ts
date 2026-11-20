@@ -1,5 +1,5 @@
 // Test doubles and a scratch environment for the factory engine.
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultConfig } from './config'
@@ -96,6 +96,7 @@ export class FakeGit implements GitPort {
   }
 
   async addWorktree(path: string, branch: string, from: string) {
+    await mkdir(path, { recursive: true })
     this.calls.push(['addWorktree', path, branch, from])
   }
 
@@ -195,7 +196,9 @@ export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {
     agents: null,
     gate: null,
     reviews: {},
+    roundReason: null,
     sessions: {},
+    costs: {},
     costUsd: 0,
     started: '2026-11-20T11:00:00Z',
     ended: null,

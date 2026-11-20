@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { body, firstLine, header, section } from './markdown'
 import type { Ports } from './ports'
 import type { JobStore } from './store'
-import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Risk, Stage, Verdict } from './types'
+import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Risk, RoundReason, Stage, Verdict } from './types'
 
 /**
  * Legal stage moves. Any unfinished job may also move to `merged` once its PR
@@ -117,7 +117,7 @@ export class Machine {
       const k = (await this.store.files(id, /^feedback-\d+\.md$/)).length + 1
       file = `feedback-${k}.md`
       await this.store.write(id, file, `# Feedback ${k}\n\nFrom @${operator} after the job escalated.\n\n${text.trim()}\n`)
-      return this.transition(await this.sync(raw), 'build', 'feedback')
+      return this.transition(await this.sync(raw), 'build', 'feedback', file)
     })
     return { job, file }
   }
@@ -139,8 +139,9 @@ export class Machine {
       `concurrency ${this.config.concurrency} reached; running: ${busy.join(', ')}`)
   }
 
-  private async nextRound(job: Job) {
+  private async nextRound(job: Job, reason: RoundReason) {
     job.round += 1
+    job.roundReason = reason
     job.gate = null
     job.reviews = {}
     await mkdir(this.store.path(job.id, this.roundRel(job)), { recursive: true })
@@ -161,7 +162,7 @@ export class Machine {
     return last
   }
 
-  private async transition(input: Job, stage: Stage, via: Via): Promise<Job> {
+  private async transition(input: Job, stage: Stage, via: Via, feedbackFile?: string): Promise<Job> {
     const job = { ...input }
     const old = job.stage
     const { github, git, issues } = this.ports
@@ -194,7 +195,7 @@ export class Machine {
       await github.editLabels('issue', job.issue, { remove: [labels.needsInfo] })
     } else if (old === 'spec') {
       require(await this.read(job, 'spec.md') !== null, 'spec.md doesn\'t exist')
-      await this.nextRound(job)
+      await this.nextRound(job, 'spec')
     } else if (old === 'build' && stage === 'gate') {
       const status = firstLine(await this.read(job, 'build.md') ?? '')
       require(status === 'STATUS: READY', `build.md starts with '${status}', not STATUS: READY`)
@@ -231,7 +232,7 @@ export class Machine {
           await this.escalate(job, `The gate failed in round ${job.round}, the last allowed round. `
           + `See round-${job.round}/checks.md.`)
         } else {
-          await this.nextRound(job)
+          await this.nextRound(job, 'gate')
         }
       }
     } else if (old === 'review') {
@@ -248,7 +249,7 @@ export class Machine {
           await this.escalate(job, `Review rounds exhausted. Outstanding CHANGES in round-${job.round}/ `
           + `from: ${changes.join(', ')}.`)
         } else {
-          await this.nextRound(job)
+          await this.nextRound(job, 'review')
         }
       }
     } else if (old === 'approve') {
@@ -256,9 +257,9 @@ export class Machine {
       const line = firstLine(await this.read(job, 'decision.md') ?? '')
       require(line === want, `decision.md starts with '${line}', not ${want}`)
     } else if (old === 'needs-human') { // → build
-      require(via === 'feedback', 'use feedback to send a job back to the builder')
+      require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
       job.roundLimit = job.round + this.config.maxRounds
-      await this.nextRound(job)
+      await this.nextRound(job, `feedback:${feedbackFile}`)
       await github.editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     }
 
