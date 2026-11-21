@@ -75,14 +75,15 @@ onMounted(() => toBottom())
           class="space-y-1"
           :class="g.sender === 'factory' ? 'border-s-2 border-default ps-2' : ''"
         >
-          <p class="flex items-baseline gap-1 text-xs text-dimmed">
+          <p class="flex items-baseline gap-1 text-xs text-muted">
             <span class="font-semibold text-muted">{{ g.sender }}</span>
             <template v-if="g.jobId">
               ·
               <ULink
                 v-if="known.has(g.jobId)"
                 :to="{ path: '/', query: { job: g.jobId } }"
-                class="min-w-0 truncate font-mono"
+                :active="false"
+                class="min-w-0 truncate font-mono underline decoration-dotted underline-offset-2"
                 :title="g.jobId"
               >
                 {{ g.jobId }}
@@ -126,7 +127,7 @@ onMounted(() => toBottom())
       <!-- Inside the region so it frames something to focus while idle. -->
       <p
         v-if="!feed.length"
-        class="text-xs text-dimmed"
+        class="text-xs text-muted"
       >
         Activity appears here while this board is open.
       </p>
