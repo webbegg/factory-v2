@@ -123,21 +123,22 @@ onUnmounted(() => {
       class="md:flex md:min-h-0 md:flex-1 md:gap-4"
       :class="open ? 'overflow-x-clip' : ''"
     >
+      <!-- The viewport is a size container, so columns cap at the board height (100cqh) while their rows fit content. -->
       <UScrollArea
         ref="strip"
         :orientation="open ? 'horizontal' : 'vertical'"
         class="max-md:overflow-visible"
         :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:p-1' : 'md:min-w-0 md:flex-1'"
-        :ui="{ viewport: 'md:h-full' }"
+        :ui="{ viewport: 'md:h-full md:@container-[size]' }"
       >
         <div
-          class="grid grid-cols-1 gap-3 md:h-full"
-          :class="open ? 'md:flex' : 'md:auto-rows-[minmax(10rem,1fr)] md:grid-cols-4 xl:grid-cols-7'"
+          class="grid grid-cols-1 gap-3 md:items-start"
+          :class="open ? 'md:flex' : 'md:grid-cols-4 xl:grid-cols-7'"
         >
           <section
             v-for="c in columns"
             :key="c.label"
-            class="flex min-h-40 flex-col gap-2 rounded-lg bg-elevated/50 p-2"
+            class="flex min-h-[100px] flex-col gap-2 rounded-lg bg-elevated/50 p-2 md:max-h-[100cqh]"
             :class="[c.human ? 'ring-1 ring-warning/50' : '', open ? 'md:w-64 md:shrink-0' : '']"
           >
             <header class="flex items-baseline gap-2 px-1">
