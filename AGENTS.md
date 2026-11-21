@@ -41,7 +41,8 @@ view; this file is for whoever changes the code.
   height (`100cqh` of the strip's viewport), and scroll their own cards past that.
   The board row is strip, job panel (when open), Activity sidebar
   (`app/components/ActivityFeed.vue`): a fixed-width column that scrolls its own
-  feed and stacks below the board under `md`. It renders `feed`, the merged live
+  feed and stacks below the board under `xl`, so the columns and the job panel keep
+  their width on mid-size screens. It renders `feed`, the merged live
   feed of status lines and agent output in `useBoard()`, with its grouping,
   at-bottom and status-line helpers in `app/utils/feed.ts`.
   Every scroll region is a `UScrollArea` (use `as` for semantic elements);

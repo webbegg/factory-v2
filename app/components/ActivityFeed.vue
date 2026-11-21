@@ -51,7 +51,7 @@ onMounted(() => toBottom())
   <UCard
     as="aside"
     aria-labelledby="activity-heading"
-    class="flex flex-col max-md:mt-4 max-md:h-80 md:min-h-0 md:w-80 md:shrink-0"
+    class="flex flex-col max-md:mt-4 max-md:h-80 md:max-xl:h-56 md:shrink-0 xl:min-h-0 xl:w-80"
     :ui="{ body: 'relative flex min-h-0 flex-1 flex-col p-3 sm:p-3' }"
   >
     <p
@@ -64,7 +64,7 @@ onMounted(() => toBottom())
     <UScrollArea
       ref="scroller"
       tabindex="0"
-      aria-label="Activity"
+      aria-label="Activity feed"
       class="min-h-0 flex-1"
       @scroll.passive="onScroll"
     >
@@ -75,23 +75,25 @@ onMounted(() => toBottom())
           class="space-y-1"
           :class="g.sender === 'factory' ? 'border-s-2 border-default ps-2' : ''"
         >
-          <p class="text-xs text-dimmed">
+          <p class="flex items-baseline gap-1 text-xs text-dimmed">
             <span class="font-semibold text-muted">{{ g.sender }}</span>
             <template v-if="g.jobId">
               ·
               <ULink
                 v-if="known.has(g.jobId)"
                 :to="{ path: '/', query: { job: g.jobId } }"
-                class="font-mono"
+                class="min-w-0 truncate font-mono"
+                :title="g.jobId"
               >
                 {{ g.jobId }}
               </ULink>
               <span
                 v-else
-                class="font-mono"
+                class="min-w-0 truncate font-mono"
+                :title="g.jobId"
               >{{ g.jobId }}</span>
             </template>
-            · {{ g.at }}
+            <span class="ms-auto shrink-0 ps-2">{{ g.at }}</span>
           </p>
           <template
             v-for="e in g.entries"
