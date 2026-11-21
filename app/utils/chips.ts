@@ -17,15 +17,16 @@ function settled(verdict: string | null | undefined, executing: boolean): ChipSt
 
 /**
  * The current round's chips: the gate, then each routed reviewer once the gate
- * passed. A step without a verdict is `running` while its stage executes and
+ * passed. A step without a verdict is `running` while its stage executes in a
+ * job the factory is running (`live`), so stalled jobs stop showing work, and
  * `pending` otherwise.
  */
-export function roundChips(job: Pick<Job, 'round' | 'stage' | 'gate' | 'reviews' | 'agents'>): RoundChip[] {
+export function roundChips(job: Pick<Job, 'round' | 'stage' | 'gate' | 'reviews' | 'agents'>, live: boolean): RoundChip[] {
   if (!job.round) return []
-  const chips: RoundChip[] = [{ key: 'gate', label: 'gate', state: settled(job.gate, job.stage === 'gate') }]
+  const chips: RoundChip[] = [{ key: 'gate', label: 'gate', state: settled(job.gate, live && job.stage === 'gate') }]
   if (job.gate !== 'PASS') return chips
   for (const r of Object.keys(job.agents?.reviewers ?? {})) {
-    chips.push({ key: r, label: SHORT[r] ?? r, state: settled(job.reviews[r], job.stage === 'review') })
+    chips.push({ key: r, label: SHORT[r] ?? r, state: settled(job.reviews[r], live && job.stage === 'review') })
   }
   return chips
 }

@@ -11,7 +11,7 @@ const flag = computed(() => {
   if (props.job.stage === 'rejected') return { label: 'rejected', color: 'neutral' as const }
   return null
 })
-const chips = computed(() => roundChips(props.job))
+const chips = computed(() => roundChips(props.job, props.running ?? false))
 </script>
 
 <template>
