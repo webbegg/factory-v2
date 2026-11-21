@@ -37,6 +37,8 @@ view; this file is for whoever changes the code.
   panels fill it with `h-full` / `min-h-0` and scroll their own panels;
   in a wide panel JobDetail shows Live activity as a right-hand column that
   scrolls its own lines, and stacks it below the document when narrower.
+  Board columns fit their content between a 100px minimum and the board
+  height (`100cqh` of the strip's viewport), and scroll their own cards past that.
   Every scroll region is a `UScrollArea` (use `as` for semantic elements);
   never put raw `overflow-*-auto` on a new one. The shared thin, hidden-until-
   scrolling bar is the `scrollbar-auto-hide` utility in `app/assets/css/main.css`,
