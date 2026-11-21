@@ -5,7 +5,7 @@ defineProps<{ label: string, state: ChipState }>()
 
 const STYLE: Record<ChipState, string> = {
   pending: 'border-dashed border-accented text-dimmed',
-  running: 'border-primary bg-primary/10 text-primary motion-safe:animate-pulse',
+  running: 'border-primary bg-primary/10 text-primary motion-safe:animate-ring-pulse',
   PASS: 'border-transparent bg-success/15 text-success',
   CHANGES: 'border-transparent bg-warning/15 text-warning',
   FAIL: 'border-transparent bg-error/15 text-error',

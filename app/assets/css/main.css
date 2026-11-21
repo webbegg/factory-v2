@@ -15,6 +15,15 @@
   --color-green-800: #016538;
   --color-green-900: #0A5331;
   --color-green-950: #052E16;
+
+  /* The running round chip: an opacity fade is too faint on a 10px badge, and a
+     box-shadow ring grows without moving its neighbours. */
+  --animate-ring-pulse: ring-pulse 1.6s ease-out infinite;
+
+  @keyframes ring-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ui-primary) 70%, transparent); }
+    70%, 100% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--ui-primary) 0%, transparent); }
+  }
 }
 
 /* Registered so the thumb colour can fade; not inherited so nested regions fade on their own. */
