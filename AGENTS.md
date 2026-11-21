@@ -30,7 +30,9 @@ view; this file is for whoever changes the code.
   `queued` event. The UI imports engine types from
   `~~/server/factory/types`. `COLUMNS` and the board's selection helpers
   (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
-  `app/utils/board.ts`. Job details render in `app/components/JobDetail.vue`
+  `app/utils/board.ts`. A card's round chips come from `roundChips` in
+  `app/utils/chips.ts`, pulse only while the job is in `state.running`, and use
+  the `ring-pulse` animation defined in `app/assets/css/main.css`. Job details render in `app/components/JobDetail.vue`
   inside the board's panel at `/?job=<id>`; `/jobs/:id` only redirects there.
   Layout: the shell (`app/app.vue`) gives pages a viewport-tall scroll
   region under the header, and pages that want fixed headers with scrolling
