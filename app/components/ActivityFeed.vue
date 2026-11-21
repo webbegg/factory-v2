@@ -51,7 +51,7 @@ onMounted(() => toBottom())
   <UCard
     as="aside"
     aria-labelledby="activity-heading"
-    class="flex flex-col max-md:mt-4 max-md:h-80 md:max-2xl:h-56 md:shrink-0 2xl:min-h-0 2xl:w-80"
+    class="flex min-h-0 flex-1 flex-col"
     :ui="{ body: 'relative flex min-h-0 flex-1 flex-col p-3 sm:p-3' }"
   >
     <p
@@ -129,7 +129,7 @@ onMounted(() => toBottom())
         v-if="!feed.length"
         class="text-xs text-muted"
       >
-        Activity appears here while this board is open.
+        Activity appears here while the factory UI is open.
       </p>
     </UScrollArea>
     <UButton
