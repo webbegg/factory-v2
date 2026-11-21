@@ -1,4 +1,5 @@
 import type { FactoryConfig, Job, Stage } from '~~/server/factory/types'
+import type { FeedEntry, FeedKind } from '~/utils/feed'
 
 export type { Job, Stage }
 
@@ -21,7 +22,7 @@ export interface ActivityLine {
 
 type ServerEvent
   = | { type: 'job', job: Job }
-    | { type: 'agent', jobId: string, agent: string, event: { kind: string, text: string } }
+    | { type: 'agent', jobId: string, agent: string, event: { kind: Exclude<FeedKind, 'status'>, text: string } }
     | { type: 'error', jobId: string, message: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
@@ -29,7 +30,8 @@ type ServerEvent
 
 const state = ref<FactoryState | null>(null)
 const activity = ref<Record<string, ActivityLine[]>>({})
-const log = ref<string[]>([])
+const feed = ref<FeedEntry[]>([])
+let feedId = 0
 const connected = ref(false)
 let source: EventSource | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -39,6 +41,10 @@ const MAX_LINES = 300
 function push<T>(list: T[], item: T) {
   list.push(item)
   if (list.length > MAX_LINES) list.splice(0, list.length - MAX_LINES)
+}
+
+function addToFeed(at: string, sender: string, jobId: string | null, kind: FeedKind, text: string) {
+  push(feed.value, { id: ++feedId, at, sender, jobId, kind, text })
 }
 
 /** Shared board state, kept live by the server's event stream. */
@@ -64,12 +70,15 @@ export function useBoard() {
       if (jobs && i >= 0) jobs[i] = e.job
       refreshSoon()
     } else if (e.type === 'agent') {
+      const at = new Date().toLocaleTimeString()
       const lines = activity.value[e.jobId] ??= []
-      push(lines, { at: new Date().toLocaleTimeString(), agent: e.agent, kind: e.event.kind, text: e.event.text })
+      push(lines, { at, agent: e.agent, kind: e.event.kind, text: e.event.text })
+      addToFeed(at, e.agent, e.jobId, e.event.kind, e.event.text)
     } else if (e.type === 'log') {
-      push(log.value, `${new Date().toLocaleTimeString()}  ${e.message}`)
+      const { jobId, text } = parseStatus(e.message, state.value?.jobs.map(j => j.id) ?? [])
+      addToFeed(new Date().toLocaleTimeString(), 'factory', jobId, 'status', text)
     } else if (e.type === 'error') {
-      push(log.value, `${new Date().toLocaleTimeString()}  ${e.jobId}: ${e.message}`)
+      addToFeed(new Date().toLocaleTimeString(), 'factory', e.jobId, 'error', e.message)
       toast.add({ title: `${e.jobId} stalled`, description: e.message, color: 'error' })
       refreshSoon()
     } else if (e.type === 'queued') {
@@ -106,7 +115,7 @@ export function useBoard() {
     }
   }
 
-  return { state, activity, log, connected, refresh, connect, act }
+  return { state, activity, feed, connected, refresh, connect, act }
 }
 
 export function elapsed(job: Job): string {

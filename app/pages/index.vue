@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { WatchStopHandle } from 'vue'
 
-const { state, log, act } = useBoard()
+const { state, act } = useBoard()
 const route = useRoute()
 
 const columns = computed(() => COLUMNS.map(c => ({
@@ -119,96 +119,86 @@ onUnmounted(() => {
       </form>
     </div>
 
-    <div
-      class="md:flex md:min-h-0 md:flex-1 md:gap-4"
-      :class="open ? 'overflow-x-clip' : ''"
-    >
-      <!-- The viewport is a size container, so columns cap at the board height (100cqh) while their rows fit content. -->
-      <UScrollArea
-        ref="strip"
-        :orientation="open ? 'horizontal' : 'vertical'"
-        class="max-md:overflow-visible"
-        :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:p-1' : 'md:min-w-0 md:flex-1'"
-        :ui="{ viewport: 'md:h-full md:@container-[size]' }"
+    <!-- Under 2xl the sidebar stacks below the board, so the columns and the job panel keep their width. -->
+    <div class="md:flex md:min-h-0 md:flex-1 md:flex-col md:gap-4 2xl:flex-row">
+      <div
+        class="md:flex md:min-h-0 md:flex-1 md:gap-4 2xl:min-w-0"
+        :class="open ? 'overflow-x-clip' : ''"
       >
-        <div
-          class="grid grid-cols-1 gap-3 md:items-start"
-          :class="open ? 'md:flex' : 'md:grid-cols-4 xl:grid-cols-7'"
-        >
-          <section
-            v-for="c in columns"
-            :key="c.label"
-            class="flex min-h-[100px] flex-col gap-2 rounded-lg bg-elevated/50 p-2 md:max-h-[100cqh]"
-            :class="[c.human ? 'ring-1 ring-warning/50' : '', open ? 'md:w-64 md:shrink-0' : '']"
-          >
-            <header class="flex items-baseline gap-2 px-1">
-              <h2 class="text-sm font-semibold text-highlighted">
-                {{ c.label }}
-              </h2>
-              <span class="text-xs text-dimmed">{{ c.who }}</span>
-              <span class="ms-auto text-xs text-muted">{{ c.jobs.length || '' }}</span>
-            </header>
-            <!-- Where the gutter shows, the list widens into the column padding and keeps ring-2 room. -->
-            <UScrollArea
-              class="-m-1 p-1 max-md:overflow-visible md:min-h-0 md:flex-1 md:pointer-fine:-mx-2 md:pointer-fine:px-0.5"
-              :ui="{ viewport: 'gap-2' }"
-            >
-              <JobCard
-                v-for="job in c.jobs"
-                :key="job.id"
-                :data-job="job.id"
-                :job="job"
-                :error="state?.errors[job.id]"
-                :running="state?.running.includes(job.id)"
-                :selected="job.id === selected"
-              />
-              <p
-                v-if="!c.jobs.length"
-                class="px-1 text-xs text-dimmed"
-              >
-                —
-              </p>
-            </UScrollArea>
-          </section>
-        </div>
-      </UScrollArea>
-
-      <Transition
-        enter-active-class="motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out"
-        enter-from-class="motion-safe:translate-x-full"
-        leave-active-class="motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-in"
-        leave-to-class="motion-safe:translate-x-full"
-        @after-leave="open = false"
-      >
+        <!-- The viewport is a size container, so columns cap at the board height (100cqh) while their rows fit content. -->
         <UScrollArea
-          v-if="selected"
-          ref="panel"
-          as="aside"
-          aria-label="Job details"
-          class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:bg-transparent md:p-1"
-          :ui="{ viewport: 'md:h-full' }"
+          ref="strip"
+          :orientation="open ? 'horizontal' : 'vertical'"
+          class="max-md:overflow-visible"
+          :class="open ? 'md:w-[16.5rem] md:shrink-0 md:scroll-px-3 md:p-1' : 'md:min-w-0 md:flex-1'"
+          :ui="{ viewport: 'md:h-full md:@container-[size]' }"
         >
-          <JobDetail
-            :job-id="selected"
-            @close="close"
-          />
+          <div
+            class="grid grid-cols-1 gap-3 md:items-start"
+            :class="open ? 'md:flex' : 'md:grid-cols-4 xl:grid-cols-7'"
+          >
+            <section
+              v-for="c in columns"
+              :key="c.label"
+              class="flex min-h-[100px] flex-col gap-2 rounded-lg bg-elevated/50 p-2 md:max-h-[100cqh]"
+              :class="[c.human ? 'ring-1 ring-warning/50' : '', open ? 'md:w-64 md:shrink-0' : '']"
+            >
+              <header class="flex items-baseline gap-2 px-1">
+                <h2 class="text-sm font-semibold text-highlighted">
+                  {{ c.label }}
+                </h2>
+                <span class="text-xs text-dimmed">{{ c.who }}</span>
+                <span class="ms-auto text-xs text-muted">{{ c.jobs.length || '' }}</span>
+              </header>
+              <!-- Where the gutter shows, the list widens into the column padding and keeps ring-2 room. -->
+              <UScrollArea
+                class="-m-1 p-1 max-md:overflow-visible md:min-h-0 md:flex-1 md:pointer-fine:-mx-2 md:pointer-fine:px-0.5"
+                :ui="{ viewport: 'gap-2' }"
+              >
+                <JobCard
+                  v-for="job in c.jobs"
+                  :key="job.id"
+                  :data-job="job.id"
+                  :job="job"
+                  :error="state?.errors[job.id]"
+                  :running="state?.running.includes(job.id)"
+                  :selected="job.id === selected"
+                />
+                <p
+                  v-if="!c.jobs.length"
+                  class="px-1 text-xs text-dimmed"
+                >
+                  —
+                </p>
+              </UScrollArea>
+            </section>
+          </div>
         </UScrollArea>
-      </Transition>
-    </div>
 
-    <UCard
-      v-if="log.length"
-      class="md:shrink-0"
-      :ui="{ body: 'p-3 sm:p-3' }"
-    >
-      <!-- overflow-x-scroll: the log scrolls both ways, and its bar keeps its space. -->
-      <UScrollArea
-        as="pre"
-        tabindex="0"
-        class="max-h-48 overflow-x-scroll text-xs text-muted"
-      >
-        {{ log.slice(-40).join('\n') }}
-      </UScrollArea>
-    </UCard>
+        <Transition
+          enter-active-class="motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-out"
+          enter-from-class="motion-safe:translate-x-full"
+          leave-active-class="motion-safe:transition-transform motion-safe:duration-200 motion-safe:ease-in"
+          leave-to-class="motion-safe:translate-x-full"
+          @after-leave="open = false"
+        >
+          <UScrollArea
+            v-if="selected"
+            ref="panel"
+            as="aside"
+            aria-label="Job details"
+            class="fixed inset-x-0 top-(--ui-header-height) bottom-0 z-30 bg-default p-4 md:static md:z-auto md:min-w-0 md:flex-1 md:bg-transparent md:p-1"
+            :ui="{ viewport: 'md:h-full' }"
+          >
+            <JobDetail
+              :job-id="selected"
+              @close="close"
+            />
+          </UScrollArea>
+        </Transition>
+      </div>
+
+      <ActivityFeed />
+    </div>
   </UContainer>
 </template>
