@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { WatchStopHandle } from 'vue'
 
-const { state, log, act } = useBoard()
+const { state, act } = useBoard()
 const route = useRoute()
 
 const columns = computed(() => COLUMNS.map(c => ({
@@ -194,21 +194,8 @@ onUnmounted(() => {
           />
         </UScrollArea>
       </Transition>
-    </div>
 
-    <UCard
-      v-if="log.length"
-      class="md:shrink-0"
-      :ui="{ body: 'p-3 sm:p-3' }"
-    >
-      <!-- overflow-x-scroll: the log scrolls both ways, and its bar keeps its space. -->
-      <UScrollArea
-        as="pre"
-        tabindex="0"
-        class="max-h-48 overflow-x-scroll text-xs text-muted"
-      >
-        {{ log.slice(-40).join('\n') }}
-      </UScrollArea>
-    </UCard>
+      <ActivityFeed />
+    </div>
   </UContainer>
 </template>
