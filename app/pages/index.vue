@@ -119,10 +119,10 @@ onUnmounted(() => {
       </form>
     </div>
 
-    <!-- Under xl the sidebar stacks below the board, so the columns and the job panel keep their width. -->
-    <div class="md:flex md:min-h-0 md:flex-1 md:flex-col md:gap-4 xl:flex-row">
+    <!-- Under 2xl the sidebar stacks below the board, so the columns and the job panel keep their width. -->
+    <div class="md:flex md:min-h-0 md:flex-1 md:flex-col md:gap-4 2xl:flex-row">
       <div
-        class="md:flex md:min-h-0 md:flex-1 md:gap-4 xl:min-w-0"
+        class="md:flex md:min-h-0 md:flex-1 md:gap-4 2xl:min-w-0"
         :class="open ? 'overflow-x-clip' : ''"
       >
         <!-- The viewport is a size container, so columns cap at the board height (100cqh) while their rows fit content. -->
