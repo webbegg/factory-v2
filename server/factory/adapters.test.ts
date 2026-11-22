@@ -140,6 +140,12 @@ describe('GitCli against a real repo', () => {
     expect(existsSync(wt)).toBe(false)
   }, 30_000)
 
+  test('show reads a file as committed on a ref, or null', async () => {
+    await writeFile(join(repo, 'a.txt'), 'uncommitted\n')
+    expect(await git.show(repo, 'origin/main', 'a.txt')).toBe('a\n')
+    expect(await git.show(repo, 'origin/main', 'nope.txt')).toBeNull()
+  })
+
   test('exec failures name the command and its stderr', async () => {
     expect(exec('git', ['rev-parse', 'nope'], { cwd: repo })).rejects.toThrow('`git rev-parse nope` failed')
   })

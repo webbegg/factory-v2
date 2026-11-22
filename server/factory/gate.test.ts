@@ -12,9 +12,9 @@ const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
 const AGENTS = { reviewers: { code: 'haiku' } }
 
-async function withChecks(env: TestEnv, script: string) {
-  await mkdir(env.paths.factory, { recursive: true })
-  await writeFile(join(env.paths.factory, 'checks.sh'), `set -euo pipefail\n${script}\n`)
+/** checks.sh as committed on origin/<base>, which is the copy the gate runs */
+function withChecks(env: TestEnv, script: string) {
+  env.git.committed.set('.factory/checks.sh', `set -euo pipefail\n${script}\n`)
 }
 
 async function gateJob(env: TestEnv, fields = {}) {
@@ -45,6 +45,24 @@ describe('gate', () => {
     expect(await env.store.read(ID, 'round-1/checks.log')).toBe('checking in 001-add-a-thing\n')
     // the machine now accepts the move
     expect((await env.machine.advance(ID, 'review')).stage).toBe('review')
+  })
+
+  test('the gate runs checks.sh from origin/<base>, not the main checkout\'s working copy', async () => {
+    const env = await makeEnv()
+    withChecks(env, 'true')
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'checks.sh'), 'exit 1\n')
+    await gateJob(env)
+    expect((await env.gate.run(ID)).verdict).toBe('PASS')
+    expect(env.git.calls).toContainEqual(['show', env.paths.repo, 'origin/main', '.factory/checks.sh'])
+  })
+
+  test('checks.sh missing on origin/<base> fails the gate and says so', async () => {
+    const env = await makeEnv()
+    await gateJob(env)
+    const result = await env.gate.run(ID)
+    expect(result.verdict).toBe('FAIL')
+    expect(await env.store.read(ID, 'round-1/checks.log')).toContain('.factory/checks.sh isn\'t committed on origin/main')
   })
 
   test('a failing checks.sh fails the gate with its exit code', async () => {

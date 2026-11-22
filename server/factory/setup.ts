@@ -151,8 +151,14 @@ export async function doctor(repoDir: string): Promise<DoctorCheck[]> {
     const base = (JSON.parse(await readFile(configPath, 'utf8')) as { baseBranch?: string }).baseBranch ?? 'main'
     const remote = await sh('git', ['ls-remote', '--exit-code', '--heads', 'origin', base])
     add(`base branch ${base} on origin`, remote.code === 0, remote.code === 0 ? 'ok' : 'missing on origin')
+    add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
+    // the gate and prompt overrides read .factory/ from origin/<base>, never the working copy
+    await sh('git', ['fetch', '-q', 'origin', base])
+    const pushed = await sh('git', ['cat-file', '-e', `origin/${base}:.factory/checks.sh`])
+    add(`checks.sh on origin/${base}`, pushed.code === 0, pushed.code === 0 ? 'ok' : `commit and push .factory/ to ${base}: the gate runs that copy`)
+  } else {
+    add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
   }
-  add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
   const labels = await sh('gh', ['label', 'list', '--search', 'factory', '--json', 'name', '--jq', '.[].name'])
   const names = new Set(labels.stdout.split('\n').map(s => s.trim()))
   const missing = LABELS.map(l => l.name).filter(n => !names.has(n))

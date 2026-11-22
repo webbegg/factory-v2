@@ -1,5 +1,5 @@
 // Default role prompts. A project can replace any of them with
-// .factory/agents/<name>.md. Each agent writes exactly one file whose first
+// .factory/agents/<name>.md committed on the base. Each agent writes exactly one file whose first
 // line is machine-readable, followed by a `## Summary` of 3–5 bullets.
 
 export type AgentName
@@ -234,7 +234,8 @@ in the job folder; never touch anything else in the main checkout.
 
 ## Test
 
-Run \`cd <worktree> && bash <main checkout>/.factory/checks.sh\`; it must pass,
+Run \`cd <worktree> && bash <(git show <base>:.factory/checks.sh)\` (the copy
+on the base, which is the one the gate runs); it must pass,
 because the gate runs exactly that next. Then verify each acceptance criterion
 and record the evidence. For visible criteria, start the dev server on your
 port and look with \`agent-browser --session <job-id>-builder\` if installed;

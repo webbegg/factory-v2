@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { run } from './exec'
 import { Refused } from './machine'
@@ -19,6 +21,8 @@ export function globToRegExp(glob: string): RegExp {
 
 /** The factory's own checks, config and prompts: no branch may touch them, whatever the config says. */
 export const ALWAYS_PROTECTED = ['.factory/*']
+
+const CHECKS = '.factory/checks.sh'
 
 export interface GateResult {
   verdict: GateVerdict
@@ -44,22 +48,34 @@ export interface GateOptions {
 }
 
 /**
- * Does the job's branch pass the repo's checks? Runs the main checkout's
- * `.factory/checks.sh` inside the worktree, so a branch can't edit the checks
- * it is judged by, and fails any branch that modifies or deletes a protected
- * file. Writes round-N/checks.md (or merge-checks.md) and its log.
+ * Does the job's branch pass the repo's checks? Runs the base branch's
+ * `.factory/checks.sh` inside the worktree, so neither a branch nor an agent
+ * can edit the checks it is judged by, and fails any branch that touches a
+ * protected file. Writes round-N/checks.md (or merge-checks.md) and its log.
  */
 export class Gate {
   constructor(private o: GateOptions) {}
 
-  get checksPath() {
-    return join(this.o.paths.factory, 'checks.sh')
-  }
-
+  /**
+   * Runs `.factory/checks.sh` as committed on origin/<base>. An agent with a
+   * shell can edit the main checkout's copy; it can't change what was merged.
+   */
   async runChecks(worktree: string): Promise<ChecksRun> {
     const start = performance.now()
-    const res = await run('bash', [this.checksPath], { cwd: worktree, env: { CI: '1' } })
-    return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
+    const ref = `origin/${this.o.config.baseBranch}`
+    const script = await this.o.ports.git.show(this.o.paths.repo, ref, CHECKS)
+    if (script === null) {
+      return { code: 127, output: `${CHECKS} isn't committed on ${ref}: commit and push it first.\n`, seconds: 0 }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
+    try {
+      const file = join(dir, 'checks.sh')
+      await writeFile(file, script)
+      const res = await run('bash', [file], { cwd: worktree, env: { CI: '1' } })
+      return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   }
 
   /** Protected files the branch added, changed or deleted; an added CI workflow or prompt is as dangerous as an edit. */

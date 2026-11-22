@@ -63,6 +63,11 @@ export class GitCli implements GitPort {
     await this.git(cwd, 'push', '-q', '-u', 'origin', branch)
   }
 
+  async show(cwd: string, ref: string, path: string) {
+    const res = await run('git', ['show', `${ref}:${path}`], { cwd })
+    return res.code === 0 ? res.stdout : null
+  }
+
   /** Merges `ref` into the worktree's branch; aborts and reports on conflict. */
   async merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }> {
     const res = await run('git', ['merge', '--no-edit', ref], { cwd })

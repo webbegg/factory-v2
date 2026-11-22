@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -380,9 +380,11 @@ export class Orchestrator extends EventEmitter {
     return base + step * Number.parseInt(job.id, 10) + offset
   }
 
+  /** A prompt override counts only once it is committed on the base, where no agent can write it. */
   private async prompt(agent: AgentName): Promise<string> {
-    const override = join(this.o.paths.factory, 'agents', `${agent}.md`)
-    return existsSync(override) ? readFile(override, 'utf8') : PROMPTS[agent]
+    const { paths, ports, config } = this.o
+    const override = await ports.git.show(paths.repo, `origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
+    return override ?? PROMPTS[agent]
   }
 
   private model(job: Job, agent: AgentName): string {

@@ -57,8 +57,9 @@ They are uploaded when you send and appended to the text as markdown images.
 | `factory --version` / `-v` | print the factory version |
 
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until
-you trust it. Commit `.factory/config.json`, `.factory/checks.sh` and any
-`.factory/agents/<agent>.md` prompt overrides; job state and worktrees are
+you trust it. Commit and push `.factory/config.json`, `.factory/checks.sh` and any
+`.factory/agents/<agent>.md` prompt overrides: the gate and the agents use the
+copies on `origin/<base>`, never the working copy; job state and worktrees are
 gitignored. The board's Settings page edits `.factory/config.json` and applies
 it to the running factory without a restart; the change still needs committing.
 
@@ -74,7 +75,7 @@ in the running factory and is not kept across a restart.
   author and the operator only.
 - Each agent may write only its own file (the builder: its worktree and
   `build.md`); other writes are denied.
-- The gate runs the main checkout's `checks.sh`, and fails a branch that adds,
+- The gate runs `checks.sh` as committed on `origin/<base>`, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync

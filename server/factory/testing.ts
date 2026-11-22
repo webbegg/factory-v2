@@ -144,6 +144,13 @@ export class FakeGit implements GitPort {
     this.calls.push(['push', cwd, branch])
   }
 
+  /** path → content on origin/<base>, as `show` returns it */
+  committed = new Map<string, string>()
+  async show(cwd: string, ref: string, path: string) {
+    this.calls.push(['show', cwd, ref, path])
+    return this.committed.get(path) ?? null
+  }
+
   async merge(cwd: string, ref: string) {
     this.calls.push(['merge', cwd, ref])
     return this.mergeResult

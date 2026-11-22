@@ -56,6 +56,8 @@ export interface GitPort {
   /** files changed since forking from `base`; status is the git letter (A, M, D, R…) */
   changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>>
   push(cwd: string, branch: string): Promise<void>
+  /** `path` as committed on `ref`, or null when it isn't there */
+  show(cwd: string, ref: string, path: string): Promise<string | null>
   /** merges `ref` into the worktree's branch, aborting on conflict */
   merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }>
 }
