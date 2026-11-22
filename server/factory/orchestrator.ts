@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
@@ -63,6 +63,18 @@ const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
   'reviewer-security': /^VERDICT: (PASS|CHANGES)$/,
   'reviewer-ux': /^VERDICT: (PASS|CHANGES)$/,
   'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
+}
+
+/** Every file under a job folder but job.json (the factory's own) and in-flight temp files, by relative path. */
+async function snapshot(dir: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>()
+  if (!existsSync(dir)) return files
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || entry.name.endsWith('.tmp')) continue
+    const rel = relative(dir, join(entry.parentPath, entry.name))
+    if (rel !== 'job.json') files.set(rel, await readFile(join(dir, rel), 'utf8'))
+  }
+  return files
 }
 
 async function mtime(path: string): Promise<number | null> {
@@ -448,6 +460,45 @@ export class Orchestrator extends EventEmitter {
     this.send({ type: 'log', message: `${job.id}: ${agent} replied with its report instead of writing it; saved it` })
   }
 
+  /**
+   * Agents have a shell, so the write list alone doesn't hold. Snapshots what
+   * an agent may not change, and after it runs undoes and refuses any change to
+   * the job folder beyond its report, or to the branch by an agent that only reads.
+   */
+  private async watch(job: Job, agent: AgentName) {
+    const { git } = this.o.ports
+    const dir = this.o.store.dir(job.id)
+    const own = relative(dir, this.report(job, agent))
+    // reviewers of one round run side by side, each writing its own verdict
+    const allowed = (rel: string) => rel === own
+      || (agent.startsWith('reviewer-') && new RegExp(`^round-${job.round}/review-[\\w-]+\\.md$`).test(rel))
+    const readsBranch = agent !== 'builder' && agent !== 'intake' && existsSync(job.worktree)
+    const files = await snapshot(dir)
+    const branch = readsBranch ? { head: await git.head(job.worktree), clean: await git.isClean(job.worktree) } : null
+    return {
+      check: async () => {
+        const now = await snapshot(dir)
+        const changes: string[] = []
+        for (const [rel, text] of files) {
+          if (allowed(rel) || now.get(rel) === text) continue
+          changes.push(`${rel} (${now.has(rel) ? 'changed' : 'deleted'})`)
+          await this.o.store.write(job.id, rel, text)
+        }
+        for (const rel of now.keys()) {
+          if (allowed(rel) || files.has(rel)) continue
+          changes.push(`${rel} (added)`)
+          await rm(join(dir, rel), { force: true })
+        }
+        if (changes.length) {
+          throw new Error(`${agent} changed job files it may not: ${changes.sort().join(', ')}; the factory undid it`)
+        }
+        if (branch && (await git.head(job.worktree) !== branch.head || await git.isClean(job.worktree) !== branch.clean)) {
+          throw new Error(`${agent} changed the worktree (HEAD or uncommitted files); it may only read the branch`)
+        }
+      }
+    }
+  }
+
   private async agent(job: Job, agent: AgentName, signal: AbortSignal, purpose = '',
     extra: Pick<AgentTask, 'stopCheck'> = {}) {
     const { store, paths } = this.o
@@ -474,6 +525,7 @@ export class Orchestrator extends EventEmitter {
       ...extra
     }
     this.send({ type: 'log', message: `${job.id}: ${agent} started` })
+    const watch = await this.watch(job, agent)
     const result = await this.o.runner.run(task)
     await store.update(job.id, (j) => {
       const costs = { ...j.costs }
@@ -485,6 +537,7 @@ export class Orchestrator extends EventEmitter {
       const costUsd = Math.round(Object.values(costs).reduce((a, b) => a + b, 0) * 100) / 100
       return { ...j, costs, sessions, costUsd }
     })
+    await watch.check()
     if (signal.aborted) throw new Error(`${agent} cancelled`)
     if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
     await this.keepRepliedReport(job, agent, result.reply)

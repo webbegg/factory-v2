@@ -78,7 +78,10 @@ in the running factory and is not kept across a restart.
   no agent may merge, ready, close or review a PR, write to GitHub through
   `gh`, or change git config; only the builder commits, and it may push only
   its own branch, without force. The guard reads commands, it is not a sandbox,
-  so protect the base branch on GitHub as well.
+  so protect the base branch on GitHub as well. After every agent the factory
+  also checks what it changed: any job file other than its report is put back
+  and the job stalls, and so does an agent that only reads but moved the branch
+  or left uncommitted files.
 - The gate runs `checks.sh` as committed on `origin/<base>`, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in

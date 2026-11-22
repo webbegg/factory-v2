@@ -218,7 +218,7 @@ describe('merge', () => {
     // no second start before the first one's end
     expect(lines[1]).toBe(lines[0]!.replace('start', 'end'))
     expect(lines[3]).toBe(lines[2]!.replace('start', 'end'))
-  })
+  }, 30_000) // four real bash runs with sleeps; busy hosts exceed the 5s default
 
   test('only an approved job merges', async () => {
     const env = await makeEnv()
