@@ -71,7 +71,7 @@ export class Gate {
     try {
       const file = join(dir, 'checks.sh')
       await writeFile(file, script)
-      const res = await run('bash', [file], { cwd: worktree, env: { CI: '1' } })
+      const res = await run('bash', [file], { cwd: worktree, env: { CI: '1' }, scrub: true })
       return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
     } finally {
       await rm(dir, { recursive: true, force: true })

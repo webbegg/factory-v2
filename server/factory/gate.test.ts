@@ -65,6 +65,19 @@ describe('gate', () => {
     expect(await env.store.read(ID, 'round-1/checks.log')).toContain('.factory/checks.sh isn\'t committed on origin/main')
   })
 
+  test('checks.sh runs without the factory\'s secrets in its environment', async () => {
+    const env = await makeEnv()
+    process.env.FACTORY_TEST_TOKEN = 'leak'
+    try {
+      withChecks(env, 'echo "token=${FACTORY_TEST_TOKEN:-none} ci=$CI"')
+      await gateJob(env)
+      await env.gate.run(ID)
+      expect(await env.store.read(ID, 'round-1/checks.log')).toBe('token=none ci=1\n')
+    } finally {
+      delete process.env.FACTORY_TEST_TOKEN
+    }
+  })
+
   test('a failing checks.sh fails the gate with its exit code', async () => {
     const env = await makeEnv()
     await withChecks(env, 'echo boom >&2; exit 3')

@@ -6,6 +6,7 @@ import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate } from './gate'
+import { redact } from './exec'
 import { firstLine } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
@@ -251,8 +252,9 @@ export class Orchestrator extends EventEmitter {
     this.errors.delete(id)
     const done = this.drive(id, controller.signal)
       .catch((err: Error) => {
-        this.errors.set(id, err.message)
-        this.send({ type: 'error', jobId: id, message: err.message })
+        const message = redact(err.message)
+        this.errors.set(id, message)
+        this.send({ type: 'error', jobId: id, message })
       })
       .finally(async () => {
         this.active.delete(id)

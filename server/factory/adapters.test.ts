@@ -40,12 +40,12 @@ describe('GhCli', () => {
 
   test('writes: factory comments carry the marker; labels are comma-joined', async () => {
     calls.length = 0
-    await gh.comment('pr', 9, 'hello')
+    await gh.comment('pr', 9, 'hello from https://bot:hunter2@github.com/o/r')
     await gh.reply(7, 'my answer')
     await gh.editLabels('issue', 7, { add: ['a'], remove: ['b', 'c'] })
     await gh.prMerge(9, 'squash', 'abc123')
     expect(calls).toEqual([
-      ['pr', 'comment', '9', '--body', `${MARKER}\nhello`],
+      ['pr', 'comment', '9', '--body', `${MARKER}\nhello from https://***@github.com/o/r`],
       ['issue', 'comment', '7', '--body', 'my answer'],
       ['issue', 'edit', '7', '--add-label', 'a', '--remove-label', 'b,c'],
       ['pr', 'merge', '9', '--squash', '--match-head-commit', 'abc123']

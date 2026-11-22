@@ -87,6 +87,11 @@ in the running factory and is not kept across a restart.
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
   and a second gate. The factory never deploys.
+- `checks.sh` runs without environment variables named like secrets (`*TOKEN*`,
+  `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `AUTH`), so branch code
+  never sees the factory's credentials; checks that need one must get it some
+  other way. Text the factory posts on GitHub or shows as an error has
+  credentials in URLs and GitHub/Anthropic tokens masked.
 - The board listens on 127.0.0.1, refuses foreign `Host` headers and non-JSON
   writes.
 - Attached screenshots are uploaded to GitHub as user attachments of the
