@@ -43,6 +43,8 @@ export class Merger {
     if (await ports.github.prState(pr) === 'MERGED') return machine.advance(id, 'merged')
 
     const fail = async (why: string) => {
+      // the approver's APPROVE stays readable as decision-<k>.md
+      await store.archive(id, 'decision.md')
       await store.write(id, 'decision.md', `ESCALATE\n\n## Why\n${why}\n`)
       return machine.advance(id, 'needs-human')
     }

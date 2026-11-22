@@ -226,6 +226,58 @@ describe('orchestrator', () => {
     expect(runner.tasks[5]!.message).toContain('The branch conflicts with origin/main: read round-1/sync.md, merge origin/main, resolve the conflicts, push, and update build.md for round 2.')
   })
 
+  test('an approver that writes no decision after a conflict round can\'t merge on the old APPROVE', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      builder: async (t, n) => {
+        if (n === 2) env.git.mergeResult = { ok: true, output: '' }
+        await write(t, 'build.md', 'STATUS: READY\n')
+      },
+      approver: (t, n) => n === 1 ? happy.approver!(t, n) : undefined
+    })
+    env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('approve')
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    // the round-1 decision is kept as history, not reused
+    expect(await env.store.read(job.id, 'decision-1.md')).toStartWith('APPROVE')
+    expect(await env.store.read(job.id, 'decision.md')).toBeNull()
+  })
+
+  test('a builder that leaves build.md untouched is asked once more, then the job stalls', async () => {
+    const { env, runner, orch } = await factory({
+      ...happy,
+      'builder': async (t, n) => {
+        if (n === 1) await write(t, 'build.md', 'STATUS: READY\n')
+      },
+      'reviewer-code': t => write(t, `round-${t.round}/review-code.md`, 'VERDICT: CHANGES\n')
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job).toMatchObject({ stage: 'build', round: 2 })
+    const builds = runner.tasks.filter(t => t.agent === 'builder')
+    expect(builds).toHaveLength(3)
+    expect(builds[2]!.message).toContain('build.md wasn\'t updated in this run')
+    expect(orch.errors.get(job.id)).toContain('build.md wasn\'t updated in this run')
+  })
+
+  test('an escalation keeps the approver\'s APPROVE as decision history', async () => {
+    const { env, orch } = await factory({ ...happy })
+    env.github.mergeError = 'branch protection: 1 review required'
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('needs-human')
+    expect(await env.store.read(job.id, 'decision-1.md')).toStartWith('APPROVE')
+    expect(await env.store.read(job.id, 'decision.md')).toContain('branch protection')
+  })
+
   test('a conflict with the base on the last round escalates without another build', async () => {
     const { env, runner, orch } = await factory({ ...happy }, { maxRounds: 1 })
     env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }

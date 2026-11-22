@@ -81,6 +81,7 @@ describe('fileWriter', () => {
     ['round-2/review-ux.md', 'the ux reviewer'],
     ['round-1/review-security.md', 'the security reviewer'],
     ['decision.md', 'the approver'],
+    ['decision-2.md', 'the approver'],
     ['feedback-1.md', 'you'],
     ['rejection.md', 'you'],
     ['round-1/sync.md', 'the factory'],

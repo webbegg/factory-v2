@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -63,6 +63,14 @@ const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
   'reviewer-security': /^VERDICT: (PASS|CHANGES)$/,
   'reviewer-ux': /^VERDICT: (PASS|CHANGES)$/,
   'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
+}
+
+async function mtime(path: string): Promise<number | null> {
+  try {
+    return (await stat(path)).mtimeMs
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -288,6 +296,8 @@ export class Orchestrator extends EventEmitter {
       case 'review':
         return this.review(job, signal)
       case 'approve': {
+        // an earlier round's APPROVE must never stand in for this round's decision
+        await store.archive(job.id, 'decision.md')
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
         if (line === 'APPROVE') await merger.merge(job.id)
@@ -329,20 +339,34 @@ export class Orchestrator extends EventEmitter {
       return `.factory/checks.sh fails in your worktree (exit ${checks.code}); the gate will reject this build. `
         + `Fix it, or write STATUS: BLOCKED in build.md if you can't.\n\n${tail}`
     }
-    await this.agent(job, 'builder', signal, purpose, { stopCheck })
-    const status = firstLine(await store.read(job.id, 'build.md') ?? '')
-    if (status === 'STATUS: BLOCKED') {
-      await machine.advance(job.id, 'needs-human')
-      return true
+    const report = store.path(job.id, 'build.md')
+    const runBuilder = async (j: Job, why: string) => {
+      const before = await mtime(report)
+      await this.agent(j, 'builder', signal, why, { stopCheck })
+      return async () => {
+        // last round's READY must not pass for this round's
+        if (before !== null && before === await mtime(report)) {
+          throw new Refused(`build.md wasn't updated in this run; rewrite it for round ${job.round}`)
+        }
+      }
+    }
+    let updated = await runBuilder(job, purpose)
+    const toGate = async () => {
+      await updated()
+      if (firstLine(await store.read(job.id, 'build.md') ?? '') === 'STATUS: BLOCKED') {
+        await machine.advance(job.id, 'needs-human')
+      } else {
+        await machine.advance(job.id, 'gate')
+      }
     }
     try {
-      await machine.advance(job.id, 'gate')
+      await toGate()
     } catch (err) {
       if (!(err instanceof Refused)) throw err
       // one more try: tell the same builder what the factory refused
-      await this.agent(await store.load(job.id), 'builder', signal,
-        `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`, { stopCheck })
-      await machine.advance(job.id, 'gate')
+      updated = await runBuilder(await store.load(job.id),
+        `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`)
+      await toGate()
     }
     return true
   }
