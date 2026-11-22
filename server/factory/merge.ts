@@ -26,13 +26,13 @@ export class Merger {
 
   constructor(private o: MergerOptions) {}
 
-  merge(id: string): Promise<Job> {
-    const next = this.lock.catch(() => {}).then(() => this.mergeNow(id))
+  merge(id: string, signal?: AbortSignal): Promise<Job> {
+    const next = this.lock.catch(() => {}).then(() => this.mergeNow(id, signal))
     this.lock = next
     return next
   }
 
-  private async mergeNow(id: string): Promise<Job> {
+  private async mergeNow(id: string, signal?: AbortSignal): Promise<Job> {
     const { store, ports, machine, gate, config } = this.o
     const base = config.baseBranch
     let job = await store.load(id)
@@ -57,7 +57,9 @@ export class Merger {
       return fail(`The branch conflicts with ${base}:\n\n\`\`\`\n${synced.output}\n\`\`\``)
     }
 
-    const result = await gate.run(id, { merge: true })
+    const result = await gate.run(id, { merge: true, signal })
+    // stopped mid-gate: leave the job in merging for the next start
+    if (signal?.aborted) throw new Error('merge cancelled')
     if (result.verdict !== 'PASS') {
       return fail(`The gate failed after syncing with ${base}. See round-${job.round}/merge-checks.md.\n\n${result.line}`)
     }

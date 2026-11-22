@@ -88,6 +88,12 @@ describe('saveConfig', () => {
     expect((await loadConfig(paths)).limits).toEqual({ ...defaultConfig().limits, checksMinutes: 5 })
   })
 
+  test('limits that aren\'t positive numbers fall back to the defaults (review R3-002)', async () => {
+    const { paths, file, raw } = await seeded()
+    await writeFile(file, JSON.stringify({ ...raw, limits: { checksMinutes: 0, agentTurns: -1, agentBudgetUsd: 'lots' } }))
+    expect((await loadConfig(paths)).limits).toEqual(defaultConfig().limits)
+  })
+
   test('an invalid update leaves the file byte-for-byte unchanged', async () => {
     const { paths, file } = await seeded()
     const before = await readFile(file, 'utf8')

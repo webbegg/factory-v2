@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec } from './exec'
@@ -138,6 +138,27 @@ describe('GitCli against a real repo', () => {
     await git.deleteBranch('factory/001-x')
     await git.deleteRemoteBranch('factory/001-x')
     expect(existsSync(wt)).toBe(false)
+  }, 30_000)
+
+  test('paths git would quote are reported as they are (verify B8)', async () => {
+    const wt2 = join(repo, '.worktrees', '002-q')
+    await git.addWorktree(wt2, 'factory/002-q', 'origin/main')
+    await mkdir(join(wt2, '.github/workflows'), { recursive: true })
+    await writeFile(join(wt2, '.github/workflows/dép.yml'), 'x\n')
+    await writeFile(join(wt2, 'tab\there.txt'), 'x\n')
+    await exec('git', ['add', '.'], { cwd: wt2 })
+    await exec('git', ['commit', '-qm', 'odd names'], { cwd: wt2 })
+    expect(await git.changedFiles(wt2, 'origin/main')).toEqual([
+      { status: 'A', path: '.github/workflows/dép.yml' }, { status: 'A', path: 'tab\there.txt' }
+    ])
+  }, 30_000)
+
+  test('fetch puts back a remote-tracking ref moved by hand (verify B3)', async () => {
+    const real = await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })
+    const fake = (await exec('git', ['commit-tree', '-m', 'forged', `${real.trim()}^{tree}`], { cwd: repo })).trim()
+    await exec('git', ['update-ref', 'refs/remotes/origin/main', fake], { cwd: repo })
+    await git.fetch(repo, 'main')
+    expect(await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })).toBe(real)
   }, 30_000)
 
   test('show reads a file as committed on a ref, or null', async () => {

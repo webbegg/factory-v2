@@ -38,7 +38,12 @@ export async function loadConfig(paths: FactoryPaths): Promise<FactoryConfig> {
 
 function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
   const defaults = defaultConfig()
-  return { ...defaults, ...raw, limits: { ...defaults.limits, ...raw.limits } }
+  // a zero, negative or non-numeric limit would switch the cap off or fail every job, so it falls back
+  const limits = Object.fromEntries(Object.entries(defaults.limits).map(([key, fallback]) => {
+    const value = (raw.limits as Record<string, unknown> | undefined)?.[key]
+    return [key, typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback]
+  })) as FactoryConfig['limits']
+  return { ...defaults, ...raw, limits }
 }
 
 /** The keys the Settings page edits; everything else in the file is left alone. */

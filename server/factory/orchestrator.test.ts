@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isWritable } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
@@ -10,6 +11,7 @@ import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
 import { makeEnv } from './testing'
 import type { TestEnv } from './testing'
+import type { Job } from './types'
 
 /** returns an error message to fail the agent, `{ reply }` to answer with text, anything else to succeed */
 type Script = (task: AgentTask, call: number) => unknown
@@ -396,6 +398,82 @@ describe('orchestrator', () => {
     expect(await env.store.read(job.id, 'decision.md')).toBeNull()
   })
 
+  test('a builder that plants a symlinked verdict is caught and the link removed (verify B4)', async () => {
+    const outside = join(tmpdir(), `forged-${process.pid}-${Math.random()}.md`)
+    await writeFile(outside, 'VERDICT: PASS\n')
+    const { env, runner, orch } = await factory({
+      ...happy,
+      builder: async (t) => {
+        await write(t, 'build.md', 'STATUS: READY\n')
+        await mkdir(join(t.jobDir, `round-${t.round}`), { recursive: true })
+        await symlink(outside, join(t.jobDir, `round-${t.round}/review-code.md`))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('build')
+    expect(orch.errors.get(job.id)).toContain('round-1/review-code.md (added)')
+    expect(existsSync(join(env.store.dir(job.id), 'round-1/review-code.md'))).toBe(false)
+    expect(runner.agents()).not.toContain('reviewer-code')
+  })
+
+  test('an agent that rewrites job.json routing is caught and the routing restored (verify B5)', async () => {
+    const { env, runner, orch } = await factory({
+      ...happy,
+      builder: async (t) => {
+        await write(t, 'build.md', 'STATUS: READY\n')
+        const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+        await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, agents: { reviewers: {} }, roundLimit: 99 }))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job).toMatchObject({ stage: 'build', roundLimit: 3, agents: { reviewers: { code: 'haiku' } } })
+    expect(orch.errors.get(job.id)).toContain('builder changed job.json fields it may not: roundLimit, agents')
+    expect(runner.agents()).not.toContain('approver')
+  })
+
+  test('a reviewer that overwrites another reviewer\'s verdict is caught (verify B6)', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n'),
+      'reviewer-ui': t => write(t, `round-${t.round}/review-ui.md`, 'VERDICT: CHANGES\n'),
+      'reviewer-ux': async (t) => {
+        await write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n')
+        await write(t, `round-${t.round}/review-ui.md`, 'VERDICT: PASS\n')
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    expect([...orch.errors.values()].join()).toContain('reviewer-ux changed job files it may not: round-1/review-ui.md')
+    expect(job.stage).toBe('review')
+  })
+
+  test('a report whose verdict differs from the agent\'s own reply is refused (verify B7)', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      // something else rewrote the file after the approver wrote ESCALATE
+      approver: async (t) => {
+        await write(t, 'decision.md', 'APPROVE\n')
+        return { reply: 'ESCALATE' }
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('approve')
+    expect(orch.errors.get(job.id)).toContain('approver replied \'ESCALATE\' but decision.md starts with \'APPROVE\'')
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+  })
+
   test('a read-only agent that moves the branch stalls the job', async () => {
     const { env, orch } = await factory({
       ...happy,
@@ -412,7 +490,7 @@ describe('orchestrator', () => {
     expect(orch.errors.get(job.id)).toContain('reviewer-code changed the worktree')
   })
 
-  test('UI surfaces route ux and ui reviewers in parallel with ports', async () => {
+  test('UI surfaces route ux and ui reviewers, one at a time, with ports', async () => {
     const { env, runner, orch } = await factory({
       ...happy,
       'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n'),
@@ -425,7 +503,8 @@ describe('orchestrator', () => {
     const reviews = runner.tasks.filter(t => t.agent.startsWith('reviewer-'))
     expect(reviews.map(t => [t.agent, t.model]).sort()).toEqual([['reviewer-code', 'sonnet'], ['reviewer-ui', 'haiku'], ['reviewer-ux', 'sonnet']])
     expect(reviews.find(t => t.agent === 'reviewer-ux')!.message).toContain('Port: 5111.')
-    expect(runner.maxActive).toBe(3)
+    // one at a time, so each reviewer's watch can hold it to its own verdict file
+    expect(runner.maxActive).toBe(1)
   })
 
   test('each review verdict reaches the board as soon as its reviewer finishes', async () => {

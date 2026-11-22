@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,28 +16,34 @@ function alive(pid: number) {
 
 describe('run limits', () => {
   // a command that leaves a grandchild behind, like a dev server started with &
-  async function spawnTree(opts: { timeoutMs?: number, signal?: AbortSignal }) {
+  async function spawnTree(opts: { timeoutMs?: number, abort?: AbortController }) {
     const dir = await mkdtemp(join(tmpdir(), 'factory-exec-'))
     const pidFile = join(dir, 'pid')
     const started = performance.now()
-    const res = await run('bash', ['-c', `sleep 30 & echo $! > ${pidFile}; sleep 30`], { cwd: dir, ...opts })
+    const running = run('bash', ['-c', `sleep 30 & echo $! > ${pidFile}.tmp && mv ${pidFile}.tmp ${pidFile}; sleep 30`],
+      { cwd: dir, timeoutMs: opts.timeoutMs, signal: opts.abort?.signal })
+    if (opts.abort) {
+      // abort once the tree exists, however slow the host is to start it
+      while (!existsSync(pidFile)) await Bun.sleep(20)
+      opts.abort.abort()
+    }
+    const res = await running
     const pid = Number((await readFile(pidFile, 'utf8')).trim())
     await Bun.sleep(200)
     return { res, pid, ms: performance.now() - started }
   }
 
   test('a timeout kills the whole process group and says so', async () => {
-    const { res, pid, ms } = await spawnTree({ timeoutMs: 300 })
+    // long enough for a loaded host to start the tree, far below the 30s it would run
+    const { res, pid, ms } = await spawnTree({ timeoutMs: 3000 })
     expect(res.code).toBe(124)
-    expect(res.stderr).toContain('timed out after 0.3s')
-    expect(ms).toBeLessThan(10_000)
+    expect(res.stderr).toContain('timed out after 3s')
+    expect(ms).toBeLessThan(15_000)
     expect(alive(pid)).toBe(false)
   }, 20_000)
 
   test('an abort kills the whole process group', async () => {
-    const controller = new AbortController()
-    setTimeout(() => controller.abort(), 300)
-    const { res, pid } = await spawnTree({ signal: controller.signal })
+    const { res, pid } = await spawnTree({ abort: new AbortController() })
     expect(res.code).toBe(130)
     expect(alive(pid)).toBe(false)
   }, 20_000)
@@ -60,6 +67,12 @@ describe('redact', () => {
       .toBe('token [redacted] and [redacted]')
     expect(redact('key sk-ant-api03-abcdefghijklmnop')).toBe('key [redacted]')
     expect(redact('https://github.com/o/r/pull/9 is fine')).toBe('https://github.com/o/r/pull/9 is fine')
+  })
+
+  test('a long run of word characters is redacted in linear time (review R1-004)', () => {
+    const started = performance.now()
+    redact('a'.repeat(200_000))
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   test('exec errors carry redacted output', async () => {

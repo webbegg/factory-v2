@@ -18,6 +18,12 @@ export interface ExecOptions {
   signal?: AbortSignal
 }
 
+/** process groups still running; a factory that exits ends them, since a detached group would outlive it */
+const live = new Set<number>()
+process.once('exit', () => {
+  for (const pid of live) killGroup(pid, false)
+})
+
 /** SIGTERM to the process group, then (`force`) SIGKILL to whatever ignores it. */
 function killGroup(pid: number | undefined, force = true) {
   if (!pid) return
@@ -47,7 +53,8 @@ export function scrubbedEnv(source: Record<string, string | undefined> = process
 /** Text with credentials in URLs and GitHub/Anthropic token shapes masked, for comments, logs and errors. */
 export function redact(text: string): string {
   return text
-    .replace(/([a-z][\w+.-]*:\/\/)[^\s/@]+@/gi, '$1***@')
+    // the lookbehind starts a scheme only at a word's start, keeping this linear on long word runs
+    .replace(/(?<![\w+.-])([a-z][\w+.-]*:\/\/)[^\s/@]+@/gi, '$1***@')
     .replace(/\b(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_\w{20,}|sk-ant-[\w-]{10,})/g, '[redacted]')
 }
 
@@ -60,6 +67,7 @@ export function run(cmd: string, args: string[], opts: ExecOptions): Promise<Exe
   return new Promise((resolve) => {
     const base = opts.scrub ? scrubbedEnv() : process.env
     const child = spawn(cmd, args, { cwd: opts.cwd, env: { ...base, ...opts.env }, stdio: 'pipe', detached: true })
+    if (child.pid) live.add(child.pid)
     let stdout = ''
     let stderr = ''
     let stopped: { code: number, why: string } | null = null
@@ -72,6 +80,7 @@ export function run(cmd: string, args: string[], opts: ExecOptions): Promise<Exe
     if (opts.signal?.aborted) onAbort()
     else opts.signal?.addEventListener('abort', onAbort, { once: true })
     const done = (res: ExecResult) => {
+      if (child.pid) live.delete(child.pid)
       if (timer) clearTimeout(timer)
       opts.signal?.removeEventListener('abort', onAbort)
       resolve(stopped ? { ...res, code: stopped.code, stderr: `${res.stderr}\n[factory] ${cmd} ${stopped.why}\n` } : res)

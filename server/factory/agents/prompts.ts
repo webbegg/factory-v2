@@ -246,10 +246,11 @@ close it and stop only the server on your port afterwards.
 - Short one-line commit messages in the repo's style; one commit per piece of
   work. Stage explicit paths, never \`git add -A\`. Leave \`git status --porcelain\`
   empty.
-- \`git push -u origin <branch>\`, only your branch.
+- \`git push -u origin <branch>\`, naming your branch every time; the factory
+  refuses a push without it, a force push, and any other branch.
 - If \`gh pr view <branch>\` fails, open a draft:
   \`gh pr create --draft --base <base> --head <branch> --title "<spec title>" --body "Closes #<issue>"\`
-  plus your Summary. Afterwards just push. Never mark it ready, never merge.
+  plus your Summary. Afterwards push the same way. Never mark it ready, never merge.
 
 ## Write build.md (rewrite each round, keep the Log)
 

@@ -11,8 +11,9 @@ export class GitCli implements GitPort {
     return exec('git', args, { cwd })
   }
 
+  /** Forced and spelled out, so a remote-tracking ref moved by hand is put back to what origin has. */
   async fetch(cwd: string, ref: string) {
-    await this.git(cwd, 'fetch', '-q', 'origin', ref)
+    await this.git(cwd, 'fetch', '-q', 'origin', `+refs/heads/${ref}:refs/remotes/origin/${ref}`)
   }
 
   async addWorktree(path: string, branch: string, from: string) {
@@ -52,11 +53,12 @@ export class GitCli implements GitPort {
 
   /** Files the branch changed since it forked from `base`; a rename is a delete plus an add, so both paths show. */
   async changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>> {
-    const out = await this.git(cwd, 'diff', '--name-status', '--no-renames', `${base}...HEAD`)
-    return out.split('\n').filter(Boolean).map((line) => {
-      const [status = '', path = ''] = line.split('\t')
-      return { status: status.charAt(0), path }
-    })
+    // -z: without it git C-quotes unusual names ("d\303\251p.yml"), which no pattern matches
+    const out = await this.git(cwd, 'diff', '--name-status', '--no-renames', '-z', `${base}...HEAD`)
+    const fields = out.split('\0').filter(Boolean)
+    const files: Array<{ status: string, path: string }> = []
+    for (let i = 0; i + 1 < fields.length; i += 2) files.push({ status: fields[i]!.charAt(0), path: fields[i + 1]! })
+    return files
   }
 
   async push(cwd: string, branch: string) {

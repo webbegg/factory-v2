@@ -54,7 +54,10 @@ describe('gate', () => {
     await writeFile(join(env.paths.factory, 'checks.sh'), 'exit 1\n')
     await gateJob(env)
     expect((await env.gate.run(ID)).verdict).toBe('PASS')
-    expect(env.git.calls).toContainEqual(['show', env.paths.repo, 'origin/main', '.factory/checks.sh'])
+    // fetched right before reading, so a moved local origin/main can't stand in for the real one (verify B3)
+    const calls = env.git.calls.map(c => c.slice(0, 3).join(' '))
+    const show = calls.indexOf(`show ${env.paths.repo} origin/main`)
+    expect(calls[show - 1]).toBe(`fetch ${env.paths.repo} main`)
   })
 
   test('checks.sh missing on origin/<base> fails the gate and says so', async () => {
@@ -241,6 +244,17 @@ describe('merge', () => {
     expect(lines[1]).toBe(lines[0]!.replace('start', 'end'))
     expect(lines[3]).toBe(lines[2]!.replace('start', 'end'))
   }, 30_000) // four real bash runs with sleeps; busy hosts exceed the 5s default
+
+  test('an aborted merge stops after the gate and doesn\'t merge (review R4-001)', async () => {
+    const env = await makeEnv()
+    await approved(env)
+    withChecks(env, 'sleep 30')
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 300)
+    await expect(env.merger.merge(ID, controller.signal)).rejects.toThrow('merge cancelled')
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    expect((await env.store.load(ID)).stage).toBe('merging')
+  }, 20_000)
 
   test('only an approved job merges', async () => {
     const env = await makeEnv()

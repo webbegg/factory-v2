@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -67,15 +67,30 @@ const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
 }
 
 /** Every file under a job folder but job.json (the factory's own) and in-flight temp files, by relative path. */
+const LINK = '\0link:'
+
+/**
+ * Every file and link under a job folder but job.json (guarded by field, see
+ * TRUSTED) and in-flight temp files, by relative path. A link is recorded as
+ * itself, never followed, so a planted link to a forged verdict shows up.
+ */
 async function snapshot(dir: string): Promise<Map<string, string>> {
   const files = new Map<string, string>()
   if (!existsSync(dir)) return files
   for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    if (!entry.isFile() || entry.name.endsWith('.tmp')) continue
+    if (entry.isDirectory() || entry.name.endsWith('.tmp')) continue
     const rel = relative(dir, join(entry.parentPath, entry.name))
-    if (rel !== 'job.json') files.set(rel, await readFile(join(dir, rel), 'utf8'))
+    if (rel === 'job.json') continue
+    files.set(rel, entry.isFile() ? await readFile(join(dir, rel), 'utf8') : `${LINK}${await readlink(join(dir, rel)).catch(() => '')}`)
   }
   return files
+}
+
+/** job.json fields only the factory sets; an agent changing them could reroute or skip its own review. */
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents'] as const
+
+function trusted(job: Job): string {
+  return JSON.stringify(TRUSTED.map(k => job[k]))
 }
 
 async function mtime(path: string): Promise<number | null> {
@@ -327,12 +342,12 @@ export class Orchestrator extends EventEmitter {
         await store.archive(job.id, 'decision.md')
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
-        if (line === 'APPROVE') await merger.merge(job.id)
+        if (line === 'APPROVE') await merger.merge(job.id, signal)
         else await machine.advance(job.id, 'needs-human')
         return true
       }
       case 'merging':
-        await merger.merge(job.id)
+        await merger.merge(job.id, signal)
         return true
       default:
         return false
@@ -403,12 +418,16 @@ export class Orchestrator extends EventEmitter {
     // a resumed review may already have some verdicts on disk
     this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     const lenses = Object.keys(job.agents?.reviewers ?? {})
-    const missing = lenses.filter(r => !existsSync(store.path(job.id, `round-${job.round}/review-${r}.md`)))
-    await Promise.all(missing.map(async (r) => {
+    const written = async (r: string) => (await lstat(store.path(job.id, `round-${job.round}/review-${r}.md`)).catch(() => null))?.isFile()
+    const missing: string[] = []
+    for (const r of lenses) if (!await written(r)) missing.push(r)
+    // One at a time: with reviewers side by side, the watch could not tell
+    // which of them wrote a verdict, so one could overwrite another's.
+    for (const r of missing) {
       await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
-      // show each verdict on the board as it lands, not when the slowest reviewer ends
+      // show each verdict on the board as it lands
       this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
-    }))
+    }
     const synced = await machine.sync(await store.load(job.id))
     const changes = Object.values(synced.reviews).some(v => v === 'CHANGES')
     if (!changes) await machine.advance(job.id, 'approve')
@@ -434,6 +453,8 @@ export class Orchestrator extends EventEmitter {
   /** A prompt override counts only once it is committed on the base, where no agent can write it. */
   private async prompt(agent: AgentName): Promise<string> {
     const { paths, ports, config } = this.o
+    // an agent can move the local origin/<base>; fetching first puts it back
+    await ports.git.fetch(paths.repo, config.baseBranch)
     const override = await ports.git.show(paths.repo, `origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
     return override ?? PROMPTS[agent]
   }
@@ -462,6 +483,22 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
+   * Agents end by replying with their report's first line. A report whose
+   * verdict says otherwise was rewritten by something else while the agent ran
+   * (a process a builder left behind), so it is refused, not trusted.
+   */
+  private async matchesReply(job: Job, agent: AgentName, reply: string) {
+    const head = REPORT_HEAD[agent]
+    const said = firstLine(reply)
+    const report = this.report(job, agent)
+    if (!head?.test(said) || !existsSync(report)) return
+    const wrote = firstLine(await readFile(report, 'utf8'))
+    if (head.test(wrote) && wrote !== said) {
+      throw new Error(`${agent} replied '${said}' but ${relative(this.o.store.dir(job.id), report)} starts with '${wrote}'; it was changed behind the agent`)
+    }
+  }
+
+  /**
    * Agents sometimes end with their report as the final reply instead of
    * writing it. When the reply is a well-formed report, keep it rather than
    * stalling the job over a missing file.
@@ -484,11 +521,10 @@ export class Orchestrator extends EventEmitter {
     const { git } = this.o.ports
     const dir = this.o.store.dir(job.id)
     const own = relative(dir, this.report(job, agent))
-    // reviewers of one round run side by side, each writing its own verdict
     const allowed = (rel: string) => rel === own
-      || (agent.startsWith('reviewer-') && new RegExp(`^round-${job.round}/review-[\\w-]+\\.md$`).test(rel))
     const readsBranch = agent !== 'builder' && agent !== 'intake' && existsSync(job.worktree)
     const files = await snapshot(dir)
+    const fields = await this.o.store.load(job.id)
     const branch = readsBranch ? { head: await git.head(job.worktree), clean: await git.isClean(job.worktree) } : null
     return {
       check: async () => {
@@ -499,10 +535,16 @@ export class Orchestrator extends EventEmitter {
           changes.push(`${rel} (${now.has(rel) ? 'changed' : 'deleted'})`)
           await this.o.store.write(job.id, rel, text)
         }
-        for (const rel of now.keys()) {
-          if (allowed(rel) || files.has(rel)) continue
+        for (const [rel, text] of now) {
+          if (allowed(rel) ? !text.startsWith(LINK) : files.has(rel)) continue
           changes.push(`${rel} (added)`)
           await rm(join(dir, rel), { force: true })
+        }
+        const after = await this.o.store.load(job.id)
+        if (trusted(after) !== trusted(fields)) {
+          const bad = TRUSTED.filter(k => JSON.stringify(after[k]) !== JSON.stringify(fields[k]))
+          await this.o.store.update(job.id, j => ({ ...j, ...Object.fromEntries(TRUSTED.map(k => [k, fields[k]])) }))
+          throw new Error(`${agent} changed job.json fields it may not: ${bad.join(', ')}; the factory undid it`)
         }
         if (changes.length) {
           throw new Error(`${agent} changed job files it may not: ${changes.sort().join(', ')}; the factory undid it`)
@@ -557,6 +599,7 @@ export class Orchestrator extends EventEmitter {
     await watch.check()
     if (signal.aborted) throw new Error(`${agent} cancelled`)
     if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
+    await this.matchesReply(job, agent, result.reply)
     await this.keepRepliedReport(job, agent, result.reply)
     this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
     return result

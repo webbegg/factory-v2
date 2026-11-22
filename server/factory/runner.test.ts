@@ -8,7 +8,7 @@ const reviewer = (cmd: string) => bashRefusal(cmd, 'reviewer-code', BRANCH)
 describe('bashRefusal', () => {
   test('the builder pushes its own branch, and nothing else', () => {
     for (const ok of [
-      'git push', 'git push -u origin factory/001-x', 'cd /w && git push -q -u origin HEAD:factory/001-x',
+      'git push -u origin factory/001-x', 'cd /w && git push -q -u origin HEAD:factory/001-x',
       'git push origin HEAD:factory/001-x', 'git status && git log --oneline origin/main..HEAD'
     ]) expect(builder(ok)).toBeNull()
     for (const bad of [
@@ -66,6 +66,48 @@ describe('bashRefusal', () => {
     expect(builder('git config alias.p "push --force"')).not.toBeNull()
     expect(builder('git -c alias.p="push --force" p')).not.toBeNull()
     expect(builder('git config --get user.email')).toBeNull()
+  })
+})
+
+describe('bashRefusal against shell spellings (verify B1, B2)', () => {
+  test('quotes, backslashes and variable command names don\'t hide git or gh', () => {
+    for (const bad of [
+      'g\'\'it push origin HEAD:main', 'g"i"t push origin HEAD:main', '\\gh pr merge 5 --merge', '\\git push origin main',
+      'G=git; $G push origin main', '$\'\\x67it\' push origin main', 'eval "gh pr merge 5"'
+    ]) {
+      expect(builder(bad)).not.toBeNull()
+      expect(reviewer(bad)).not.toBeNull()
+    }
+  })
+
+  test('attached and bundled flag forms', () => {
+    for (const bad of ['gh api -XPUT repos/o/r/pulls/5/merge', 'gh api graphql -fquery=mutation', 'gh api x -Fa=1', 'gh api x --field=a=1', 'gh api x --input=f.json']) {
+      expect(reviewer(bad)).not.toBeNull()
+    }
+    for (const bad of ['git push -uf origin factory/001-x', 'git push -fu origin factory/001-x', 'git push -qd origin factory/001-x']) {
+      expect(builder(bad)).not.toBeNull()
+    }
+  })
+
+  test('the builder names its branch on every push, and can\'t rewrite refs or remotes', () => {
+    for (const bad of [
+      'git push', 'git push origin', 'git checkout --ignore-other-worktrees main && git push -q origin',
+      'git -c remote.origin.push=+HEAD:refs/heads/main push origin', 'git -c remote.origin.mirror=true push origin factory/001-x',
+      'git -c Alias.m=x m', 'git --config-env=alias.m=X m', 'git update-ref refs/remotes/origin/main abc',
+      'git symbolic-ref HEAD refs/heads/main', 'git remote set-url origin https://evil/x.git', 'git replace a b',
+      'git fetch origin factory/001-x:refs/remotes/origin/main'
+    ]) expect(builder(bad)).not.toBeNull()
+    expect(builder('git remote -v')).toBeNull()
+    expect(builder('git fetch -q origin main')).toBeNull()
+  })
+
+  test('read-only agents get an allowlist of git reads', () => {
+    for (const bad of ['git update-index --assume-unchanged a', 'git notes add -m x', 'git hash-object -w a', 'git reflog expire --all', 'git remote set-url origin x', 'git fetch origin a:refs/heads/b']) {
+      expect(reviewer(bad)).not.toBeNull()
+    }
+    for (const ok of ['git rev-parse HEAD', 'git ls-files', 'git blame a.ts', 'git merge-base HEAD origin/main', 'git remote -v']) {
+      expect(reviewer(ok)).toBeNull()
+    }
   })
 })
 

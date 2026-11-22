@@ -82,13 +82,17 @@ in the running factory and is not kept across a restart.
 - Each agent may write only its own file (the builder: its worktree and
   `build.md`); other Write/Edit calls are denied. Their shell is guarded too:
   no agent may merge, ready, close or review a PR, write to GitHub through
-  `gh`, or change git config; only the builder commits, and it may push only
-  its own branch, without force. The guard reads commands, it is not a sandbox,
-  so protect the base branch on GitHub as well. After every agent the factory
-  also checks what it changed: any job file other than its report is put back
-  and the job stalls, and so does an agent that only reads but moved the branch
-  or left uncommitted files.
-- The gate runs `checks.sh` as committed on `origin/<base>`, and fails a branch that adds,
+  `gh`, or pass or change git config; read-only agents run only git reads, and
+  the builder pushes only by naming its own branch, without force. The guard
+  reads commands, it is not a sandbox: a shell that writes files or builds a
+  command it can't read still runs as you, so protect the base branch on
+  GitHub. After every agent the factory also checks what it changed: any job
+  file other than its report (links included), the job's routing and stage in
+  `job.json`, or a report whose verdict differs from the agent's reply, is put
+  back or refused and the job stalls, and so does an agent that only reads but
+  moved the branch or left uncommitted files. Reviewers run one after another,
+  so each can be held to its own verdict.
+- The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync

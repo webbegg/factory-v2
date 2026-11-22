@@ -62,7 +62,10 @@ export class Gate {
    */
   async runChecks(worktree: string, signal?: AbortSignal): Promise<ChecksRun> {
     const start = performance.now()
-    const ref = `origin/${this.o.config.baseBranch}`
+    const { baseBranch } = this.o.config
+    const ref = `origin/${baseBranch}`
+    // an agent can move the local origin/<base>; fetching first puts it back
+    await this.o.ports.git.fetch(this.o.paths.repo, baseBranch)
     const script = await this.o.ports.git.show(this.o.paths.repo, ref, CHECKS)
     if (script === null) {
       return { code: 127, output: `${CHECKS} isn't committed on ${ref}: commit and push it first.\n`, seconds: 0 }
