@@ -203,6 +203,7 @@ export class Orchestrator extends EventEmitter {
   private async fill() {
     await this.startPending()
     if (!this.draining) return
+    await this.o.queue.sweepMerged(id => this.active.has(id))
     for (const row of await this.o.queue.rows()) {
       if (row.action === 'new') {
         const job = await this.o.queue.create(row.issue)

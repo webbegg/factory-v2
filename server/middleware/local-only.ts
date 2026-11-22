@@ -1,18 +1,15 @@
-import { isLocalHost } from '../factory/service'
+import { requestRefusal } from '../factory/service'
 
 // The factory acts with the user's git, gh and Claude credentials, so only
-// pages served from loopback may call it: foreign Host headers (DNS
-// rebinding) are refused, and writes must be JSON, which a cross-site form
-// can't send without a CORS preflight this server never grants.
+// the board's own pages may call its API; `requestRefusal` says what is refused.
 export default defineEventHandler((event) => {
-  if (!isLocalHost(getRequestHeader(event, 'host'))) {
-    throw createError({ statusCode: 403, statusMessage: 'factory UI is local only' })
-  }
-  const method = event.method
-  if (method !== 'GET' && method !== 'HEAD' && event.path.startsWith('/api/')) {
-    const type = getRequestHeader(event, 'content-type') ?? ''
-    if (!type.startsWith('application/json')) {
-      throw createError({ statusCode: 415, statusMessage: 'send application/json' })
-    }
-  }
+  const refused = requestRefusal({
+    host: getRequestHeader(event, 'host'),
+    origin: getRequestHeader(event, 'origin'),
+    fetchSite: getRequestHeader(event, 'sec-fetch-site'),
+    method: event.method,
+    path: event.path,
+    contentType: getRequestHeader(event, 'content-type')
+  })
+  if (refused) throw createError({ statusCode: refused.status, statusMessage: refused.message })
 })

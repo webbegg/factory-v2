@@ -92,8 +92,9 @@ in the running factory and is not kept across a restart.
   never sees the factory's credentials; checks that need one must get it some
   other way. Text the factory posts on GitHub or shows as an error has
   credentials in URLs and GitHub/Anthropic tokens masked.
-- The board listens on 127.0.0.1, refuses foreign `Host` headers and non-JSON
-  writes.
+- The board listens on 127.0.0.1, refuses foreign `Host` headers, API calls
+  from any other origin (other localhost ports included, where job dev servers
+  run branch code) and non-JSON writes.
 - Attached screenshots are uploaded to GitHub as user attachments of the
   project's repository (the way `gh issue create --attach` does it); nothing is
   committed or released. Anyone who can see the repository can open them:
