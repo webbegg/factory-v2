@@ -159,7 +159,7 @@ describe('orchestrator', () => {
     expect(intake!.message).toStartWith(`Job: ${id}. Job folder: ${jobDir}/. Main checkout: ${env.paths.repo}. Worktree: ${wt}. Branch: factory/${id}. Base: origin/main. Issue: #1.`)
     expect(intake).toMatchObject({ model: 'fable', cwd: env.paths.repo, tools: ['Read', 'Grep', 'Glob', 'Write'], writable: [`${jobDir}/intake.md`] })
     expect(spec).toMatchObject({ model: 'opus', cwd: wt, writable: [`${jobDir}/spec.md`] })
-    expect(builder).toMatchObject({ model: 'opus', cwd: wt, writable: [`${wt}/`, `${jobDir}/build.md`] })
+    expect(builder).toMatchObject({ model: 'opus', cwd: wt, writable: [`${wt}/`, `${jobDir}/build.md`], branch: `factory/${id}` })
     expect(builder!.message).toContain('Build round 1. Port: 5110.')
     expect(builder!.stopCheck).toBeFunction()
     expect(review).toMatchObject({ model: 'haiku', writable: [`${jobDir}/round-1/review-code.md`] })

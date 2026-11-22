@@ -467,6 +467,7 @@ export class Orchestrator extends EventEmitter {
       message,
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
+      branch: job.branch,
       resume,
       signal,
       onEvent: event => this.send({ type: 'agent', jobId: job.id, agent, event }),

@@ -74,7 +74,11 @@ in the running factory and is not kept across a restart.
   reaches agents only as quoted data in `issue.md`, with comments from the
   author and the operator only.
 - Each agent may write only its own file (the builder: its worktree and
-  `build.md`); other writes are denied.
+  `build.md`); other Write/Edit calls are denied. Their shell is guarded too:
+  no agent may merge, ready, close or review a PR, write to GitHub through
+  `gh`, or change git config; only the builder commits, and it may push only
+  its own branch, without force. The guard reads commands, it is not a sandbox,
+  so protect the base branch on GitHub as well.
 - The gate runs `checks.sh` as committed on `origin/<base>`, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
