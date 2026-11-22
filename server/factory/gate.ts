@@ -60,7 +60,7 @@ export class Gate {
    * Runs `.factory/checks.sh` as committed on origin/<base>. An agent with a
    * shell can edit the main checkout's copy; it can't change what was merged.
    */
-  async runChecks(worktree: string): Promise<ChecksRun> {
+  async runChecks(worktree: string, signal?: AbortSignal): Promise<ChecksRun> {
     const start = performance.now()
     const ref = `origin/${this.o.config.baseBranch}`
     const script = await this.o.ports.git.show(this.o.paths.repo, ref, CHECKS)
@@ -71,7 +71,9 @@ export class Gate {
     try {
       const file = join(dir, 'checks.sh')
       await writeFile(file, script)
-      const res = await run('bash', [file], { cwd: worktree, env: { CI: '1' }, scrub: true })
+      const res = await run('bash', [file], {
+        cwd: worktree, env: { CI: '1' }, scrub: true, signal, timeoutMs: this.o.config.limits.checksMinutes * 60_000
+      })
       return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -87,13 +89,13 @@ export class Gate {
       .map(f => `${f.status} ${f.path}`)
   }
 
-  async run(id: string, opts: { merge?: boolean } = {}): Promise<GateResult> {
+  async run(id: string, opts: { merge?: boolean, signal?: AbortSignal } = {}): Promise<GateResult> {
     const { store, ports, config } = this.o
     const job = await store.load(id)
     if (job.round < 1) throw new Refused(`${id} hasn't started a build round`)
     const commit = await ports.git.head(job.worktree)
     const protectedChanges = await this.protectedChanges(job.worktree)
-    const checks = await this.runChecks(job.worktree)
+    const checks = await this.runChecks(job.worktree, opts.signal)
     const verdict: GateVerdict = checks.code === 0 && !protectedChanges.length ? 'PASS' : 'FAIL'
     const name = opts.merge ? 'merge-checks' : 'checks'
     const rd = `round-${job.round}`

@@ -78,6 +78,15 @@ describe('gate', () => {
     }
   })
 
+  test('checks.sh that runs past limits.checksMinutes fails the gate', async () => {
+    const env = await makeEnv({ limits: { ...defaultConfig().limits, checksMinutes: 0.005 } })
+    withChecks(env, 'sleep 30')
+    await gateJob(env)
+    const result = await env.gate.run(ID)
+    expect(result).toMatchObject({ verdict: 'FAIL', code: 124 })
+    expect(await env.store.read(ID, 'round-1/checks.log')).toContain('timed out after 0.3s')
+  }, 20_000)
+
   test('a failing checks.sh fails the gate with its exit code', async () => {
     const env = await makeEnv()
     await withChecks(env, 'echo boom >&2; exit 3')

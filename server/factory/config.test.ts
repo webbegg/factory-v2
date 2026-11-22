@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defaultConfig, saveConfig, validateConfigUpdate } from './config'
+import { defaultConfig, loadConfig, saveConfig, validateConfigUpdate } from './config'
 import type { ConfigUpdate } from './config'
 import { makeEnv } from './testing'
 
@@ -80,6 +80,12 @@ describe('saveConfig', () => {
     expect(saved.custom).toBe(true)
     expect(config).toMatchObject({ concurrency: 2, ports: raw.ports, labels: raw.labels })
     expect(config.protectedPaths).toEqual(good().protectedPaths)
+  })
+
+  test('a partial limits block keeps the other limits\' defaults', async () => {
+    const { paths, file, raw } = await seeded()
+    await writeFile(file, JSON.stringify({ ...raw, limits: { checksMinutes: 5 } }))
+    expect((await loadConfig(paths)).limits).toEqual({ ...defaultConfig().limits, checksMinutes: 5 })
   })
 
   test('an invalid update leaves the file byte-for-byte unchanged', async () => {

@@ -22,6 +22,8 @@ export interface AgentTask {
   writable: string[]
   /** the job branch: the only one the builder may push */
   branch?: string
+  maxTurns?: number
+  maxBudgetUsd?: number
   /** Agent SDK session to continue */
   resume?: string
   /** runs when the agent tries to stop; a string blocks the stop with that reason */
@@ -170,6 +172,7 @@ export class SdkRunner implements AgentRunner {
   async run(task: AgentTask): Promise<AgentResult> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk')
     const abortController = new AbortController()
+    if (task.signal?.aborted) return { ok: false, reply: '', sessionId: task.resume ?? null, costUsd: 0, error: 'cancelled before it started' }
     task.signal?.addEventListener('abort', () => abortController.abort(), { once: true })
     const emit = (kind: AgentEvent['kind'], text: string) => task.onEvent?.({ kind, text })
 
@@ -185,6 +188,8 @@ export class SdkRunner implements AgentRunner {
           model: task.model,
           resume: task.resume,
           abortController,
+          maxTurns: task.maxTurns,
+          maxBudgetUsd: task.maxBudgetUsd,
           systemPrompt: { type: 'preset', preset: 'claude_code', append: task.systemPrompt },
           tools: task.tools,
           allowedTools: task.tools,

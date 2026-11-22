@@ -90,6 +90,12 @@ async function ui(repo: string, args: string[]) {
 async function headless(repo: string, issue?: string) {
   const f = await createFactory(repo)
   const release = await acquireLock(f.paths)
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      console.log(`\n${signal}: stopping running agents and checks`)
+      void f.orchestrator.shutdown()
+    })
+  }
   try {
     f.orchestrator.on('event', printEvent)
     if (issue) {

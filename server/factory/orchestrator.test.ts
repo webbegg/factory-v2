@@ -166,6 +166,32 @@ describe('orchestrator', () => {
     expect(review!.message).toContain('Review round 1.')
   })
 
+  test('every agent run is capped by limits.agentTurns and limits.agentBudgetUsd', async () => {
+    const { env, runner, orch } = await factory({ ...happy }, { limits: { checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    expect(runner.tasks.length).toBeGreaterThan(0)
+    for (const t of runner.tasks) expect(t).toMatchObject({ maxTurns: 42, maxBudgetUsd: 3.5 })
+  })
+
+  test('shutdown aborts running agents and waits for their drivers', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'spec-writer': t => new Promise<string>((resolve) => {
+        t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
+      })
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    while (!orch.runningJobs().length) await Bun.sleep(5)
+    while ((await env.store.list())[0]?.stage !== 'spec') await Bun.sleep(5)
+    await orch.shutdown()
+    expect(orch.runningJobs()).toEqual([])
+    expect(orch.isDraining).toBe(false)
+    expect((await env.store.list())[0]!.stage).toBe('spec')
+  })
+
   test('prompt overrides come from origin/<base>; an uncommitted one is ignored', async () => {
     const { env, runner, orch } = await factory({ ...happy })
     env.git.committed.set('.factory/agents/spec-writer.md', 'committed spec prompt')

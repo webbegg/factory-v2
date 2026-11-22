@@ -20,7 +20,8 @@ export function defaultConfig(): FactoryConfig {
       security: { security: 'opus' }
     },
     protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],
-    ports: { base: 5100, step: 10 }
+    ports: { base: 5100, step: 10 },
+    limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 }
   }
 }
 
@@ -29,10 +30,15 @@ export function factoryPaths(repo: string): FactoryPaths {
   return { repo, factory, jobs: join(factory, 'jobs'), worktrees: join(repo, '.worktrees') }
 }
 
-/** Reads <repo>/.factory/config.json over the defaults (top-level keys only). */
+/** Reads <repo>/.factory/config.json over the defaults (top-level keys, and each limit on its own). */
 export async function loadConfig(paths: FactoryPaths): Promise<FactoryConfig> {
   const text = await readFile(join(paths.factory, 'config.json'), 'utf8')
-  return { ...defaultConfig(), ...JSON.parse(text) as Partial<FactoryConfig> }
+  return withDefaults(JSON.parse(text) as Partial<FactoryConfig>)
+}
+
+function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
+  const defaults = defaultConfig()
+  return { ...defaults, ...raw, limits: { ...defaults.limits, ...raw.limits } }
 }
 
 /** The keys the Settings page edits; everything else in the file is left alone. */
@@ -119,5 +125,5 @@ export async function saveConfig(paths: FactoryPaths, input: unknown): Promise<F
   const raw = JSON.parse(await readFile(file, 'utf8')) as Partial<FactoryConfig>
   const next = { ...raw, ...update }
   await writeFile(file, JSON.stringify(next, null, 2) + '\n')
-  return { ...defaultConfig(), ...next }
+  return withDefaults(next)
 }

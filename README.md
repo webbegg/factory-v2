@@ -63,6 +63,12 @@ copies on `origin/<base>`, never the working copy; job state and worktrees are
 gitignored. The board's Settings page edits `.factory/config.json` and applies
 it to the running factory without a restart; the change still needs committing.
 
+`limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
+default 30; it and everything it started are killed) and each agent run
+(`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
+stalls with the reason, like any other failure. Stopping the factory aborts
+running agents and checks.
+
 Running one issue (**Run issue** on the board, or **Run it now** on New request)
 while every slot is busy queues it: the board shows it as queued, and it starts on
 its own when a slot frees up, ahead of what the drain would pick. The queue lives

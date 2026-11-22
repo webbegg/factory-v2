@@ -1,5 +1,46 @@
 import { describe, expect, test } from 'bun:test'
-import { exec, redact, scrubbedEnv } from './exec'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { exec, redact, run, scrubbedEnv } from './exec'
+
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+describe('run limits', () => {
+  // a command that leaves a grandchild behind, like a dev server started with &
+  async function spawnTree(opts: { timeoutMs?: number, signal?: AbortSignal }) {
+    const dir = await mkdtemp(join(tmpdir(), 'factory-exec-'))
+    const pidFile = join(dir, 'pid')
+    const started = performance.now()
+    const res = await run('bash', ['-c', `sleep 30 & echo $! > ${pidFile}; sleep 30`], { cwd: dir, ...opts })
+    const pid = Number((await readFile(pidFile, 'utf8')).trim())
+    await Bun.sleep(200)
+    return { res, pid, ms: performance.now() - started }
+  }
+
+  test('a timeout kills the whole process group and says so', async () => {
+    const { res, pid, ms } = await spawnTree({ timeoutMs: 300 })
+    expect(res.code).toBe(124)
+    expect(res.stderr).toContain('timed out after 0.3s')
+    expect(ms).toBeLessThan(10_000)
+    expect(alive(pid)).toBe(false)
+  }, 20_000)
+
+  test('an abort kills the whole process group', async () => {
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 300)
+    const { res, pid } = await spawnTree({ signal: controller.signal })
+    expect(res.code).toBe(130)
+    expect(alive(pid)).toBe(false)
+  }, 20_000)
+})
 
 describe('scrubbedEnv', () => {
   test('drops secret-looking variables and keeps the rest', () => {

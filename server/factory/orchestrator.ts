@@ -101,6 +101,8 @@ export class Orchestrator extends EventEmitter {
   readonly errors = new Map<string, string>()
   /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
   private pending: number[] = []
+  /** set by shutdown: nothing new starts, queued issues included */
+  private stopped = false
 
   constructor(private o: OrchestratorOptions) {
     super()
@@ -184,6 +186,14 @@ export class Orchestrator extends EventEmitter {
     this.active.get(id)?.controller.abort()
   }
 
+  /** Stops draining, aborts every running agent and gate, and waits for their drivers to stop. */
+  async shutdown(): Promise<void> {
+    this.pause()
+    this.stopped = true
+    for (const a of this.active.values()) a.controller.abort()
+    await Promise.all([...this.active.values()].map(a => a.done))
+  }
+
   /** Resolves once no job is running in this process. */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()].map(a => a.done))
@@ -201,6 +211,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async fill() {
+    if (this.stopped) return
     await this.startPending()
     if (!this.draining) return
     await this.o.queue.sweepMerged(id => this.active.has(id))
@@ -248,7 +259,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private start(id: string) {
-    if (this.active.has(id)) return
+    if (this.active.has(id) || this.stopped) return
     const controller = new AbortController()
     this.errors.delete(id)
     const done = this.drive(id, controller.signal)
@@ -302,7 +313,8 @@ export class Orchestrator extends EventEmitter {
       case 'build':
         return this.build(job, signal)
       case 'gate': {
-        const result = await gate.run(job.id)
+        const result = await gate.run(job.id, { signal })
+        if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
         if (result.verdict === 'PASS') await machine.advance(job.id, 'review')
         else await machine.advance(job.id, job.round >= job.roundLimit ? 'needs-human' : 'build')
@@ -348,7 +360,7 @@ export class Orchestrator extends EventEmitter {
     const purpose = [this.buildPurpose(job), resuming ? 'A previous builder stopped mid-round: read build.md and git log to see how far it got.' : '']
       .filter(Boolean).join(' ')
     const stopCheck = async () => {
-      const checks = await gate.runChecks(job.worktree)
+      const checks = await gate.runChecks(job.worktree, signal)
       if (checks.code === 0) return null
       const tail = checks.output.trimEnd().split('\n').slice(-40).join('\n')
       return `.factory/checks.sh fails in your worktree (exit ${checks.code}); the gate will reject this build. `
@@ -522,6 +534,8 @@ export class Orchestrator extends EventEmitter {
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
       branch: job.branch,
+      maxTurns: this.o.config.limits.agentTurns,
+      maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,
       signal,
       onEvent: event => this.send({ type: 'agent', jobId: job.id, agent, event }),
