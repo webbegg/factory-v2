@@ -19,7 +19,7 @@ export function defaultConfig(): FactoryConfig {
       ui: { ux: 'sonnet', ui: 'haiku' },
       security: { security: 'opus' }
     },
-    protectedPaths: ['.factory/checks.sh', '.factory/config.json'],
+    protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],
     ports: { base: 5100, step: 10 }
   }
 }

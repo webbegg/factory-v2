@@ -104,7 +104,8 @@ describe('GitCli against a real repo', () => {
     await sh(repo, 'config', 'user.email', 't@t')
     await sh(repo, 'config', 'user.name', 't')
     await writeFile(join(repo, 'a.txt'), 'a\n')
-    await sh(repo, 'add', 'a.txt')
+    await writeFile(join(repo, 'long.txt'), Array.from({ length: 20 }, (_, i) => `line ${i}\n`).join(''))
+    await sh(repo, 'add', 'a.txt', 'long.txt')
     await sh(repo, 'commit', '-qm', 'init')
     await sh(repo, 'push', '-q', 'origin', 'main')
     git = new GitCli(repo)
@@ -123,6 +124,12 @@ describe('GitCli against a real repo', () => {
     await exec('git', ['commit', '-qam', 'change'], { cwd: wt })
     expect(await git.commitsAhead(wt, 'origin/main')).toBe(1)
     expect(await git.changedFiles(wt, 'origin/main')).toEqual([{ status: 'M', path: 'a.txt' }])
+    // a rename reports both sides, so moving a file into a protected path is seen
+    await exec('git', ['mv', 'long.txt', 'moved.txt'], { cwd: wt })
+    await exec('git', ['commit', '-qm', 'rename'], { cwd: wt })
+    expect(await git.changedFiles(wt, 'origin/main')).toEqual([
+      { status: 'M', path: 'a.txt' }, { status: 'D', path: 'long.txt' }, { status: 'A', path: 'moved.txt' }
+    ])
 
     await git.push(wt, 'factory/001-x')
     expect(await git.remoteHead(wt, 'factory/001-x')).toBe(await git.head(wt))

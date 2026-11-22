@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { defaultConfig } from './config'
 import { globToRegExp } from './gate'
 import { route } from './route'
 import { makeEnv, seed } from './testing'
@@ -55,15 +56,27 @@ describe('gate', () => {
     expect(await env.store.read(ID, 'round-1/checks.md')).toContain('failed with exit 3')
   })
 
-  test('modifying or deleting a protected file fails; adding one does not', async () => {
-    const env = await makeEnv()
+  test('adding, modifying or deleting a protected file fails', async () => {
+    const env = await makeEnv({ protectedPaths: ['.github/*', 'src/locked.ts'] })
     await withChecks(env, 'true')
     await gateJob(env)
-    env.git.changed = [{ status: 'A', path: '.factory/new.md' }, { status: 'M', path: 'src/x.ts' }]
+    env.git.changed = [{ status: 'M', path: 'src/x.ts' }]
     expect((await env.gate.run(ID)).verdict).toBe('PASS')
-    env.git.changed.push({ status: 'D', path: '.factory/checks.sh' })
+    env.git.changed.push({ status: 'A', path: '.github/workflows/x.yml' }, { status: 'D', path: 'src/locked.ts' })
     const result = await env.gate.run(ID)
-    expect(result).toMatchObject({ verdict: 'FAIL', code: 0, protectedChanges: ['D .factory/checks.sh'] })
+    expect(result).toMatchObject({ verdict: 'FAIL', code: 0, protectedChanges: ['A .github/workflows/x.yml', 'D src/locked.ts'] })
+  })
+
+  test('.factory/ is protected whatever the config says', async () => {
+    const env = await makeEnv({ protectedPaths: [] })
+    await withChecks(env, 'true')
+    await gateJob(env)
+    env.git.changed = [{ status: 'A', path: '.factory/agents/approver.md' }]
+    expect(await env.gate.run(ID)).toMatchObject({ verdict: 'FAIL', protectedChanges: ['A .factory/agents/approver.md'] })
+  })
+
+  test('the defaults protect CI config', () => {
+    expect(defaultConfig().protectedPaths).toContain('.github/*')
   })
 
   test('--merge writes merge-checks.md and leaves checks.md alone', async () => {

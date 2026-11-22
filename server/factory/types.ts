@@ -63,7 +63,7 @@ export interface FactoryConfig {
   routing: Record<Risk, Record<string, string>>
   /** surface → extra reviewers (lens → model) */
   surfaceReviewers: Record<string, Record<string, string>>
-  /** glob patterns for files no job may modify or delete */
+  /** glob patterns for files no job may add, modify or delete (`.factory/*` always is) */
   protectedPaths: string[]
   ports: { base: number, step: number }
 }

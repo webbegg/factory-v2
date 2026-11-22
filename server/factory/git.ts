@@ -50,9 +50,9 @@ export class GitCli implements GitPort {
     return Number((await this.git(cwd, 'rev-list', '--count', `${base}..HEAD`)).trim())
   }
 
-  /** Files the branch changed since it forked from `base`; renames report the old path. */
+  /** Files the branch changed since it forked from `base`; a rename is a delete plus an add, so both paths show. */
   async changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>> {
-    const out = await this.git(cwd, 'diff', '--name-status', `${base}...HEAD`)
+    const out = await this.git(cwd, 'diff', '--name-status', '--no-renames', `${base}...HEAD`)
     return out.split('\n').filter(Boolean).map((line) => {
       const [status = '', path = ''] = line.split('\t')
       return { status: status.charAt(0), path }

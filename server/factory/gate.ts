@@ -17,6 +17,9 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${src}$`)
 }
 
+/** The factory's own checks, config and prompts: no branch may touch them, whatever the config says. */
+export const ALWAYS_PROTECTED = ['.factory/*']
+
 export interface GateResult {
   verdict: GateVerdict
   code: number
@@ -59,11 +62,12 @@ export class Gate {
     return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
   }
 
+  /** Protected files the branch added, changed or deleted; an added CI workflow or prompt is as dangerous as an edit. */
   async protectedChanges(worktree: string): Promise<string[]> {
-    const patterns = this.o.config.protectedPaths.map(globToRegExp)
+    const patterns = [...ALWAYS_PROTECTED, ...this.o.config.protectedPaths].map(globToRegExp)
     const changed = await this.o.ports.git.changedFiles(worktree, `origin/${this.o.config.baseBranch}`)
     return changed
-      .filter(f => f.status !== 'A' && patterns.some(p => p.test(f.path)))
+      .filter(f => patterns.some(p => p.test(f.path)))
       .map(f => `${f.status} ${f.path}`)
   }
 

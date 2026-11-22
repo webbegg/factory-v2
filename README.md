@@ -74,8 +74,10 @@ in the running factory and is not kept across a restart.
   author and the operator only.
 - Each agent may write only its own file (the builder: its worktree and
   `build.md`); other writes are denied.
-- The gate runs the main checkout's `checks.sh`, and fails a branch that edits
-  `protectedPaths`. Merges happen only through `gh pr merge`, after a re-sync
+- The gate runs the main checkout's `checks.sh`, and fails a branch that adds,
+  edits, deletes or renames a file under `protectedPaths` (default
+  `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
+  `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
   and a second gate. The factory never deploys.
 - The board listens on 127.0.0.1, refuses foreign `Host` headers and non-JSON
   writes.
