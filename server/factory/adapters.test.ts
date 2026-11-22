@@ -43,12 +43,12 @@ describe('GhCli', () => {
     await gh.comment('pr', 9, 'hello')
     await gh.reply(7, 'my answer')
     await gh.editLabels('issue', 7, { add: ['a'], remove: ['b', 'c'] })
-    await gh.prMerge(9, 'squash')
+    await gh.prMerge(9, 'squash', 'abc123')
     expect(calls).toEqual([
       ['pr', 'comment', '9', '--body', `${MARKER}\nhello`],
       ['issue', 'comment', '7', '--body', 'my answer'],
       ['issue', 'edit', '7', '--add-label', 'a', '--remove-label', 'b,c'],
-      ['pr', 'merge', '9', '--squash']
+      ['pr', 'merge', '9', '--squash', '--match-head-commit', 'abc123']
     ])
   })
 

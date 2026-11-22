@@ -74,10 +74,10 @@ export class FakeGitHub implements GitHubPort {
   }
 
   mergeError: string | null = null
-  async prMerge(number: number, method: string) {
+  async prMerge(number: number, method: string, headSha: string) {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
-    this.calls.push(['merge', number, method])
+    this.calls.push(['merge', number, method, headSha])
   }
 
   async openPrsForBranch(branch: string) {

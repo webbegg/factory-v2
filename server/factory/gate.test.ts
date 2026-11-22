@@ -133,7 +133,7 @@ describe('merge', () => {
     expect(env.git.calls).toContainEqual(['merge', job.worktree, 'origin/main'])
     expect(env.git.calls).toContainEqual(['push', job.worktree, job.branch])
     expect(env.github.calls).toContainEqual(['ready', 9])
-    expect(env.github.calls).toContainEqual(['merge', 9, 'squash'])
+    expect(env.github.calls).toContainEqual(['merge', 9, 'squash', 'a'.repeat(40)])
     expect(await env.store.read(ID, 'round-1/merge-checks.md')).toStartWith('GATE: PASS')
   })
 
@@ -184,6 +184,22 @@ describe('merge', () => {
     env.github.prStates.set(9, 'MERGED')
     expect((await env.merger.merge(ID)).stage).toBe('merged')
     expect(env.git.calls.map(c => c[0])).toEqual(['removeWorktree', 'deleteBranch'])
+  })
+
+  test('merges run one at a time, so each is gated against the base the previous one left', async () => {
+    const env = await makeEnv()
+    const trace = join(env.paths.repo, 'trace')
+    await withChecks(env, `echo "start $(basename "$PWD")" >> ${trace}; sleep 0.2; echo "end $(basename "$PWD")" >> ${trace}`)
+    for (const [id, pr] of [['001-a', 9], ['002-b', 10]] as const) {
+      const job = await seed(env, { id, issue: pr, stage: 'approve', round: 1, pr, agents: AGENTS }, { 'decision.md': 'APPROVE\n' })
+      await mkdir(job.worktree, { recursive: true })
+    }
+    await Promise.all([env.merger.merge('001-a'), env.merger.merge('002-b')])
+    const lines = (await Bun.file(trace).text()).trim().split('\n')
+    expect(lines).toHaveLength(4)
+    // no second start before the first one's end
+    expect(lines[1]).toBe(lines[0]!.replace('start', 'end'))
+    expect(lines[3]).toBe(lines[2]!.replace('start', 'end'))
   })
 
   test('only an approved job merges', async () => {

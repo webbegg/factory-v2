@@ -92,8 +92,8 @@ export class GhCli implements GitHubPort {
     await this.gh(['pr', 'close', String(number)])
   }
 
-  async prMerge(number: number, method: 'merge' | 'squash' | 'rebase') {
-    await this.gh(['pr', 'merge', String(number), `--${method}`])
+  async prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string) {
+    await this.gh(['pr', 'merge', String(number), `--${method}`, '--match-head-commit', headSha])
   }
 
   openPrsForBranch(branch: string) {

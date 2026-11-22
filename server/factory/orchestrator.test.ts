@@ -142,7 +142,7 @@ describe('orchestrator', () => {
     const job = (await env.store.list())[0]!
     expect(job.stage).toBe('merged')
     expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver'])
-    expect(env.github.calls).toContainEqual(['merge', 101, 'merge'])
+    expect(env.github.calls).toContainEqual(['merge', 101, 'merge', 'a'.repeat(40)])
     expect(job.costUsd).toBe(1.25)
     expect(orch.errors.size).toBe(0)
   })

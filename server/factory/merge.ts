@@ -14,16 +14,25 @@ export interface MergerOptions {
 }
 
 /**
- * APPROVE → merged. Another job may have merged since this branch was gated,
- * so it syncs with the base, gates again, pushes, and merges through
+ * APPROVE → merged, one job at a time. Another job may have merged since this
+ * branch was gated, so it syncs with the base, gates again, pushes, and merges through
  * `gh pr merge` (branch protection and required checks still apply). A
  * conflict with the base goes back to the builder while rounds remain; any
  * other failure, or a conflict on the last round, hands the job to a human.
  */
 export class Merger {
+  /** merges in flight, chained: two at once would each be gated against a base without the other */
+  private lock: Promise<unknown> = Promise.resolve()
+
   constructor(private o: MergerOptions) {}
 
-  async merge(id: string): Promise<Job> {
+  merge(id: string): Promise<Job> {
+    const next = this.lock.catch(() => {}).then(() => this.mergeNow(id))
+    this.lock = next
+    return next
+  }
+
+  private async mergeNow(id: string): Promise<Job> {
     const { store, ports, machine, gate, config } = this.o
     const base = config.baseBranch
     let job = await store.load(id)
@@ -54,7 +63,8 @@ export class Merger {
     try {
       await ports.git.push(job.worktree, job.branch)
       if (await ports.github.prIsDraft(pr)) await ports.github.prReady(pr)
-      await ports.github.prMerge(pr, config.mergeMethod)
+      // pinned to the gated commit: a push after the gate makes GitHub refuse the merge
+      await ports.github.prMerge(pr, config.mergeMethod, result.commit)
     } catch (err) {
       return fail(`The merge failed:\n\n\`\`\`\n${(err as Error).message}\n\`\`\``)
     }

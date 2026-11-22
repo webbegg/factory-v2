@@ -34,7 +34,8 @@ export interface GitHubPort {
   prIsDraft(number: number): Promise<boolean>
   prReady(number: number): Promise<void>
   prClose(number: number): Promise<void>
-  prMerge(number: number, method: 'merge' | 'squash' | 'rebase'): Promise<void>
+  /** merges only while the PR head is still `headSha` */
+  prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string): Promise<void>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
   /** hosts images for issue bodies and comments; one URL per image, in order */
   uploadImages(images: UploadImage[]): Promise<string[]>
