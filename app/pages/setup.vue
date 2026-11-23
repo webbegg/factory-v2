@@ -1,5 +1,7 @@
 <script setup lang="ts">
-const { checks, checksScript, loaded, loading, error, recheck, initialize } = useSetup()
+const { checks, checksScript, loaded, loading, error, recheck, initialize, baseResult, baseRunning, runBaseChecks } = useSetup()
+const { state } = useBoard()
+const checksMinutes = computed(() => state.value?.config.limits.checksMinutes)
 
 const STATE = {
   ok: { label: 'ok', color: 'success' },
@@ -149,6 +151,59 @@ async function runInit() {
           class="animate-spin"
         />
         Running doctor…
+      </div>
+    </UCard>
+
+    <UCard>
+      <template #header>
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium text-highlighted">checks.sh on the base</span>
+          <UButton
+            icon="i-lucide-play"
+            label="Run checks on base"
+            color="neutral"
+            variant="subtle"
+            size="sm"
+            class="ms-auto"
+            :loading="baseRunning"
+            :disabled="loading || initializing"
+            @click="runBaseChecks"
+          />
+        </div>
+      </template>
+      <p class="text-sm text-muted">
+        Runs the base branch's committed checks.sh in a temporary worktree, the way the gate does.
+        It takes as long as the checks do (up to {{ checksMinutes ? `${checksMinutes} min` : 'limits.checksMinutes' }}).
+      </p>
+      <div
+        v-if="baseResult"
+        class="mt-3 space-y-2"
+      >
+        <div class="flex items-start gap-3">
+          <UBadge
+            :label="STATE[checkState(baseResult.check)].label"
+            :color="STATE[checkState(baseResult.check)].color"
+            variant="subtle"
+            class="w-16 shrink-0 justify-center"
+          />
+          <div class="min-w-0">
+            <p class="text-sm text-highlighted">
+              {{ baseResult.check.name }}
+            </p>
+            <p class="text-sm text-muted break-words">
+              {{ baseResult.check.detail }}
+            </p>
+          </div>
+        </div>
+        <UScrollArea
+          v-if="baseResult.tail"
+          as="pre"
+          orientation="horizontal"
+          tabindex="0"
+          class="rounded-md bg-elevated p-3 text-xs"
+        >
+          {{ baseResult.tail }}
+        </UScrollArea>
       </div>
     </UCard>
   </UContainer>
