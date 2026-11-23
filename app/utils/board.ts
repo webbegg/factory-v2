@@ -33,6 +33,16 @@ export function escapeAction(ctx: { overlayOpen: boolean, inTextField: boolean, 
   return ctx.hasSelection ? 'close' : 'ignore'
 }
 
+/**
+ * The one run action a job's panel offers: Cancel while it runs, Retry once it
+ * stalled, Resume when it sits idle in a live stage (cancelled, or after a restart).
+ */
+export function jobAction(job: { stage: Stage, running: boolean, error: string | null | undefined }): 'cancel' | 'retry' | 'resume' | null {
+  if (job.running) return 'cancel'
+  if (job.error) return 'retry'
+  return LIVE_STAGES.has(job.stage) ? 'resume' : null
+}
+
 /** Who writes a job file, for the viewer's empty state. */
 export function fileWriter(path: string): string {
   const name = path.split('/').pop() ?? path
