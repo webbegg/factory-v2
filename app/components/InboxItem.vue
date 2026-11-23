@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Job } from '~/composables/useBoard'
+import { section } from '~~/server/factory/markdown'
 
 const props = defineProps<{ job: Job }>()
 const human = computed(() => props.job.stage === 'needs-human')
@@ -11,8 +12,7 @@ const { data } = useFetch<{ text: string }>(() => `/api/jobs/${props.job.id}/fil
 })
 const question = computed(() => {
   const text = data.value?.text ?? ''
-  const section = (name: string) => new RegExp(`^## ${name}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm').exec(text)?.[1]?.trim()
-  return (human.value ? section('For the human') ?? section('Why') : section('Questions')) ?? ''
+  return (human.value ? section(text, 'For the human') ?? section(text, 'Why') : section(text, 'Questions')) ?? ''
 })
 </script>
 

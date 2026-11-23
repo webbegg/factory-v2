@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { WAITING } from '~~/server/factory/types'
+
 const { state } = useBoard()
 
-const waiting = computed(() => (state.value?.jobs ?? []).filter(j => j.stage === 'needs-human' || j.stage === 'needs-info'))
+const waiting = computed(() => (state.value?.jobs ?? []).filter(j => WAITING.has(j.stage)))
 const stalled = computed(() => (state.value?.jobs ?? []).filter(j => state.value?.errors[j.id]))
 </script>
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { WAITING } from '~~/server/factory/types'
+
 useHead({
   meta: [{ name: 'viewport', content: 'width=device-width, initial-scale=1' }],
   link: [{ rel: 'icon', href: '/favicon.ico' }],
@@ -16,7 +18,7 @@ onMounted(() => {
 
 const failing = computed(() => summarizeDoctor(checks.value).failures.length)
 
-const waiting = computed(() => state.value?.jobs.filter(j => j.stage === 'needs-human' || j.stage === 'needs-info').length ?? 0)
+const waiting = computed(() => state.value?.jobs.filter(j => WAITING.has(j.stage)).length ?? 0)
 const projectName = computed(() => state.value?.project.split('/').pop() ?? '…')
 
 const links = computed(() => [

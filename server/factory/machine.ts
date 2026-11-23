@@ -4,7 +4,10 @@ import { mkdir, readdir } from 'node:fs/promises'
 import { body, firstLine, header, section } from './markdown'
 import type { Ports, ThreadKind } from './ports'
 import type { JobStore } from './store'
+import { TERMINAL, WAITING } from './types'
 import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Risk, RoundReason, Stage, Verdict } from './types'
+
+export { TERMINAL, WAITING }
 
 /**
  * Legal stage moves. Any unfinished job may also move to `merged` once its PR
@@ -21,9 +24,6 @@ export const TRANSITIONS: Partial<Record<Stage, readonly Stage[]>> = {
   'merging': ['build', 'needs-human'],
   'needs-human': ['build', 'merging', 'rejected']
 }
-
-export const TERMINAL: ReadonlySet<Stage> = new Set(['merged', 'rejected'])
-export const WAITING: ReadonlySet<Stage> = new Set(['needs-info', 'needs-human'])
 
 /** A move the machine won't make; the message says why. */
 export class Refused extends Error {
