@@ -74,7 +74,12 @@ view; this file is for whoever changes the code.
   (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
   `app/utils/board.ts`. A card's round chips come from `roundChips` in
   `app/utils/chips.ts`, pulse only while the job is in `state.running`, and use
-  the `ring-pulse` animation defined in `app/assets/css/main.css`. Job details render in `app/components/JobDetail.vue`
+  the `ring-pulse` animation defined in `app/assets/css/main.css`.
+  `app/utils/waiting.ts` is the single definition of "waiting on you"
+  (needs-human or stalled, each once; needs-info waits on the author), used by
+  the tab title, the Inbox badge, the Inbox and the browser notifier in
+  `app/app.vue`; the notification opt-in is a `localStorage` flag in
+  `app/composables/useNotifications.ts`, never in config. Job details render in `app/components/JobDetail.vue`
   inside the board's panel at `/?job=<id>`; `/jobs/:id` only redirects there.
   Layout: the shell (`app/app.vue`) gives pages a viewport-tall scroll
   region under the header, and pages that want fixed headers with scrolling
