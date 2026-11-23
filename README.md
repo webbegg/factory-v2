@@ -158,22 +158,20 @@ in the running factory and is not kept across a restart.
   sandbox, and an agent run fails if the sandbox can't start (`doctor` says
   whether it can). A shell may write the agent's own files and its working
   folder, the job's worktree (the SDK always allows that; after a read-only
-  agent the factory still checks that HEAD moved and no files were left).
-  In the repo's `.git`, which the SDK opens to shells in a worktree, the
-  factory denies everything to every agent but the builder, and to the builder
-  everything but the objects, its worktree's gitdir and its own branch's refs
-  and reflogs: not `main`, other jobs' branches or gitdirs, tags, replace refs,
-  `packed-refs`, `HEAD` or `config`, so `git push -u` can't record an upstream
-  (the push still goes through). Writable objects remain a gap: a builder can
-  swap an object's content, as it can already run code at the gate. The factory
-  names refs in full (`refs/remotes/origin/<base>`), so a planted
-  `refs/tags/origin/<base>` can't stand in for the base. Verified on macOS;
-  Linux is untested. Only the builder reaches the network: GitHub, the
-  npm registry and the hosts in `domains`. On macOS it also gets the TLS trust
-  service `gh` needs. The builder and the UX and UI reviewers may bind local
-  ports for dev servers. Model keys are hidden from every shell; the GitHub
-  token and `gh` config reach only the builder, which gets the token from
-  `gh auth token` because the sandbox closes the keychain. There is no browser
+  agent the factory still checks that HEAD didn't move and no files were
+  left). No shell may write the repo's `.git`, which the SDK would otherwise
+  open to a shell in a worktree, so no agent can move refs, plant objects or
+  redirect git. The builder therefore doesn't commit, push or open its PR:
+  it leaves its changes in the worktree, and each time it stops the factory
+  commits all of them (titled from the `# Build:` line of `build.md`, refused
+  while conflict markers are left), pushes the branch and opens the draft PR.
+  On a conflict round the factory starts the merge and the builder resolves
+  the conflicted files. Only the builder reaches the network, and only for
+  packages: the npm registry and the hosts in `domains`, never GitHub. The
+  builder and the UX and UI reviewers may bind local ports for dev servers.
+  Model keys, GitHub tokens and `gh` config are hidden from every shell. The
+  factory names refs in full (`refs/remotes/origin/<base>`) whether the
+  sandbox is on or not. Verified on macOS; Linux is untested. There is no browser
   under the sandbox, since Chrome can't start in it: agents that view pages are
   told to read the code and `curl` their dev server. The sandbox covers shells
   only. Write and Edit stay with the guard above, and the gate's `checks.sh`

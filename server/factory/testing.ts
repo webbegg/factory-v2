@@ -92,6 +92,13 @@ export class FakeGitHub implements GitHubPort {
     return this.openPrs.get(branch) ?? []
   }
 
+  async prCreate(pr: { base: string, head: string, title: string, body: string }) {
+    this.calls.push(['prCreate', pr])
+    const created = { number: 900 + this.calls.length, url: `https://github.com/o/r/pull/${900 + this.calls.length}` }
+    this.openPrs.set(pr.head, [created])
+    return created
+  }
+
   async uploadImages(images: UploadImage[]) {
     this.calls.push(['uploadImages', images.map(i => i.name)])
     return images.map((img, i) => `https://github.com/user-attachments/assets/fake-${i + 1}-${img.name}`)
@@ -177,6 +184,24 @@ export class FakeGit implements GitPort {
   async merge(cwd: string, ref: string) {
     this.calls.push(['merge', cwd, fullRef(ref)])
     return this.mergeResult
+  }
+
+  startMergeResult = { ok: false, conflicts: ['src/a.ts'] }
+  async startMerge(cwd: string, ref: string) {
+    this.calls.push(['startMerge', cwd, fullRef(ref)])
+    if (!this.startMergeResult.ok) this.clean = false
+    return this.startMergeResult
+  }
+
+  /** a problem `commitAll` reports instead of committing, once per entry */
+  commitProblems: string[] = []
+  async commitAll(cwd: string, message: string) {
+    this.calls.push(['commitAll', cwd, message])
+    const problem = this.commitProblems.shift()
+    if (problem) return { committed: false, problem }
+    if (this.clean) return { committed: false }
+    this.clean = true
+    return { committed: true }
   }
 }
 

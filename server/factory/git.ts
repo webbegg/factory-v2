@@ -121,4 +121,27 @@ export class GitCli implements GitPort {
     await this.tryGit(cwd, 'merge', '--abort')
     return { ok: false, output: (res.stdout + res.stderr).trim() }
   }
+
+  async startMerge(cwd: string, ref: string): Promise<{ ok: boolean, conflicts: string[] }> {
+    const res = await this.tryGit(cwd, 'merge', '--no-edit', ref)
+    if (res.code === 0) return { ok: true, conflicts: [] }
+    const conflicts = (await this.git(cwd, 'diff', '--name-only', '--diff-filter=U', '-z')).split('\0').filter(Boolean)
+    if (conflicts.length) return { ok: false, conflicts }
+    // failed for another reason (a dirty worktree, say): nothing for anyone to resolve
+    await this.tryGit(cwd, 'merge', '--abort')
+    throw new Error(`git merge ${ref} failed: ${(res.stdout + res.stderr).trim().split('\n')[0]}`)
+  }
+
+  async commitAll(cwd: string, message: string): Promise<{ committed: boolean, problem?: string }> {
+    await this.git(cwd, 'add', '-A')
+    const check = await this.tryGit(cwd, 'diff', '--cached', '--check')
+    const marked = [...new Set(check.stdout.split('\n')
+      .filter(l => l.endsWith(': leftover conflict marker'))
+      .map(l => l.replace(/:\d+: leftover conflict marker$/, '')))]
+    if (marked.length) return { committed: false, problem: `conflict markers are left in ${marked.join(', ')}` }
+    const merging = (await this.tryGit(cwd, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).code === 0
+    if (!merging && (await this.tryGit(cwd, 'diff', '--cached', '--quiet')).code === 0) return { committed: false }
+    await this.git(cwd, 'commit', '-q', '--no-verify', '-m', message)
+    return { committed: true }
+  }
 }

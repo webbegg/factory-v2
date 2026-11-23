@@ -1,8 +1,5 @@
-import { readdirSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk'
-import { run } from '../exec'
 import type { AgentName } from './prompts'
 
 export interface AgentEvent {
@@ -261,7 +258,6 @@ export function toolRefusal(tool: string, input: unknown, task: Pick<AgentTask, 
 // The guard reads commands; the sandbox contains what they do. It covers the
 // Bash tool only: Write and Edit stay with the PreToolUse hook above.
 
-const GITHUB_HOSTS = ['github.com', 'api.github.com', '*.githubusercontent.com']
 const REGISTRY_HOSTS = ['registry.npmjs.org']
 /** agents that start a dev server and look at it */
 const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
@@ -271,127 +267,47 @@ const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
  * the agents that look at pages are told there is no browser.
  */
 export const NO_BROWSER = 'The sandbox is on, so there is no browser: agent-browser won\'t start. Check pages by reading the code and fetching your dev server with curl.'
-/** .git/config is read-only in the sandbox, so `git push -u` can't record the upstream; the push itself succeeds */
-export const SANDBOX_PUSH = 'The sandbox keeps .git/config read-only, so `git push -u` reports it could not set the upstream: the push itself went through; leave it.'
+/** with .git closed to its shell, the builder hands its work to the factory (orchestrator: commitBuild, publishBuild) */
+export const SANDBOX_BUILD = 'The sandbox is on, so your shell can\'t write .git or reach GitHub: skip the Commit, push, PR steps (no git add, commit, merge or push, and no gh). Leave your changes in the worktree, uncommitted. Each time you stop, the factory commits all of them, titled from the `# Build:` line of build.md, then pushes the branch and opens the draft PR.'
 
 /** what an agent is told about the sandbox it runs in */
 export function sandboxNote(agent: AgentName): string {
-  return [agent === 'builder' ? SANDBOX_PUSH : '', SERVES.has(agent) ? NO_BROWSER : ''].filter(Boolean).join(' ')
+  return [agent === 'builder' ? SANDBOX_BUILD : '', SERVES.has(agent) ? NO_BROWSER : ''].filter(Boolean).join(' ')
 }
 /** the claude process keeps these; no shell needs them */
 const MODEL_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']
-/** only the builder pushes and opens its PR */
+/** the factory pushes and opens PRs for a sandboxed builder, so no shell needs these either */
 const GITHUB_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
-const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json']
-const GITHUB_FILES = ['~/.config/gh', '~/.git-credentials']
+const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json', '~/.config/gh', '~/.git-credentials']
 
 /**
- * The SDK sandbox for one agent's shell: writes only to its own files (the
- * builder also to what commit and push touch in .git), network only for the
- * builder, and no credentials it doesn't need. Commands may not opt out.
+ * The SDK sandbox for one agent's shell: writes only to its own files, never
+ * the repo's .git (the SDK grants a shell in a worktree the main .git, so it
+ * is denied outright, and deny wins), network only for the builder's package
+ * installs, and no credentials. Commands may not opt out.
  */
-/**
- * The refs a builder's commit and push touch: its branch and the branch's
- * remote-tracking ref, each with its lock file and reflog. Nothing else under
- * refs/, so it can't move another job's branch or plant a ref named like
- * origin/<base> (verify B1).
- */
-export function ownRefs(gitDir: string, branch: string | undefined): string[] {
-  if (!branch) return []
-  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
-    .flatMap(r => [join(gitDir, r), join(gitDir, `${r}.lock`), join(gitDir, 'logs', r)])
-}
-
-const listDir = (dir: string): string[] => {
-  try {
-    return readdirSync(dir)
-  } catch {
-    return []
-  }
-}
-
-/**
- * Every entry under `root` that is neither one of `keep` nor on the way down
- * to one, as it exists now. Deny rules win over allow rules, so denying these
- * leaves the sandbox's own grant of `root` with only `keep` in it.
- */
-export function denyAround(root: string, keep: string[], list: (dir: string) => string[] = listDir): string[] {
-  const holds = (p: string) => keep.some(k => k === p || k.startsWith(`${p}/`))
-  const out: string[] = []
-  const walk = (dir: string) => {
-    for (const name of list(dir)) {
-      const p = join(dir, name)
-      if (!holds(p)) out.push(p)
-      else if (!keep.includes(p)) walk(p)
-    }
-  }
-  walk(root)
-  return out
-}
-
-/** what git reads in a .git that may not exist yet, so a listing of what does would miss it */
-const GIT_FILES_READ = ['HEAD', 'packed-refs', 'index', 'FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
-  'shallow', 'modules', 'refs/tags', 'refs/replace', 'refs/notes', 'refs/origin', 'refs/stash']
-
-export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox' | 'branch'>, list: (dir: string) => string[] = listDir): SandboxSettings | undefined {
+export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
   if (!task.sandbox) return undefined
   const { gitDir, domains } = task.sandbox
-  const builder = task.agent === 'builder'
-  const worktreeGit = join(gitDir, 'worktrees', basename(task.cwd))
-  const allowWrite = task.writable.map(w => w.replace(/\/+$/, ''))
-  // objects for commits, the worktree's own index and HEAD, and only its own branch's refs
-  const gitKeep = [join(gitDir, 'objects'), worktreeGit, ...ownRefs(gitDir, task.branch)]
-  if (builder) allowWrite.push(...gitKeep)
-  // the SDK lets a shell in a worktree write the main .git (all but config, hooks and its pointers); deny the rest of it
-  const gitDeny = builder ? [...denyAround(gitDir, gitKeep, list), ...GIT_FILES_READ.map(p => join(gitDir, p))] : [gitDir]
   return {
     enabled: true,
     failIfUnavailable: true,
     allowUnsandboxedCommands: false,
     filesystem: {
-      allowWrite,
-      // the shell may write its working folder (the worktree), but never the file that tells git where its repo is
-      denyWrite: [...new Set([
-        join(task.cwd, '.git'), join(gitDir, 'config'), join(gitDir, 'hooks'), join(gitDir, 'info'),
-        ...(builder ? ['commondir', 'gitdir', 'config.worktree'].map(f => join(worktreeGit, f)) : []),
-        ...gitDeny
-      ])],
-      denyRead: builder ? SECRET_FILES : [...SECRET_FILES, ...GITHUB_FILES]
+      allowWrite: task.writable.map(w => w.replace(/\/+$/, '')),
+      // the shell may write its working folder (the worktree), never the file that tells git where its repo is, nor the repo
+      denyWrite: [join(task.cwd, '.git'), gitDir],
+      denyRead: SECRET_FILES
     },
     network: {
-      allowedDomains: builder ? [...GITHUB_HOSTS, ...REGISTRY_HOSTS, ...domains] : [],
+      allowedDomains: task.agent === 'builder' ? [...REGISTRY_HOSTS, ...domains] : [],
       strictAllowlist: true,
-      allowLocalBinding: SERVES.has(task.agent),
-      // macOS: gh (Go) verifies TLS through trustd; the keychain itself stays closed
-      ...(builder ? { allowMachLookup: ['com.apple.trustd.agent'] } : {})
+      allowLocalBinding: SERVES.has(task.agent)
     },
     credentials: {
-      envVars: [...MODEL_ENV, ...(builder ? [] : GITHUB_ENV)].map(name => ({ name, mode: 'deny' as const }))
+      envVars: [...MODEL_ENV, ...GITHUB_ENV].map(name => ({ name, mode: 'deny' as const }))
     }
   }
-}
-
-/**
- * The agent process's environment. A sandboxed builder can't reach the
- * keychain, where gh and git keep the GitHub login, so the factory hands it
- * the token and a git credential helper that reads it. Through the env, not
- * a config file: the guard refuses GIT_CONFIG_* from the agent itself.
- */
-export function agentEnv(task: Pick<AgentTask, 'agent' | 'sandbox'>, base: Record<string, string | undefined>, token: string | null): Record<string, string> {
-  const env: Record<string, string> = { CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' }
-  for (const [k, v] of Object.entries(base)) if (v !== undefined) env[k] = v
-  env.CLAUDE_AGENT_SDK_CLIENT_APP = 'factory-v2'
-  if (!task.sandbox || task.agent !== 'builder') return env
-  if (!env.GH_TOKEN && token) env.GH_TOKEN = token
-  const count = Number(env.GIT_CONFIG_COUNT) || 0
-  // an empty value first clears any github.com helper from the config files (osxkeychain, say)
-  const helpers = ['', '!gh auth git-credential']
-  helpers.forEach((value, i) => {
-    env[`GIT_CONFIG_KEY_${count + i}`] = 'credential.https://github.com.helper'
-    env[`GIT_CONFIG_VALUE_${count + i}`] = value
-  })
-  env.GIT_CONFIG_COUNT = String(count + helpers.length)
-  return env
 }
 
 function describeTool(name: string, input: unknown): string {
@@ -413,13 +329,6 @@ export class SdkRunner implements AgentRunner {
     let reply = ''
     let costUsd = 0
     let error: string | undefined
-    // a sandboxed builder may write its refs but not create the folders they live in
-    if (task.sandbox && task.agent === 'builder') {
-      await Promise.all(ownRefs(task.sandbox.gitDir, task.branch).map(f => mkdir(dirname(f), { recursive: true })))
-    }
-    const token = task.sandbox && task.agent === 'builder' && !process.env.GH_TOKEN
-      ? await run('gh', ['auth', 'token'], { cwd: task.cwd }).then(r => r.code === 0 ? r.stdout.trim() : null, () => null)
-      : null
     try {
       const stream = query({
         prompt: task.message,
@@ -436,7 +345,7 @@ export class SdkRunner implements AgentRunner {
           permissionMode: 'dontAsk',
           settingSources: [],
           sandbox: sandboxSettings(task),
-          env: agentEnv(task, process.env, token),
+          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' },
           hooks: {
             PreToolUse: [{
               hooks: [async (input) => {

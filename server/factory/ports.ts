@@ -46,6 +46,8 @@ export interface GitHubPort {
   /** every check run and commit status on `sha`; a list GitHub reports as incomplete gets a pending entry */
   commitChecks(sha: string): Promise<CommitCheck[]>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
+  /** opens a draft PR from `head` (pushed already) into `base` */
+  prCreate(pr: { base: string, head: string, title: string, body: string }): Promise<{ number: number, url: string }>
   /** hosts images for issue bodies and comments; one URL per image, in order */
   uploadImages(images: UploadImage[]): Promise<string[]>
 }
@@ -69,6 +71,14 @@ export interface GitPort {
   show(cwd: string, ref: string, path: string): Promise<string | null>
   /** merges `ref` into the worktree's branch, aborting on conflict */
   merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }>
+  /** merges `ref`, leaving any conflicts in the worktree for someone to resolve; `conflicts` lists their paths */
+  startMerge(cwd: string, ref: string): Promise<{ ok: boolean, conflicts: string[] }>
+  /**
+   * Stages every change and commits it (concluding a started merge). Nothing to
+   * commit: `committed` false. Conflict markers left: nothing is committed and
+   * `problem` says where.
+   */
+  commitAll(cwd: string, message: string): Promise<{ committed: boolean, problem?: string }>
 }
 
 /** Refreshes a job's issue.md from GitHub (quoted as data). */
