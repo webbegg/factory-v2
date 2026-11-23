@@ -39,6 +39,10 @@ let feedId = 0
 const connected = ref(false)
 let source: EventSource | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let attempt = 0
+// true from an error until the next open, so the first connection never shows the banner
+const reconnecting = ref(false)
 let checkedMerged = false
 
 const MAX_LINES = 300
@@ -98,11 +102,19 @@ export function useBoard() {
   }
 
   function connect() {
-    // A stream refused before init stays closed; Initialize reopens it.
+    // A closed stream is reopened by the reconnect timer, or sooner by Initialize.
     if ((source && source.readyState !== EventSource.CLOSED) || import.meta.server) return
-    source = new EventSource('/api/events')
-    source.onopen = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    const stream = new EventSource('/api/events')
+    source = stream
+    stream.onopen = () => {
+      if (source !== stream) return
+      attempt = 0
       connected.value = true
+      reconnecting.value = false
       void refresh()
       // no tick runs while paused, so PRs merged by hand are looked for once per page load
       if (!checkedMerged) {
@@ -110,10 +122,28 @@ export function useBoard() {
         void act('/api/merged')
       }
     }
-    source.onerror = () => {
+    stream.onerror = () => {
+      if (source !== stream) return
       connected.value = false
+      reconnecting.value = true
+      // while CONNECTING the browser retries by itself; only a closed stream needs a new one
+      if (stream.readyState !== EventSource.CLOSED || reconnectTimer) return
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        connect()
+      }, reconnectDelay(attempt++))
     }
-    source.onmessage = msg => handle(JSON.parse(msg.data) as ServerEvent)
+    stream.onmessage = (msg) => {
+      if (source !== stream) return
+      let e: ServerEvent
+      try {
+        e = JSON.parse(msg.data) as ServerEvent
+      } catch {
+        console.warn('Skipped an event stream frame that is not JSON:', msg.data)
+        return
+      }
+      handle(e)
+    }
   }
 
   /** POSTs an action; shows the factory's refusal as a toast and returns null. */
@@ -129,7 +159,7 @@ export function useBoard() {
     }
   }
 
-  return { state, activity, feed, drafts, connected, refresh, connect, act }
+  return { state, activity, feed, drafts, connected, reconnecting, refresh, connect, act }
 }
 
 export function elapsed(job: Job): string {

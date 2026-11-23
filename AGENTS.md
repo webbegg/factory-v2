@@ -52,7 +52,11 @@ view; this file is for whoever changes the code.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
   `useBoard()` in `app/composables/useBoard.ts` (state + SSE + `act()` for
   POSTs that toast refusals); `state.queued` comes from `/api/state` and the
-  `queued` event. The UI imports engine types from
+  `queued` event. When the browser closes the stream, `useBoard()` reopens it
+  after the `reconnectDelay` backoff in `app/utils/reconnect.ts` (one stream and
+  one pending timer at most), refetches `/api/state` on every open, and skips
+  frames that aren't JSON with a `console.warn`. While the stream is down the
+  shell shows a "Reconnecting…" banner under the header. The UI imports engine types from
   `~~/server/factory/types`. `COLUMNS` and the board's selection helpers
   (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
   `app/utils/board.ts`. A card's round chips come from `roundChips` in
