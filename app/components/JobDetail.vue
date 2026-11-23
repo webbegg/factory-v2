@@ -3,11 +3,11 @@ import type { Job } from '~/composables/useBoard'
 import type { PendingImage } from '~~/server/factory/attachments'
 
 interface JobFile { path: string, first: string, tone: 'good' | 'warn' | 'stop' | null }
-interface Detail { job: Job, files: JobFile[], error: string | null, running: boolean }
+interface Detail { job: Job, files: JobFile[] }
 
 const props = defineProps<{ jobId: string }>()
 const emit = defineEmits<{ close: [] }>()
-const { state, activity, act } = useBoard()
+const { state, activity, drafts, act } = useBoard()
 const { withImages } = useAttachments()
 
 // Not awaited: opening the panel must never hold up the board.
@@ -18,10 +18,20 @@ const failed = computed(() => !detail.value && !!error.value)
 const selected = ref<string | null>(null)
 const file = ref<string | null>(null)
 const loading = ref(false)
-const text = ref('')
+const text = computed({
+  get: () => drafts.value[props.jobId] ?? '',
+  set: (v: string) => {
+    drafts.value[props.jobId] = v
+  }
+})
 const images = ref<PendingImage[]>([])
 
 const job = computed(() => state.value?.jobs.find(j => j.id === props.jobId) ?? detail.value?.job)
+// From the live state: the fetched detail is only refetched when the job moves.
+const stalled = computed(() => state.value?.errors[props.jobId])
+const running = computed(() => state.value?.running.includes(props.jobId) ?? false)
+const paused = computed(() => !running.value && !!state.value?.paused.includes(props.jobId))
+const action = computed(() => job.value ? jobAction({ stage: job.value.stage, running: running.value, error: stalled.value }) : null)
 watch(() => [props.jobId, job.value && `${job.value.stage}/${job.value.round}/${job.value.gate}/${JSON.stringify(job.value.reviews)}`], ([id], [was]) => {
   // A new job is fetched by useFetch itself.
   if (id === was) void refresh()
@@ -29,7 +39,6 @@ watch(() => [props.jobId, job.value && `${job.value.stage}/${job.value.round}/${
 
 watch(() => props.jobId, () => {
   selected.value = null
-  text.value = ''
   images.value = []
 })
 
@@ -72,6 +81,16 @@ const empty = computed(() => {
 const lines = computed(() => activity.value[props.jobId] ?? [])
 const sending = ref<'feedback' | 'reject' | 'answer' | 'merge' | null>(null)
 const confirmingMerge = ref(false)
+const confirmingCancel = ref(false)
+const confirmingReject = ref(false)
+async function cancel() {
+  confirmingCancel.value = false
+  await act(`/api/jobs/${props.jobId}/cancel`)
+}
+async function reject() {
+  confirmingReject.value = false
+  await send('reject')
+}
 async function merge() {
   if (sending.value) return
   confirmingMerge.value = false
@@ -90,11 +109,13 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
   // One action per job at a time: a second click would upload and send again.
   if (sending.value) return
   sending.value = action
+  const id = props.jobId
   const body = await withImages(text.value, images.value)
-  const ok = body !== null && await act(`/api/jobs/${props.jobId}/${action}`, { text: body })
+  const ok = body !== null && await act(`/api/jobs/${id}/${action}`, { text: body })
   sending.value = null
   if (ok) {
-    text.value = ''
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete drafts.value[id]
     images.value = []
     await refresh()
   }
@@ -138,18 +159,24 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
             variant="subtle"
           />
           <UButton
-            v-if="detail?.error"
+            v-if="action === 'retry'"
             label="Retry"
             icon="i-lucide-rotate-ccw"
             @click="act(`/api/jobs/${job.id}/retry`)"
           />
           <UButton
-            v-if="detail?.running"
+            v-else-if="action === 'resume'"
+            label="Resume"
+            icon="i-lucide-play"
+            @click="act(`/api/jobs/${job.id}/retry`)"
+          />
+          <UButton
+            v-else-if="action === 'cancel'"
             label="Cancel"
             icon="i-lucide-square"
             color="error"
             variant="subtle"
-            @click="act(`/api/jobs/${job.id}/cancel`)"
+            @click="confirmingCancel = true"
           />
           <UButton
             icon="i-lucide-x"
@@ -161,13 +188,43 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
         </div>
       </div>
 
+      <UModal
+        v-model:open="confirmingCancel"
+        :title="`Cancel ${job.id}?`"
+        description="The running agent or gate stops, and the job stays paused at its stage until you resume it."
+      >
+        <template #footer="{ close }">
+          <div class="flex w-full justify-end gap-2">
+            <UButton
+              label="Keep running"
+              color="neutral"
+              variant="ghost"
+              @click="close"
+            />
+            <UButton
+              label="Cancel job"
+              color="error"
+              @click="cancel"
+            />
+          </div>
+        </template>
+      </UModal>
+
       <UAlert
-        v-if="detail?.error"
+        v-if="stalled"
         class="md:shrink-0 md:@4xl:col-span-3"
         color="error"
         variant="subtle"
         title="Stalled"
-        :description="detail.error"
+        :description="stalled"
+      />
+      <UAlert
+        v-else-if="paused"
+        class="md:shrink-0 md:@4xl:col-span-3"
+        color="neutral"
+        variant="subtle"
+        title="Paused"
+        description="This job was cancelled. Resume continues it from its stage."
       />
 
       <UCard
@@ -234,9 +291,30 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               variant="subtle"
               :loading="sending === 'reject'"
               :disabled="!text.trim() || !!sending"
-              @click="send('reject')"
+              @click="confirmingReject = true"
             />
           </div>
+          <UModal
+            v-model:open="confirmingReject"
+            :title="`Reject ${job.id}?`"
+            description="The job moves to rejected, with your note."
+          >
+            <template #footer="{ close }">
+              <div class="flex w-full justify-end gap-2">
+                <UButton
+                  label="Back"
+                  color="neutral"
+                  variant="ghost"
+                  @click="close"
+                />
+                <UButton
+                  label="Reject"
+                  color="error"
+                  @click="reject"
+                />
+              </div>
+            </template>
+          </UModal>
           <UModal
             v-model:open="confirmingMerge"
             :title="`Merge PR #${job.pr}?`"

@@ -12,7 +12,9 @@ view; this file is for whoever changes the code.
   job's `events.jsonl` and never throws), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
-  the drain, sent as the `queued` event), `agents/` (prompts and the
+  the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
+  in the same session, when its report is missing or its first line invalid,
+  while the builder's one second try stays in `build()`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
   `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
@@ -24,6 +26,9 @@ view; this file is for whoever changes the code.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.
+  A cancel is not saved as an error: it puts the job in `Orchestrator.paused`
+  (in memory, gone on restart), which the drain skips until `start()` clears
+  it; `/api/state` sends `paused` and the `paused` event announces it.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
@@ -37,7 +42,7 @@ view; this file is for whoever changes the code.
   for needs-human jobs merged by hand, on load and when a job panel opens).
   `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
   merge (the board's Merge on an escalated job: `Orchestrator.approve`),
-  retry and cancel. `server/api/uploads.post.ts`
+  retry (also the board's Resume) and cancel (pauses). `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
   to the text it then sends to the existing routes.
   `server/middleware/fixtures.ts` applies `fixtureRefusal` (`service.ts`): under

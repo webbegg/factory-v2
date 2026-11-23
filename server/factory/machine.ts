@@ -230,7 +230,9 @@ export class Machine {
       await issues.refresh(job)
       await github.editLabels('issue', job.issue, { remove: [labels.needsInfo] })
     } else if (old === 'spec') {
-      require(await this.read(job, 'spec.md') !== null, 'spec.md doesn\'t exist')
+      const spec = await this.read(job, 'spec.md')
+      require(spec !== null, 'spec.md doesn\'t exist')
+      require(section(spec, 'Acceptance criteria') !== null, 'spec.md has no `## Acceptance criteria` heading')
       await this.nextRound(job, 'spec')
     } else if (old === 'build' && stage === 'gate') {
       const status = firstLine(await this.read(job, 'build.md') ?? '')

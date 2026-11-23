@@ -10,6 +10,7 @@ export interface FactoryState {
   running: string[]
   queued: number[]
   errors: Record<string, string>
+  paused: string[]
   jobs: Job[]
 }
 
@@ -24,6 +25,7 @@ type ServerEvent
   = | { type: 'job', job: Job }
     | { type: 'agent', jobId: string, agent: string, event: { kind: Exclude<FeedKind, 'status'>, text: string } }
     | { type: 'error', jobId: string, message: string }
+    | { type: 'paused', jobId: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
     | { type: 'idle' | 'hello' | 'ping' }
@@ -31,6 +33,8 @@ type ServerEvent
 const state = ref<FactoryState | null>(null)
 const activity = ref<Record<string, ActivityLine[]>>({})
 const feed = ref<FeedEntry[]>([])
+/** half-typed feedback or answer per job, kept while the panel is closed but not across a reload */
+const drafts = ref<Record<string, string>>({})
 let feedId = 0
 const connected = ref(false)
 let source: EventSource | null = null
@@ -85,6 +89,10 @@ export function useBoard() {
     } else if (e.type === 'error') {
       addToFeed(new Date().toLocaleTimeString(), 'factory', e.jobId, 'error', e.message)
       toast.add({ title: `${e.jobId} stalled`, description: e.message, color: 'error' })
+      refreshSoon()
+    } else if (e.type === 'paused') {
+      // the operator cancelled it, so a status line is enough
+      addToFeed(new Date().toLocaleTimeString(), 'factory', e.jobId, 'status', `${e.jobId} paused`)
       refreshSoon()
     } else if (e.type === 'queued') {
       if (state.value) state.value.queued = e.issues
@@ -151,7 +159,7 @@ export function useBoard() {
     }
   }
 
-  return { state, activity, feed, connected, reconnecting, refresh, connect, act }
+  return { state, activity, feed, drafts, connected, reconnecting, refresh, connect, act }
 }
 
 export function elapsed(job: Job): string {

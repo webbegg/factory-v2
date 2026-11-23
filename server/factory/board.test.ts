@@ -1,7 +1,7 @@
 // The board's selection helpers: which column a stage sits in, which job the
-// URL selects, what Esc does, and who writes each job file.
+// URL selects, what Esc does, who writes each job file, and which run action a job offers.
 import { describe, expect, test } from 'bun:test'
-import { COLUMNS, columnIndex, escapeAction, fileWriter, selectedJobId } from '../../app/utils/board'
+import { COLUMNS, columnIndex, escapeAction, fileWriter, jobAction, selectedJobId } from '../../app/utils/board'
 import { STAGES } from './types'
 
 describe('columnIndex', () => {
@@ -88,5 +88,26 @@ describe('fileWriter', () => {
     ['notes.md', 'the factory']
   ])('%s is written by %s', (path, writer) => {
     expect(fileWriter(path)).toBe(writer)
+  })
+})
+
+describe('jobAction', () => {
+  test('a running job offers Cancel, even with an error', () => {
+    expect(jobAction({ stage: 'build', running: true, error: undefined })).toBe('cancel')
+    expect(jobAction({ stage: 'build', running: true, error: 'boom' })).toBe('cancel')
+  })
+
+  test('a stalled job offers Retry', () => {
+    expect(jobAction({ stage: 'spec', running: false, error: 'boom' })).toBe('retry')
+  })
+
+  test('an idle job in a live stage offers Resume', () => {
+    expect(jobAction({ stage: 'review', running: false, error: undefined })).toBe('resume')
+  })
+
+  test('a job waiting on someone or done offers nothing', () => {
+    for (const stage of ['needs-human', 'needs-info', 'merged', 'rejected'] as const) {
+      expect(jobAction({ stage, running: false, error: undefined })).toBeNull()
+    }
   })
 })

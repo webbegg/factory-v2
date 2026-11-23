@@ -7,7 +7,7 @@ import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
-import { firstLine } from './markdown'
+import { firstLine, section } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
 import type { Merger } from './merge'
@@ -33,6 +33,7 @@ export type FactoryEvent
   = | { type: 'job', job: Job }
     | { type: 'agent', jobId: string, agent: AgentName, event: AgentEvent }
     | { type: 'error', jobId: string, message: string }
+    | { type: 'paused', jobId: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
     | { type: 'idle' }
@@ -55,15 +56,30 @@ const REPORT_FILE: Partial<Record<AgentName, string>> = {
   'approver': 'decision.md'
 }
 
-/** First line of a valid report, per agent; the spec has no verdict line, so it has no fallback. */
-const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
-  'intake': /^DECISION: (ACCEPT|NEEDS-INFO|REJECT)$/,
-  'builder': /^STATUS: (READY|BLOCKED)$/,
-  'approver': /^(APPROVE|ESCALATE)$/,
-  'reviewer-code': /^VERDICT: (PASS|CHANGES)$/,
-  'reviewer-security': /^VERDICT: (PASS|CHANGES)$/,
-  'reviewer-ux': /^VERDICT: (PASS|CHANGES)$/,
-  'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
+const VERDICTS = ['VERDICT: PASS', 'VERDICT: CHANGES']
+
+/** First lines a valid report may start with, per agent; the spec has no verdict line, so it has no fallback. */
+const REPORT_HEAD: Partial<Record<AgentName, string[]>> = {
+  'intake': ['DECISION: ACCEPT', 'DECISION: NEEDS-INFO', 'DECISION: REJECT'],
+  'builder': ['STATUS: READY', 'STATUS: BLOCKED'],
+  'approver': ['APPROVE', 'ESCALATE'],
+  'reviewer-code': VERDICTS,
+  'reviewer-security': VERDICTS,
+  'reviewer-ux': VERDICTS,
+  'reviewer-ui': VERDICTS
+}
+
+const isHead = (agent: AgentName, line: string) => REPORT_HEAD[agent]?.includes(line) ?? false
+
+/** `a`, `b` or `c`, for an error an agent reads */
+function either(values: string[]): string {
+  const quoted = values.map(v => `\`${v}\``)
+  return quoted.length < 2 ? quoted.join('') : `${quoted.slice(0, -1).join(', ')} or ${quoted.at(-1)}`
+}
+
+/** A bad first line quoted back short enough for a toast or a terminal line. */
+function quote(line: string): string {
+  return `\`${line.length > 80 ? `${line.slice(0, 80)}…` : line}\``
 }
 
 /** A file's bytes (screenshots are binary) or a link's target, kept apart so no file can pass for a link. */
@@ -126,6 +142,10 @@ export class Orchestrator extends EventEmitter {
   private ticking: Promise<void> = Promise.resolve()
   /** last failure per job, also kept in job.json (see `loadErrors`); the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
+  /** jobs stopped by `cancel`; the drain leaves them alone until `start`, and like `errors` they are gone on restart */
+  readonly paused = new Set<string>()
+  /** running jobs `cancel` aborted, so their driver's end is a pause, not a failure */
+  private cancelling = new Set<string>()
   /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
   private pending: number[] = []
   /** set by shutdown: nothing new starts, queued issues included */
@@ -247,8 +267,12 @@ export class Orchestrator extends EventEmitter {
     this.start(id)
   }
 
+  /** Stops a running job and pauses it where it is, until it is started again. */
   cancel(id: string) {
-    this.active.get(id)?.controller.abort()
+    const a = this.active.get(id)
+    if (!a) return
+    this.cancelling.add(id)
+    a.controller.abort()
   }
 
   /** Stops draining, aborts every running agent and gate, and waits for their drivers to stop. */
@@ -284,7 +308,7 @@ export class Orchestrator extends EventEmitter {
       if (row.action === 'new') {
         const job = await this.o.queue.create(row.issue)
         this.start(job.id)
-      } else if (row.action === 'resume' && row.job && !this.active.has(row.job) && !this.errors.has(row.job)) {
+      } else if (row.action === 'resume' && row.job && !this.active.has(row.job) && !this.errors.has(row.job) && !this.paused.has(row.job)) {
         if (row.stage === 'needs-info') await this.o.machine.advance(row.job, 'intake')
         this.start(row.job)
       }
@@ -327,8 +351,20 @@ export class Orchestrator extends EventEmitter {
     if (this.active.has(id) || this.stopped) return
     const controller = new AbortController()
     this.errors.delete(id)
+    this.paused.delete(id)
+    // a cancelled driver may end by returning or by any error its abort surfaced as
+    const pauseIfCancelled = () => {
+      if (!this.cancelling.has(id)) return false
+      this.paused.add(id)
+      this.send({ type: 'paused', jobId: id })
+      return true
+    }
     const done = this.drive(id, controller.signal)
+      .then(() => {
+        pauseIfCancelled()
+      })
       .catch(async (err: Error) => {
+        if (pauseIfCancelled()) return
         const message = redact(err.message)
         this.errors.set(id, message)
         this.send({ type: 'error', jobId: id, message })
@@ -338,6 +374,7 @@ export class Orchestrator extends EventEmitter {
           .catch((e: Error) => this.send({ type: 'log', message: `${id}: couldn't save its error: ${e.message}` }))
       })
       .finally(async () => {
+        this.cancelling.delete(id)
         this.active.delete(id)
         // a job whose driver stopped has left build/gate as far as this record goes
         this.stopChecks.delete(id)
@@ -461,14 +498,18 @@ export class Orchestrator extends EventEmitter {
         + `Fix it, or write STATUS: BLOCKED in build.md if you can't.\n\n${tail}`
     }
     const report = store.path(job.id, 'build.md')
-    const runBuilder = async (j: Job, why: string) => {
+    // the first line the factory couldn't read, so the second try is told that rather than a gate refusal
+    let invalid: string | null = null
+    const runBuilder = async (j: Job, why: string, again = false) => {
       const before = await mtime(report)
-      await this.agent(j, 'builder', signal, why, { stopCheck })
+      const run = await this.runAgent(j, 'builder', signal, why, { stopCheck }, { again })
       return async () => {
         // last round's READY must not pass for this round's
         if (before !== null && before === await mtime(report)) {
           throw new Refused(`build.md wasn't updated in this run; rewrite it for round ${job.round}`)
         }
+        invalid = run.invalid
+        if (invalid) throw new Refused(invalid)
       }
     }
     let updated = await runBuilder(job, purpose)
@@ -485,9 +526,9 @@ export class Orchestrator extends EventEmitter {
       await toGate()
     } catch (err) {
       if (!(err instanceof Refused)) throw err
-      // one more try: tell the same builder what the factory refused
-      updated = await runBuilder(await store.load(job.id),
-        `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`)
+      // the builder's one second try, whatever was refused: tell the same builder what
+      const why = invalid ? this.fixReport(job, 'builder', invalid) : `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`
+      updated = await runBuilder(await store.load(job.id), why, true)
       await toGate()
     }
     return true
@@ -495,10 +536,17 @@ export class Orchestrator extends EventEmitter {
 
   private async review(job: Job, signal: AbortSignal): Promise<boolean> {
     const { machine, store } = this.o
-    // a resumed review may already have some verdicts on disk
-    this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     const lenses = Object.keys(job.agents?.reviewers ?? {})
     const written = async (r: string) => (await lstat(store.path(job.id, `round-${job.round}/review-${r}.md`)).catch(() => null))?.isFile()
+    // a review with no verdict counts as missing, so its lens runs again instead of blocking every retry
+    for (const r of lenses) {
+      const rel = `round-${job.round}/review-${r}.md`
+      if (!await written(r) || VERDICTS.includes(firstLine(await store.read(job.id, rel) ?? ''))) continue
+      await rm(store.path(job.id, rel))
+      this.send({ type: 'log', message: `${job.id}: ${rel} has no verdict on its first line; removed it, so reviewer-${r} runs again` })
+    }
+    // a resumed review may already have some verdicts on disk
+    this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     const missing: string[] = []
     for (const r of lenses) if (!await written(r)) missing.push(r)
     // One at a time: with reviewers side by side, the watch could not tell
@@ -576,12 +624,11 @@ export class Orchestrator extends EventEmitter {
    * (a process a builder left behind), so it is refused, not trusted.
    */
   private async matchesReply(job: Job, agent: AgentName, reply: string) {
-    const head = REPORT_HEAD[agent]
     const said = firstLine(reply)
     const report = this.report(job, agent)
-    if (!head?.test(said) || !existsSync(report)) return
+    if (!isHead(agent, said) || !existsSync(report)) return
     const wrote = firstLine(await readFile(report, 'utf8'))
-    if (head.test(wrote) && wrote !== said) {
+    if (isHead(agent, wrote) && wrote !== said) {
       throw new Error(`${agent} replied '${said}' but ${relative(this.o.store.dir(job.id), report)} starts with '${wrote}'; it was changed behind the agent`)
     }
   }
@@ -593,11 +640,31 @@ export class Orchestrator extends EventEmitter {
    */
   private async keepRepliedReport(job: Job, agent: AgentName, reply: string) {
     const report = this.report(job, agent)
-    const head = REPORT_HEAD[agent]
-    if (existsSync(report) || !head?.test(firstLine(reply))) return
+    if (existsSync(report) || !isHead(agent, firstLine(reply))) return
     await mkdir(dirname(report), { recursive: true })
     await writeFile(report, `${reply.trimEnd()}\n`)
     this.send({ type: 'log', message: `${job.id}: ${agent} replied with its report instead of writing it; saved it` })
+  }
+
+  /** Why the factory can't read an agent's report, naming the file; null when it can. */
+  private async reportError(job: Job, agent: AgentName): Promise<string | null> {
+    const report = this.report(job, agent)
+    const rel = relative(this.o.store.dir(job.id), report)
+    const text = await readFile(report, 'utf8').catch(() => null)
+    if (agent === 'spec-writer') {
+      if (text !== null && section(text, 'Acceptance criteria') !== null) return null
+      return `${rel}: ${text === null ? 'the file is missing; it' : 'the file'} must contain a \`## Acceptance criteria\` heading`
+    }
+    const must = `your report's first line must be ${either(REPORT_HEAD[agent] ?? [])}`
+    if (text === null) return `${rel}: the file is missing; ${must}`
+    const line = firstLine(text)
+    if (isHead(agent, line)) return null
+    return `${rel}: ${must}; it is ${line ? quote(line) : 'empty'}`
+  }
+
+  /** What a second run is told about its report; the path is absolute so a fresh session can find it too. */
+  private fixReport(job: Job, agent: AgentName, error: string): string {
+    return `The factory can't use your report: ${error}. Fix ${this.report(job, agent)} and reply with its first line.`
   }
 
   /**
@@ -652,8 +719,30 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  /**
+   * Runs an agent, and once more in the same session when its report is
+   * missing or unreadable, told why; a second bad report stalls the job.
+   * The builder's one second try is in `build()`, so it is never re-prompted here.
+   */
   private async agent(job: Job, agent: AgentName, signal: AbortSignal, purpose = '',
     extra: Pick<AgentTask, 'stopCheck'> = {}) {
+    const first = await this.runAgent(job, agent, signal, purpose, extra)
+    if (!first.invalid || agent === 'builder') return first.result
+    const sessionId = first.result.sessionId
+    const fix = this.fixReport(job, agent, first.invalid)
+    // nothing to resume: a fresh session needs the first run's brief as well
+    const second = await this.runAgent(job, agent, signal, sessionId ? fix : [purpose, fix].filter(Boolean).join(' '), extra,
+      { resume: sessionId ?? undefined, again: true })
+    if (second.invalid) throw new Refused(second.invalid)
+    return second.result
+  }
+
+  /**
+   * One agent run and its checks. `again` marks a second run of the same
+   * session, whose cost adds to the first instead of replacing it.
+   */
+  private async runAgent(job: Job, agent: AgentName, signal: AbortSignal, purpose: string,
+    extra: Pick<AgentTask, 'stopCheck'>, opts: { resume?: string, again?: boolean } = {}) {
     const { store, paths, ports } = this.o
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
@@ -662,7 +751,7 @@ export class Orchestrator extends EventEmitter {
     if (shots) await mkdir(shots, { recursive: true })
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
       `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : ''].filter(Boolean).join(' ')
-    const resume = agent === 'builder' ? job.sessions.builder : undefined
+    const resume = opts.resume ?? (agent === 'builder' ? job.sessions.builder : undefined)
     const task: AgentTask = {
       agent,
       jobId: job.id,
@@ -699,7 +788,7 @@ export class Orchestrator extends EventEmitter {
         const costs = { ...j.costs }
         const sessions = { ...j.sessions }
         if (result.sessionId) {
-          costs[result.sessionId] = result.costUsd
+          costs[result.sessionId] = (opts.again ? costs[result.sessionId] ?? 0 : 0) + result.costUsd
           if (agent === 'builder') sessions.builder = result.sessionId
         }
         const costUsd = Math.round(Object.values(costs).reduce((a, b) => a + b, 0) * 100) / 100
@@ -711,8 +800,9 @@ export class Orchestrator extends EventEmitter {
       await this.matchesReply(job, agent, result.reply)
       await this.keepRepliedReport(job, agent, result.reply)
       this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
-      await end(true)
-      return result
+      const invalid = await this.reportError(job, agent)
+      await end(!invalid, invalid ?? undefined)
+      return { result, invalid }
     } catch (err) {
       await end(false, redact((err as Error).message))
       throw err

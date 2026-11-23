@@ -54,9 +54,11 @@ async function readEvents(env: TestEnv, id: string): Promise<Array<Record<string
   return text.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
 }
 
+const SPEC = '# Spec\n\n## Acceptance criteria\n1. It works.\n'
+
 const happy: Partial<Record<AgentName, Script>> = {
   'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- ok\n'),
-  'spec-writer': t => write(t, 'spec.md', '# Spec\n'),
+  'spec-writer': t => write(t, 'spec.md', SPEC),
   'builder': async (t, _n) => {
     await write(t, 'build.md', 'STATUS: READY\n\n# Build\n')
   },
@@ -139,7 +141,154 @@ describe('orchestrator', () => {
     await orch.idle()
     const job = (await env.store.list())[0]!
     expect(job.stage).toBe('review')
-    expect(orch.errors.get(job.id)).toContain('missing reviews from: code')
+    expect(orch.errors.get(job.id)).toContain('round-1/review-code.md: the file is missing')
+  })
+
+  describe('an invalid report gets one re-prompt', () => {
+    const drained = async (scripts: Partial<Record<AgentName, Script>>) => {
+      const made = await factory({ ...happy, ...scripts })
+      made.env.github.addIssue({ number: 1 })
+      await made.orch.drain()
+      await made.orch.idle()
+      const job = (await made.env.store.list())[0]!
+      const tasks = (agent: AgentName) => made.runner.tasks.filter(t => t.agent === agent)
+      return { ...made, job, tasks, error: made.orch.errors.get(job.id) }
+    }
+    const intake = (head: string) => (t: AgentTask) => write(t, 'intake.md', `${head}\nRISK: low\nSURFACES: none\nRESCOPED: no\n`)
+
+    test('intake: an invalid DECISION, then a valid one, proceeds', async () => {
+      const { job, tasks, error } = await drained({ intake: (t, n) => intake(n === 1 ? 'DECISION: MAYBE' : 'DECISION: ACCEPT')(t) })
+      expect(job.stage).toBe('merged')
+      expect(error).toBeUndefined()
+      const [first, second] = tasks('intake')
+      expect(tasks('intake')).toHaveLength(2)
+      expect(second!.resume).toBe('001-issue-1-intake-1')
+      expect(first!.resume).toBeUndefined()
+      expect(second!.message).toContain('`DECISION: ACCEPT`')
+      expect(second!.message).toContain('`DECISION: MAYBE`')
+      expect(second!.message).toContain(join(second!.jobDir, 'intake.md'))
+      expect(second!.message).toContain('reply with its first line')
+    })
+
+    test('intake: invalid twice stalls in intake with the file and the bad line', async () => {
+      const { job, tasks, error } = await drained({ intake: intake('DECISION: MAYBE') })
+      expect(job.stage).toBe('intake')
+      expect(tasks('intake')).toHaveLength(2)
+      expect(error).toContain('intake.md')
+      expect(error).toContain('it is `DECISION: MAYBE`')
+      expect(job.error?.message).toBe(error!)
+    })
+
+    test('the quoted bad line is cut to 80 characters', async () => {
+      const long = 'x'.repeat(200)
+      const { tasks, error } = await drained({ intake: t => write(t, 'intake.md', `${long}\n`) })
+      expect(error).toContain(`it is \`${'x'.repeat(80)}…\``)
+      expect(error).not.toContain('x'.repeat(81))
+      expect(tasks('intake')[1]!.message).not.toContain('x'.repeat(81))
+    })
+
+    test('an empty report is named as empty', async () => {
+      const { error } = await drained({ intake: t => write(t, 'intake.md', '\n') })
+      expect(error).toContain('intake.md: your report\'s first line must be `DECISION: ACCEPT`, `DECISION: NEEDS-INFO` or `DECISION: REJECT`; it is empty')
+    })
+
+    test('spec: a spec without acceptance criteria, then one with them, reaches build', async () => {
+      const { env, job, tasks, error } = await drained({ 'spec-writer': (t, n) => write(t, 'spec.md', n === 1 ? '# Spec\n' : SPEC) })
+      expect(error).toBeUndefined()
+      expect(job.stage).toBe('merged')
+      expect(tasks('spec-writer')).toHaveLength(2)
+      expect(tasks('spec-writer')[1]!.message).toContain('`## Acceptance criteria`')
+      expect(await env.store.read(job.id, 'spec.md')).toBe(SPEC)
+    })
+
+    test('spec: no heading twice stalls in spec', async () => {
+      const { job, tasks, error } = await drained({ 'spec-writer': t => write(t, 'spec.md', '# Spec\n') })
+      expect(job.stage).toBe('spec')
+      expect(tasks('spec-writer')).toHaveLength(2)
+      expect(error).toContain('spec.md')
+      expect(error).toContain('## Acceptance criteria')
+    })
+
+    test('approver: an invalid decision, then APPROVE, merges', async () => {
+      const { env, job, tasks } = await drained({ approver: (t, n) => write(t, 'decision.md', n === 1 ? 'maybe\n' : 'APPROVE\n') })
+      expect(job.stage).toBe('merged')
+      expect(tasks('approver')).toHaveLength(2)
+      expect(tasks('approver')[1]!.message).toContain('it is `maybe`')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
+    })
+
+    test('reviewer: an invalid verdict, then a valid one, merges; both runs are costed and logged', async () => {
+      const { env, job, tasks } = await drained({
+        'reviewer-code': (t, n) => write(t, `round-${t.round}/review-code.md`, n === 1 ? 'Looks fine\n' : 'VERDICT: PASS\n')
+      })
+      expect(job.stage).toBe('merged')
+      expect(tasks('reviewer-code')).toHaveLength(2)
+      expect(tasks('reviewer-code')[1]!.message).toContain('your report\'s first line must be `VERDICT: PASS` or `VERDICT: CHANGES`; it is `Looks fine`')
+      // the happy path costs 1.25; the re-prompt resumes the same session and adds its own 0.25
+      expect(job.costUsd).toBe(1.5)
+      const events = await readEvents(env, job.id)
+      const runs = (type: string) => events.filter(e => e.type === type && e.agent === 'reviewer-code')
+      expect(runs('agent-start')).toHaveLength(2)
+      expect(runs('agent-end').map(e => e.ok)).toEqual([false, true])
+    })
+
+    test('reviewer: invalid twice stalls, and Retry deletes the invalid review and runs the lens again', async () => {
+      let valid = false
+      const { env, job, tasks, orch, error } = await drained({
+        'reviewer-code': t => write(t, `round-${t.round}/review-code.md`, valid ? 'VERDICT: PASS\n' : 'Looks fine\n')
+      })
+      expect(job.stage).toBe('review')
+      expect(tasks('reviewer-code')).toHaveLength(2)
+      expect(error).toContain('round-1/review-code.md')
+      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe('Looks fine\n')
+      const logs: string[] = []
+      orch.on('event', (e: FactoryEvent) => {
+        if (e.type === 'log') logs.push(e.message)
+      })
+      valid = true
+      orch.retry(job.id)
+      await orch.idle()
+      expect((await env.store.load(job.id)).stage).toBe('merged')
+      expect(tasks('reviewer-code')).toHaveLength(3)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(logs.some(l => l.includes('round-1/review-code.md') && l.includes('removed'))).toBe(true)
+    })
+
+    test('a review already invalid on disk is re-run instead of refused', async () => {
+      const { env, orch } = await factory({ ...happy })
+      const job = await seed(env, { stage: 'review', round: 1, pr: 101, agents: { reviewers: { code: 'haiku' } } }, {
+        'round-1/review-code.md': 'Looks fine\n'
+      })
+      orch.retry(job.id)
+      await orch.idle()
+      expect(orch.errors.get(job.id) ?? '').not.toContain('first line isn\'t a verdict')
+      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe('VERDICT: PASS\n')
+      expect((await env.store.load(job.id)).stage).not.toBe('review')
+    })
+
+    test('builder: an invalid status twice stalls in build after one re-prompt', async () => {
+      const { job, tasks, error } = await drained({ builder: t => write(t, 'build.md', 'STATUS: DONE\n') })
+      expect(job.stage).toBe('build')
+      expect(tasks('builder')).toHaveLength(2)
+      expect(tasks('builder')[1]!.resume).toBe('001-issue-1-builder-1')
+      expect(error).toContain('build.md')
+      expect(error).toContain('`STATUS: READY` or `STATUS: BLOCKED`')
+    })
+
+    test('builder: a re-prompted build that the gate then refuses stalls without a third run', async () => {
+      const made = await factory({
+        ...happy,
+        builder: (t, n) => write(t, 'build.md', n === 1 ? 'STATUS: DONE\n' : 'STATUS: READY\n')
+      })
+      made.env.git.remoteSha = 'e'.repeat(40)
+      made.env.github.addIssue({ number: 1 })
+      await made.orch.drain()
+      await made.orch.idle()
+      const job = (await made.env.store.list())[0]!
+      expect(job.stage).toBe('build')
+      expect(made.runner.tasks.filter(t => t.agent === 'builder')).toHaveLength(2)
+      expect(made.orch.errors.get(job.id)).toContain('isn\'t pushed')
+    })
   })
 
   test('drains one issue from intake to a merged PR', async () => {
@@ -392,7 +541,7 @@ describe('orchestrator', () => {
 
   test('retry restarts a stalled job from its stage', async () => {
     let fail = true
-    const { env, runner, orch } = await factory({ ...happy, 'spec-writer': t => fail ? 'rate limited' : write(t, 'spec.md', '# s\n') })
+    const { env, runner, orch } = await factory({ ...happy, 'spec-writer': t => fail ? 'rate limited' : write(t, 'spec.md', SPEC) })
     env.github.addIssue({ number: 1 })
     await orch.drain()
     await orch.idle()
@@ -445,7 +594,7 @@ describe('orchestrator', () => {
     const job = (await env.store.list())[0]!
     expect(job.stage).toBe('review')
     expect(orch.errors.get(job.id)).toContain('reviewer-code changed job files it may not: decision.md (added), spec.md (changed)')
-    expect(await env.store.read(job.id, 'spec.md')).toBe('# Spec\n')
+    expect(await env.store.read(job.id, 'spec.md')).toBe(SPEC)
     expect(await env.store.read(job.id, 'decision.md')).toBeNull()
   })
 
@@ -706,7 +855,7 @@ describe('orchestrator', () => {
     const { env, orch } = await factory({
       ...happy,
       'spec-writer': async (t) => {
-        await write(t, 'spec.md', '# Spec\n')
+        await write(t, 'spec.md', SPEC)
         const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
         await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, error: { message: 'forged', at: 'x' } }))
       }
@@ -720,31 +869,67 @@ describe('orchestrator', () => {
     expect(job.error?.message).toContain('changed job.json fields it may not: error')
   })
 
-  test('a shutdown abort is not kept as an error, a cancel is', async () => {
+  describe('shutdown and cancel', () => {
     const held = {
       ...happy,
-      // the runner records the task before the script runs, so the abort may already be in
-      'spec-writer': (t: AgentTask) => new Promise<string>((resolve) => {
-        if (t.signal!.aborted) resolve('aborted')
-        t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
-      })
+      // the first spec run waits for its abort; the runner records the task before the script runs, so the abort may already be in
+      'spec-writer': (t: AgentTask, n: number) => n > 1
+        ? write(t, 'spec.md', SPEC)
+        : new Promise<string>((resolve) => {
+            if (t.signal!.aborted) resolve('aborted')
+            t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
+          })
     }
-    const running = async (scripts: Partial<Record<AgentName, Script>>) => {
-      const f = await factory(scripts)
+    const running = async () => {
+      const f = await factory({ ...held })
+      const events: FactoryEvent[] = []
+      f.orch.on('event', (e: FactoryEvent) => events.push(e))
       f.env.github.addIssue({ number: 1 })
       await f.orch.drain()
       while (!f.runner.tasks.some(t => t.agent === 'spec-writer')) await Bun.sleep(5)
+      return { ...f, events }
+    }
+    const cancelled = async () => {
+      const f = await running()
+      f.orch.cancel('001-issue-1')
+      await f.orch.idle()
       return f
     }
-    const stopped = await running({ ...held })
-    await stopped.orch.shutdown()
-    expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
 
-    const cancelled = await running({ ...held })
-    cancelled.orch.cancel('001-issue-1')
-    await cancelled.orch.idle()
-    expect((await cancelled.env.store.load('001-issue-1')).error?.message).toContain('spec-writer cancelled')
-  }, 20_000)
+    test('a shutdown abort is not kept as an error', async () => {
+      const stopped = await running()
+      await stopped.orch.shutdown()
+      expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
+    }, 20_000)
+
+    test('a cancel pauses the job instead of stalling it', async () => {
+      const { env, orch, events } = await cancelled()
+      expect((await env.store.load('001-issue-1')).error).toBeNull()
+      expect(orch.errors.has('001-issue-1')).toBe(false)
+      expect([...orch.paused]).toEqual(['001-issue-1'])
+      expect(events).toContainEqual({ type: 'paused', jobId: '001-issue-1' })
+      expect(events.some(e => e.type === 'error')).toBe(false)
+    }, 20_000)
+
+    test('the drain leaves a paused job where it stopped', async () => {
+      const { env, orch, runner } = await cancelled()
+      const before = runner.tasks.length
+      await orch.drain()
+      await orch.idle()
+      expect(runner.tasks.length).toBe(before)
+      expect((await env.store.load('001-issue-1')).stage).toBe('spec')
+      expect(orch.paused.has('001-issue-1')).toBe(true)
+    }, 20_000)
+
+    test('retry resumes a paused job and clears paused', async () => {
+      const { env, orch } = await cancelled()
+      orch.retry('001-issue-1')
+      expect(orch.paused.has('001-issue-1')).toBe(false)
+      await orch.idle()
+      expect((await env.store.load('001-issue-1')).stage).toBe('merged')
+      expect(orch.paused.size).toBe(0)
+    }, 20_000)
+  })
 
   describe('merge from needs-human', () => {
     async function escalated(overrides = {}) {
