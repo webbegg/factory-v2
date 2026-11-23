@@ -1,5 +1,8 @@
 // Default role prompts. A project can replace any of them with
-// .factory/agents/<name>.md committed on the base. Each agent writes exactly one file whose first
+// .factory/agents/<name>.md committed on the base, or extend one with
+// .factory/agents/<name>.append.md, added after the built-in prompt under a
+// `## This project` heading. The override wins if both exist, and an addendum
+// that is only HTML comments is ignored. Each agent writes exactly one file whose first
 // line is machine-readable, followed by a `## Summary` of 3–5 bullets.
 
 export type AgentName
@@ -413,4 +416,14 @@ ESCALATE only: the exact decision you need and the files to look at.
 The first line is exactly \`APPROVE\` or \`ESCALATE\`. On ESCALATE everything
 below it is posted on the PR.
 ${FILE_RULES}`
+}
+
+/** An addendum's text without HTML comments, or null when nothing else is left (an untouched scaffold). */
+export function addendumBody(raw: string): string | null {
+  return raw.replace(/<!--[\s\S]*?-->/g, '').trim() || null
+}
+
+/** The built-in prompt, then the project's addendum under `## This project`. */
+export function withAddendum(prompt: string, addendum: string): string {
+  return `${prompt.trimEnd()}\n\n## This project\n\n${addendum}\n`
 }
