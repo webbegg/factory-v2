@@ -5,7 +5,17 @@ import type { FactoryEvent } from '../factory/orchestrator'
 // h3's internal pipe rejects with an unhandled AbortError that kills the
 // process under Bun. Here a departed client only triggers `cancel`.
 export default defineEventHandler(async (event) => {
-  const f = await useFactory()
+  const fixtures = useFixtures()
+  // the fixture board replays its sample events once; nothing new ever happens there
+  const source = fixtures
+    ? await fixtures.then(({ fixtures: data }) => ({
+        on: (listener: (e: FactoryEvent) => void) => data.events.forEach(listener),
+        off: () => {}
+      }))
+    : await useFactory().then(f => ({
+        on: (listener: (e: FactoryEvent) => void) => f.orchestrator.on('event', listener),
+        off: (listener: (e: FactoryEvent) => void) => f.orchestrator.off('event', listener)
+      }))
   const encoder = new TextEncoder()
   let stop = () => {}
   const body = new ReadableStream<Uint8Array>({
@@ -26,10 +36,10 @@ export default defineEventHandler(async (event) => {
         if (!open) return
         open = false
         clearInterval(ping)
-        f.orchestrator.off('event', listener)
+        source.off(listener)
       }
-      f.orchestrator.on('event', listener)
       push({ type: 'hello' })
+      source.on(listener)
     },
     cancel() {
       stop()

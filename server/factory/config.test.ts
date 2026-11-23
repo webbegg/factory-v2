@@ -49,6 +49,16 @@ describe('validateConfigUpdate', () => {
   })
 })
 
+describe('defaultConfig', () => {
+  test('the UI reviewer defaults to sonnet; a config that sets it keeps its value', async () => {
+    expect(defaultConfig().surfaceReviewers.ui!.ui).toBe('sonnet')
+    const env = await makeEnv()
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'config.json'), JSON.stringify({ surfaceReviewers: { ui: { ux: 'sonnet', ui: 'haiku' } } }))
+    expect((await loadConfig(env.paths)).surfaceReviewers.ui!.ui).toBe('haiku')
+  })
+})
+
 describe('saveConfig', () => {
   async function seeded() {
     const env = await makeEnv()

@@ -1,0 +1,36 @@
+{
+  "id": "006-keyboard-shortcuts",
+  "issue": 16,
+  "title": "Keyboard shortcuts",
+  "issueUrl": "https://github.com/example/notes-app/issues/16",
+  "pr": null,
+  "prUrl": null,
+  "branch": "factory/006-keyboard-shortcuts",
+  "worktree": "/placeholder/.worktrees/006-keyboard-shortcuts",
+  "stage": "spec",
+  "round": 0,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "ACCEPT",
+    "rescoped": false,
+    "risk": "low",
+    "surfaces": [
+      "ui"
+    ]
+  },
+  "agents": {
+    "reviewers": {
+      "code": "haiku",
+      "ux": "sonnet",
+      "ui": "sonnet"
+    }
+  },
+  "gate": null,
+  "reviews": {},
+  "roundReason": null,
+  "sessions": {},
+  "costs": {},
+  "costUsd": 0,
+  "started": "2026-11-23T08:00:00Z",
+  "ended": null
+}

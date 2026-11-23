@@ -1,0 +1,30 @@
+{
+  "id": "005-sync-everything",
+  "issue": 15,
+  "title": "Sync everything",
+  "issueUrl": "https://github.com/example/notes-app/issues/15",
+  "pr": null,
+  "prUrl": null,
+  "branch": "factory/005-sync-everything",
+  "worktree": "/placeholder/.worktrees/005-sync-everything",
+  "stage": "needs-info",
+  "round": 0,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "NEEDS-INFO",
+    "rescoped": false,
+    "risk": "medium",
+    "surfaces": []
+  },
+  "agents": null,
+  "gate": null,
+  "reviews": {},
+  "roundReason": null,
+  "sessions": {},
+  "costs": {
+    "sample-session-5": 0.3
+  },
+  "costUsd": 0.3,
+  "started": "2026-11-23T07:30:00Z",
+  "ended": null
+}
