@@ -8,7 +8,25 @@ import type { Ports } from './ports'
 import type { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, GateVerdict, Job } from './types'
 
-const TAIL = 80
+export const TAIL = 80
+
+/**
+ * Runs a checks.sh script the way the gate does: from a temp file, in `cwd`,
+ * with `CI=1`, no secrets in the environment and the `checksMinutes` timeout
+ * (exit 124). The gate and doctor's base check share it so they can't drift.
+ */
+export async function runChecksScript(script: string, cwd: string, checksMinutes: number, signal?: AbortSignal): Promise<{ code: number, output: string, seconds: number }> {
+  const start = performance.now()
+  const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
+  try {
+    const file = join(dir, 'checks.sh')
+    await writeFile(file, script)
+    const res = await run('bash', [file], { cwd, env: { CI: '1' }, scrub: true, signal, timeoutMs: checksMinutes * 60_000 })
+    return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
 
 /** Shell-style glob where `*` also crosses `/` (so `.factory/*` covers subfolders). */
 export function globToRegExp(glob: string): RegExp {
@@ -103,17 +121,8 @@ export class Gate {
     if (script === null) {
       return { code: 127, output: `${CHECKS} isn't committed on origin/${baseBranch}: commit and push it first.\n`, seconds: 0, base }
     }
-    const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
-    try {
-      const file = join(dir, 'checks.sh')
-      await writeFile(file, script)
-      const res = await run('bash', [file], {
-        cwd: worktree, env: { CI: '1' }, scrub: true, signal, timeoutMs: this.o.config.limits.checksMinutes * 60_000
-      })
-      return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000), base }
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    const res = await runChecksScript(script, worktree, this.o.config.limits.checksMinutes, signal)
+    return { code: res.code, output: res.output, seconds: Math.round((performance.now() - start) / 1000), base }
   }
 
   /** origin/<base> as last fetched; null when it can't be read, which never matches a reuse */
