@@ -12,7 +12,9 @@ view; this file is for whoever changes the code.
   job's `events.jsonl` and never throws), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
-  the drain, sent as the `queued` event), `agents/` (prompts and the
+  the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
+  in the same session, when its report is missing or its first line invalid,
+  while the builder's one second try stays in `build()`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
   `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
