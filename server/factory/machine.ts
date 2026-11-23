@@ -94,8 +94,19 @@ export class Machine {
     return next
   }
 
-  advance(id: string, stage: Stage): Promise<Job> {
-    return this.store.update(id, async job => this.transition(await this.sync(job), stage, 'advance'))
+  async advance(id: string, stage: Stage): Promise<Job> {
+    let from: Stage = stage
+    const job = await this.store.update(id, async (raw) => {
+      from = raw.stage
+      return this.transition(await this.sync(raw), stage, 'advance')
+    })
+    await this.logMove(job, from)
+    return job
+  }
+
+  /** Every move made through the machine is logged here, after its job.json is saved, whoever made it. */
+  private async logMove(job: Job, from: Stage) {
+    await this.store.appendEvent(job.id, { at: this.ports.now(), type: 'stage', from, to: job.stage })
   }
 
   /** Records the routed agent set on an ACCEPTed intake job. */
@@ -119,12 +130,13 @@ export class Machine {
       await this.store.write(id, file, `# Feedback ${k}\n\nFrom @${operator} after the job escalated.\n\n${text.trim()}\n`)
       return this.transition(await this.sync(raw), 'build', 'feedback', file)
     })
+    await this.logMove(job, 'needs-human')
     return { job, file }
   }
 
   /** needs-human → merging on the operator's word, recorded as an APPROVE decision.md. */
-  approve(id: string, operator: string): Promise<Job> {
-    return this.store.update(id, async (raw) => {
+  async approve(id: string, operator: string): Promise<Job> {
+    const job = await this.store.update(id, async (raw) => {
       require(raw.stage === 'needs-human', `${id} is in ${raw.stage}, not needs-human`)
       require(raw.pr, `${id} has no PR to merge`)
       await this.store.archive(id, 'decision.md')
@@ -137,17 +149,23 @@ export class Machine {
       }
       return this.transition(await this.sync(raw), 'merging', 'approve')
     })
+    await this.logMove(job, 'needs-human')
+    return job
   }
 
   /** needs-info or needs-human → rejected with the user's reason as rejection.md. */
-  reject(id: string, text: string, operator: string): Promise<Job> {
-    return this.store.update(id, async (raw) => {
+  async reject(id: string, text: string, operator: string): Promise<Job> {
+    let from: Stage = 'rejected'
+    const job = await this.store.update(id, async (raw) => {
       require(WAITING.has(raw.stage), `${id} is in ${raw.stage}, not needs-info or needs-human`)
       require(text.trim(), 'no reason given')
+      from = raw.stage
       await this.store.write(id, 'rejection.md',
         `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n\n${text.trim()}\n`)
       return this.transition(await this.sync(raw), 'rejected', 'reject')
     })
+    await this.logMove(job, from)
+    return job
   }
 
   private async requireSlot(id: string) {
@@ -316,6 +334,8 @@ export class Machine {
 
     job.stage = stage
     job.ended = TERMINAL.has(stage) || WAITING.has(stage) ? this.ports.now() : null
+    // a job that moved on is past whatever stalled it
+    job.error = null
     return job
   }
 

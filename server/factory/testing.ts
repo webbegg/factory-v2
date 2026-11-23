@@ -217,6 +217,7 @@ export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {
     costUsd: 0,
     started: '2026-11-20T11:00:00Z',
     ended: null,
+    error: null,
     ...fields
   }
 }

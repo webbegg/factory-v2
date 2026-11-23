@@ -36,5 +36,6 @@
   },
   "costUsd": 11.3,
   "started": "2026-11-21T10:00:00Z",
-  "ended": null
+  "ended": null,
+  "error": null
 }

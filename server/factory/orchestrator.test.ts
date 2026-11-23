@@ -48,6 +48,12 @@ class FakeRunner implements AgentRunner {
 
 const write = (task: AgentTask, rel: string, text: string) => writeFile(join(task.jobDir, rel), text)
 
+async function readEvents(env: TestEnv, id: string): Promise<Array<Record<string, unknown>>> {
+  const text = await env.store.read(id, 'events.jsonl') ?? ''
+  expect(text).toEndWith('\n')
+  return text.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+}
+
 const happy: Partial<Record<AgentName, Script>> = {
   'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- ok\n'),
   'spec-writer': t => write(t, 'spec.md', '# Spec\n'),
@@ -224,6 +230,8 @@ describe('orchestrator', () => {
     const { env, orch } = await factory({
       ...happy,
       'spec-writer': t => new Promise<string>((resolve) => {
+        // the abort may come before the script runs
+        if (t.signal!.aborted) resolve('aborted')
         t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
       })
     })
@@ -617,6 +625,127 @@ describe('orchestrator', () => {
     expect(existsSync(join(env.paths.jobs, '001-issue-1', 'feedback-1.md'))).toBe(true)
   })
 
+  test('a drained job logs its stages, agent runs, gate and merge to events.jsonl', async () => {
+    const { env, orch } = await factory({ ...happy })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const events = await readEvents(env, '001-issue-1')
+    for (const e of events) {
+      expect(e.at).toBe('2026-11-20T12:00:00Z')
+      expect(e.type).toBeString()
+    }
+    expect(events.filter(e => e.type === 'stage').map(e => `${e.from}→${e.to}`)).toEqual([
+      'intake→spec', 'spec→build', 'build→gate', 'gate→review', 'review→approve', 'approve→merging', 'merging→merged'
+    ])
+    const agents = ['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver']
+    expect(events.filter(e => e.type === 'agent-start').map(e => e.agent)).toEqual(agents)
+    const ends = events.filter(e => e.type === 'agent-end')
+    expect(ends.map(e => e.agent)).toEqual(agents)
+    for (const e of ends) expect(e).toMatchObject({ model: expect.any(String), round: expect.any(Number), seconds: expect.any(Number), cost: 0.25, ok: true })
+    expect(ends[0]).toMatchObject({ model: 'fable', round: 0 })
+    const gates = events.filter(e => e.type === 'gate')
+    expect(gates).toHaveLength(1)
+    expect(gates[0]).toMatchObject({ verdict: 'PASS', seconds: expect.any(Number), commit: 'a'.repeat(40) })
+    expect(events.filter(e => e.type === 'merge')).toEqual([{ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged' }])
+  })
+
+  test('a failed agent\'s error is kept in job.json, loaded by a new orchestrator, and cleared by retry', async () => {
+    const { env, orch } = await factory({ ...happy, 'spec-writer': () => 'rate limited' })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const id = '001-issue-1'
+    const end = (await readEvents(env, id)).filter(e => e.type === 'agent-end').at(-1)!
+    expect(end).toMatchObject({ agent: 'spec-writer', ok: false })
+    expect(end.error).toContain('rate limited')
+    const saved = (await env.store.load(id)).error!
+    expect(saved.message).toContain('spec-writer failed: rate limited')
+    expect(saved.at).toBe('2026-11-20T12:00:00Z')
+
+    // a restart: a new orchestrator over the same files
+    const runner = new FakeRunner(env, { ...happy })
+    const next = new Orchestrator({ ...env, runner })
+    await next.loadErrors()
+    expect(next.errors.get(id)).toBe(saved.message)
+    await next.drain()
+    await next.idle()
+    expect(runner.tasks.filter(t => t.jobId === id)).toEqual([])
+    expect((await env.store.load(id)).stage).toBe('spec')
+
+    // what factory()'s builder hook does for the first runner
+    env.github.openPrs.set(`factory/${id}`, [{ number: 101, url: 'pr/1' }])
+    next.retry(id)
+    await next.idle()
+    const job = await env.store.load(id)
+    expect(job.error).toBeNull()
+    expect(job.stage).toBe('merged')
+  })
+
+  test('an agent that rewrites events.jsonl stalls the job and the log is restored', async () => {
+    let before = ''
+    const { env, orch } = await factory({
+      ...happy,
+      'reviewer-code': async (t) => {
+        before = await readFile(join(t.jobDir, 'events.jsonl'), 'utf8')
+        await write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n')
+        await write(t, 'events.jsonl', '')
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('review')
+    expect(orch.errors.get(job.id)).toContain('reviewer-code changed job files it may not: events.jsonl (changed); the factory undid it')
+    expect(before).not.toBe('')
+    expect(await env.store.read(job.id, 'events.jsonl')).toStartWith(before)
+  })
+
+  test('an agent that sets error in job.json is refused and the field restored', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'spec-writer': async (t) => {
+        await write(t, 'spec.md', '# Spec\n')
+        const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+        await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, error: { message: 'forged', at: 'x' } }))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('spec')
+    expect(orch.errors.get(job.id)).toContain('spec-writer changed job.json fields it may not: error')
+    expect(job.error?.message).toContain('changed job.json fields it may not: error')
+  })
+
+  test('a shutdown abort is not kept as an error, a cancel is', async () => {
+    const held = {
+      ...happy,
+      // the runner records the task before the script runs, so the abort may already be in
+      'spec-writer': (t: AgentTask) => new Promise<string>((resolve) => {
+        if (t.signal!.aborted) resolve('aborted')
+        t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
+      })
+    }
+    const running = async (scripts: Partial<Record<AgentName, Script>>) => {
+      const f = await factory(scripts)
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      while (!f.runner.tasks.some(t => t.agent === 'spec-writer')) await Bun.sleep(5)
+      return f
+    }
+    const stopped = await running({ ...held })
+    await stopped.orch.shutdown()
+    expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
+
+    const cancelled = await running({ ...held })
+    cancelled.orch.cancel('001-issue-1')
+    await cancelled.orch.idle()
+    expect((await cancelled.env.store.load('001-issue-1')).error?.message).toContain('spec-writer cancelled')
+  }, 20_000)
+
   describe('merge from needs-human', () => {
     async function escalated(overrides = {}) {
       const f = await factory({
@@ -643,6 +772,9 @@ describe('orchestrator', () => {
       expect((await env.store.load('001-issue-1')).stage).toBe('merged')
       expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
       expect(await env.store.read('001-issue-1', 'decision-1.md')).toStartWith('ESCALATE')
+      const events = await readEvents(env, '001-issue-1')
+      expect(events.filter(e => e.type === 'stage').slice(-2).map(e => `${e.from}→${e.to}`)).toEqual(['needs-human→merging', 'merging→merged'])
+      expect(events.at(-1)).toEqual({ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged' })
     })
 
     test('a conflict at the merge goes back to the builder, even after the last round escalated', async () => {
