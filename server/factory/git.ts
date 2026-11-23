@@ -1,5 +1,5 @@
-import { mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { mkdir, realpath } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { exec, run } from './exec'
 import type { GitPort } from './ports'
 
@@ -16,9 +16,23 @@ export class GitCli implements GitPort {
     await this.git(cwd, 'fetch', '-q', 'origin', `+refs/heads/${ref}:refs/remotes/origin/${ref}`)
   }
 
+  /** Safe to call again for the same job: a stage change that failed after it may be retried. */
   async addWorktree(path: string, branch: string, from: string) {
     await mkdir(dirname(path), { recursive: true })
-    await this.git(this.repo, 'worktree', 'add', '-q', '-b', branch, path, from)
+    // macOS temp dirs are reached through /private, so compare real paths
+    const want = join(await realpath(dirname(path)), basename(path))
+    const list = await this.git(this.repo, 'worktree', 'list', '--porcelain')
+    for (const block of list.split('\n\n')) {
+      const lines = block.split('\n')
+      const at = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+      if (!at || await realpath(at).catch(() => at) !== want) continue
+      const found = lines.find(l => l.startsWith('branch '))?.slice('branch refs/heads/'.length) ?? 'a detached HEAD'
+      if (found === branch) return
+      throw new Error(`${path} is a worktree on ${found}, not ${branch}`)
+    }
+    const exists = (await run('git', ['show-ref', '--verify', '-q', `refs/heads/${branch}`], { cwd: this.repo })).code === 0
+    if (exists) await this.git(this.repo, 'worktree', 'add', '-q', path, branch)
+    else await this.git(this.repo, 'worktree', 'add', '-q', '-b', branch, path, from)
   }
 
   async removeWorktree(path: string) {

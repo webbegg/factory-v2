@@ -11,7 +11,11 @@ view; this file is for whoever changes the code.
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
   job's `events.jsonl` and never throws; `list()` skips `<id>.rejected-<n>`
   folders, which `archiveJob` makes, while `Queue.create` numbers new ids
-  above every entry, archives included), `queue.ts`, `gate.ts`,
+  above every entry, archives included; a move's unrepeatable steps — comments,
+  labels, PR close, remote branch delete, the `intake.md` rename — are recorded
+  in `job.json` `move` as each finishes, skipped on a retry of the same move,
+  and cleared when the move is saved, and `Machine.answer` posts the operator's
+  reply as one of these steps), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
