@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
-import { PROMPTS } from './agents/prompts'
+import { addendumBody, PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
@@ -601,13 +601,17 @@ export class Orchestrator extends EventEmitter {
     return base + step * Number.parseInt(job.id, 10) + offset
   }
 
-  /** A prompt override counts only once it is committed on the base, where no agent can write it. */
+  /** A prompt override or addendum counts only once it is committed on the base, where no agent can write it. */
   private async prompt(agent: AgentName): Promise<string> {
     const { paths, ports, config } = this.o
     // an agent can move the local origin/<base>; fetching first puts it back
     await ports.git.fetch(paths.repo, config.baseBranch)
-    const override = await ports.git.show(paths.repo, `refs/remotes/origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
-    return override ?? PROMPTS[agent]
+    const ref = `refs/remotes/origin/${config.baseBranch}`
+    const override = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.md`)
+    if (override !== null) return override
+    const addendum = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.append.md`)
+    const body = addendum === null ? null : addendumBody(addendum)
+    return body === null ? PROMPTS[agent] : withAddendum(PROMPTS[agent], body)
   }
 
   private model(job: Job, agent: AgentName): string {

@@ -1,7 +1,7 @@
 // Each reviewer blocks only on its own lens's problems; these phrases are the
 // contract, so dropping or mixing a rule in a later edit fails here.
 import { describe, expect, test } from 'bun:test'
-import { PROMPTS } from './prompts'
+import { addendumBody, PROMPTS, withAddendum } from './prompts'
 
 const LENS_RULES = {
   'reviewer-code': 'bugs, spec gaps, weakened tests, clear convention breaks',
@@ -46,5 +46,26 @@ describe('approver prompt', () => {
 describe('builder prompt', () => {
   test('never reformats whole files, even resolving merge conflicts', () => {
     expect(flat('builder')).toContain('never reformat whole files, including when resolving a merge conflict')
+  })
+})
+
+describe('addendumBody', () => {
+  test('strips single-line and multi-line comments and keeps the rest', () => {
+    expect(addendumBody('<!-- one -->\nUsers are nurses.\n<!--\n  two\n  lines\n-->\n')).toBe('Users are nurses.')
+    expect(addendumBody('a <!-- x --> b')).toBe('a  b')
+  })
+
+  test('blank or comment-only input is null', () => {
+    expect(addendumBody('')).toBeNull()
+    expect(addendumBody('  \n\t\n')).toBeNull()
+    expect(addendumBody('<!--\n  only a comment\n-->\n\n<!-- and another -->\n')).toBeNull()
+  })
+})
+
+describe('withAddendum', () => {
+  test('the built-in prompt, then the heading, then the addendum', () => {
+    const prompt = withAddendum(PROMPTS.intake, 'A todo app.')
+    expect(prompt.startsWith(PROMPTS.intake)).toBe(true)
+    expect(prompt).toEndWith('\n\n## This project\n\nA todo app.\n')
   })
 })

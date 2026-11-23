@@ -22,7 +22,8 @@ view; this file is for whoever changes the code.
   in the same session, when its report is missing or its first line invalid,
   while the builder's one second try stays in `build()`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
-  `setup.ts` (`init` / `doctor`; `baseChecks` runs `checks.sh` on
+  `setup.ts` (`init` / `doctor`; `init` writes the commented prompt addenda
+  through `scaffoldAddenda`, which is unit-tested on its own; `baseChecks` runs `checks.sh` on
   `origin/<base>` in a temporary detached worktree through the gate's
   `runChecksScript`, and `doctor(repo, { baseChecks: true })`, used only by the
   CLI, includes it), `service.ts` (what the server and CLI share),

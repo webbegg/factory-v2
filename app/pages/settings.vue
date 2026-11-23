@@ -4,7 +4,7 @@ import type { ConfigUpdate } from '~~/server/factory/config'
 import type { FactoryConfig, Risk } from '~~/server/factory/types'
 
 const { act } = useBoard()
-const { data, error } = await useFetch<{ config: FactoryConfig, prompts: { name: AgentName, overridden: boolean }[] }>('/api/settings')
+const { data, error } = await useFetch<{ config: FactoryConfig, prompts: { name: AgentName, overridden: boolean, addendum: boolean }[] }>('/api/settings')
 
 const form = ref<ConfigUpdate | null>(null)
 const paths = ref('')
@@ -165,7 +165,9 @@ async function save() {
             Agents
           </h2>
           <p class="text-sm text-muted">
-            An agent is overridden when <code>.factory/agents/&lt;name&gt;.md</code> exists.
+            <code>.factory/agents/&lt;name&gt;.md</code> replaces an agent's prompt;
+            <code>.factory/agents/&lt;name&gt;.append.md</code> is added to it under "This project".
+            The override wins if both exist.
           </p>
         </div>
         <ul class="space-y-2">
@@ -175,12 +177,26 @@ async function save() {
             class="flex items-center gap-2 text-sm"
           >
             <span class="text-highlighted">{{ p.name }}</span>
-            <UBadge
-              :label="p.overridden ? 'overridden' : 'built-in'"
-              :color="p.overridden ? 'primary' : 'neutral'"
-              variant="subtle"
-              class="ms-auto"
-            />
+            <span class="ms-auto flex gap-1">
+              <UBadge
+                v-if="p.overridden"
+                label="overridden"
+                color="primary"
+                variant="subtle"
+              />
+              <UBadge
+                v-if="p.addendum"
+                label="addendum"
+                color="primary"
+                variant="subtle"
+              />
+              <UBadge
+                v-if="!p.overridden && !p.addendum"
+                label="built-in"
+                color="neutral"
+                variant="subtle"
+              />
+            </span>
           </li>
         </ul>
       </div>
