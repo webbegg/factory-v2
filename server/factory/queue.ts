@@ -81,7 +81,8 @@ export class Queue {
       } else if (j.stage === 'needs-human') {
         others.push(row('wait', issue.number, j, j.pr ? `merge PR #${j.pr}, or give feedback` : 'give feedback'))
       } else if (j.stage === 'rejected') {
-        others.push(row('skip', issue.number, j, `rejected; delete .factory/jobs/${j.id} to retry`))
+        // both rejection paths remove the label, so a labeled issue here was labeled again since
+        others.push(row('skip', issue.number, j, 're-labeled after rejection: Run again on the board'))
       } else if (j.stage === 'merged') {
         others.push(row('skip', issue.number, j, 'merged'))
       } else {
@@ -141,7 +142,9 @@ export class Queue {
       throw new Refused(`concurrency ${config.concurrency} reached; running: ${busy.join(', ')}`)
     }
     const issue = await this.openLabeled(number)
-    const next = Math.max(0, ...jobs.map(j => Number.parseInt(j.id, 10)).filter(Number.isFinite)) + 1
+    // archived folders count too, so a new job never reuses an old one's number, branch or worktree
+    const numbers = (await store.entries()).map(name => Number.parseInt(name, 10)).filter(Number.isFinite)
+    const next = Math.max(0, ...numbers) + 1
     const id = `${String(next).padStart(3, '0')}-${slugify(issue.title)}`
     const job: Job = {
       id,

@@ -9,7 +9,9 @@ view; this file is for whoever changes the code.
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk),
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
-  job's `events.jsonl` and never throws; a move's unrepeatable steps — comments,
+  job's `events.jsonl` and never throws; `list()` skips `<id>.rejected-<n>`
+  folders, which `archiveJob` makes, while `Queue.create` numbers new ids
+  above every entry, archives included; a move's unrepeatable steps — comments,
   labels, PR close, remote branch delete, the `intake.md` rename — are recorded
   in `job.json` `move` as each finishes, skipped on a retry of the same move,
   and cleared when the move is saved, and `Machine.answer` posts the operator's
@@ -51,7 +53,8 @@ view; this file is for whoever changes the code.
   for needs-human jobs merged by hand, on load and when a job panel opens).
   `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
   merge (the board's Merge on an escalated job: `Orchestrator.approve`),
-  retry (also the board's Resume) and cancel (pauses). `server/api/uploads.post.ts`
+  retry (also the board's Resume), cancel (pauses) and rerun (Run again:
+  `Orchestrator.runAgain` archives a rejected job's folder). `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
   to the text it then sends to the existing routes.
   `server/middleware/fixtures.ts` applies `fixtureRefusal` (`service.ts`): under

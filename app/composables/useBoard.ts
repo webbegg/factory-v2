@@ -26,6 +26,7 @@ type ServerEvent
     | { type: 'agent', jobId: string, agent: string, event: { kind: Exclude<FeedKind, 'status'>, text: string } }
     | { type: 'error', jobId: string, message: string }
     | { type: 'paused', jobId: string }
+    | { type: 'archived', jobId: string, archived: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
     | { type: 'idle' | 'hello' | 'ping' }
@@ -93,6 +94,9 @@ export function useBoard() {
     } else if (e.type === 'paused') {
       // the operator cancelled it, so a status line is enough
       addToFeed(new Date().toLocaleTimeString(), 'factory', e.jobId, 'status', `${e.jobId} paused`)
+      refreshSoon()
+    } else if (e.type === 'archived') {
+      addToFeed(new Date().toLocaleTimeString(), 'factory', e.jobId, 'status', `${e.jobId} archived as ${e.archived}`)
       refreshSoon()
     } else if (e.type === 'queued') {
       if (state.value) state.value.queued = e.issues

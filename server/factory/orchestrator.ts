@@ -34,6 +34,7 @@ export type FactoryEvent
     | { type: 'agent', jobId: string, agent: AgentName, event: AgentEvent }
     | { type: 'error', jobId: string, message: string }
     | { type: 'paused', jobId: string }
+    | { type: 'archived', jobId: string, archived: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
     | { type: 'idle' }
@@ -57,6 +58,9 @@ const REPORT_FILE: Partial<Record<AgentName, string>> = {
 }
 
 const VERDICTS = ['VERDICT: PASS', 'VERDICT: CHANGES']
+
+/** The ids `Queue.create` makes: a number, then a lowercase slug; no dots or slashes. */
+const JOB_ID = /^\d+-[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 /** First lines a valid report may start with, per agent; the spec has no verdict line, so it has no fallback. */
 const REPORT_HEAD: Partial<Record<AgentName, string[]>> = {
@@ -257,6 +261,28 @@ export class Orchestrator extends EventEmitter {
     const next = await this.o.machine.answer(id, text, reply)
     this.start(id)
     return next
+  }
+
+  /**
+   * Archives a rejected job's folder so its issue can get a fresh job on the
+   * next drain or Run issue. Starts nothing and changes no labels: `labeled`
+   * tells the caller whether the issue is open and queued already.
+   */
+  async runAgain(id: string): Promise<{ archived: string, labeled: boolean }> {
+    const { store, ports, config } = this.o
+    // the id comes from a URL and becomes a path, so only the shape `create` makes gets that far
+    if (!JOB_ID.test(id)) throw new Refused(`${JSON.stringify(id)} isn't a job id`)
+    const job = (await store.list()).find(j => j.id === id)
+    if (!job) throw new Refused(`no job ${id}`)
+    if (job.stage !== 'rejected') throw new Refused(`${id} is in ${job.stage}, not rejected`)
+    if (this.active.has(id)) throw new Refused(`${id} is running`)
+    const issue = await ports.github.fetchIssue(job.issue)
+    const labeled = issue.state === 'OPEN' && issue.labels.includes(config.labels.queue)
+    const archived = await store.archiveJob(id)
+    this.errors.delete(id)
+    this.paused.delete(id)
+    this.send({ type: 'archived', jobId: id, archived })
+    return { archived, labeled }
   }
 
   /** Restart a stalled job from its stage. */
