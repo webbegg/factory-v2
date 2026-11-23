@@ -79,6 +79,15 @@ const empty = computed(() => {
   return `${writer[0]!.toUpperCase()}${writer.slice(1)} hasn't written ${current.value.split('/').pop()} yet.`
 })
 
+async function copyWorktree(path: string) {
+  try {
+    await navigator.clipboard.writeText(path)
+    toast.add({ title: 'Worktree path copied', description: path, color: 'success' })
+  } catch (err) {
+    toast.add({ title: 'Couldn\'t copy the worktree path', description: err instanceof Error ? err.message : String(err), color: 'error' })
+  }
+}
+
 const lines = computed(() => activity.value[props.jobId] ?? [])
 const sending = ref<'feedback' | 'reject' | 'answer' | 'merge' | 'rerun' | null>(null)
 const confirmingMerge = ref(false)
@@ -151,6 +160,21 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
           <p class="font-mono text-xs text-muted">
             {{ job.id }} · {{ job.stage }}<span v-if="job.round"> · round {{ job.round }}/{{ job.roundLimit }}</span>
             · ${{ job.costUsd.toFixed(2) }} · {{ elapsed(job) }}
+          </p>
+          <p
+            v-if="job.branch"
+            class="flex items-center gap-1 font-mono text-xs text-muted"
+          >
+            <span class="truncate">{{ job.branch }}</span>
+            <UButton
+              v-if="job.worktree"
+              icon="i-lucide-copy"
+              color="neutral"
+              variant="ghost"
+              size="xs"
+              aria-label="Copy worktree path"
+              @click="copyWorktree(job.worktree)"
+            />
           </p>
           <h2 class="text-lg font-semibold break-words text-highlighted">
             {{ job.title }}
@@ -457,6 +481,11 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               <USkeleton class="h-4 w-5/6" />
               <USkeleton class="h-4 w-2/3" />
             </div>
+            <!-- Logs are command output, not markdown: plain text, wrapped so this stays the only scroll region. -->
+            <pre
+              v-else-if="file && current?.endsWith('.log')"
+              class="font-mono text-xs whitespace-pre-wrap wrap-anywhere text-default"
+            >{{ file }}</pre>
             <MarkdownDoc
               v-else-if="file"
               :text="file"
