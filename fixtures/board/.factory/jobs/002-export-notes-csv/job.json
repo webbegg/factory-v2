@@ -1,0 +1,45 @@
+{
+  "id": "002-export-notes-csv",
+  "issue": 12,
+  "title": "Export notes as CSV",
+  "issueUrl": "https://github.com/example/notes-app/issues/12",
+  "pr": 212,
+  "prUrl": "https://github.com/example/notes-app/pull/212",
+  "branch": "factory/002-export-notes-csv",
+  "worktree": "/placeholder/.worktrees/002-export-notes-csv",
+  "stage": "review",
+  "round": 2,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "ACCEPT",
+    "rescoped": false,
+    "risk": "medium",
+    "surfaces": [
+      "ui"
+    ]
+  },
+  "agents": {
+    "reviewers": {
+      "code": "sonnet",
+      "ux": "sonnet",
+      "ui": "sonnet"
+    }
+  },
+  "gate": "PASS",
+  "reviews": {
+    "code": "PASS",
+    "ux": "PASS",
+    "ui": "pending"
+  },
+  "roundReason": "review",
+  "sessions": {
+    "builder": "sample-session-2"
+  },
+  "costs": {
+    "sample-session-2": 4.1,
+    "sample-review-2": 0.9
+  },
+  "costUsd": 5,
+  "started": "2026-11-22T14:00:00Z",
+  "ended": null
+}

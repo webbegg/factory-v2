@@ -1,0 +1,40 @@
+{
+  "id": "003-shared-notebooks",
+  "issue": 13,
+  "title": "Shared notebooks",
+  "issueUrl": "https://github.com/example/notes-app/issues/13",
+  "pr": 213,
+  "prUrl": "https://github.com/example/notes-app/pull/213",
+  "branch": "factory/003-shared-notebooks",
+  "worktree": "/placeholder/.worktrees/003-shared-notebooks",
+  "stage": "needs-human",
+  "round": 3,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "ACCEPT",
+    "rescoped": false,
+    "risk": "high",
+    "surfaces": [
+      "security"
+    ]
+  },
+  "agents": {
+    "reviewers": {
+      "code": "sonnet",
+      "security": "opus"
+    }
+  },
+  "gate": "PASS",
+  "reviews": {
+    "code": "PASS",
+    "security": "CHANGES"
+  },
+  "roundReason": "review",
+  "sessions": {},
+  "costs": {
+    "sample-session-3": 11.3
+  },
+  "costUsd": 11.3,
+  "started": "2026-11-21T10:00:00Z",
+  "ended": null
+}

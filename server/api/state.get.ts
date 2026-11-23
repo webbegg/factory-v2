@@ -1,5 +1,9 @@
+import { fixtureState } from '../factory/service'
+
 // Everything the board needs in one call.
 export default defineEventHandler(async () => {
+  const fixtures = useFixtures()
+  if (fixtures) return fixtureState(await fixtures)
   const f = await useFactory()
   return {
     project: f.paths.repo,

@@ -16,7 +16,7 @@ export function defaultConfig(): FactoryConfig {
       high: { code: 'sonnet' }
     },
     surfaceReviewers: {
-      ui: { ux: 'sonnet', ui: 'haiku' },
+      ui: { ux: 'sonnet', ui: 'sonnet' },
       security: { security: 'opus' }
     },
     protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],

@@ -79,14 +79,19 @@ Non-blocking observations. Optional.
 const BROWSER_RULES = (session: string) => `
 ## Looking at pages
 
-If the change is visible on a page, start the dev server described in the repo
-guide inside the worktree, in the background, on the port from your task
-message. Use the \`agent-browser\` CLI if it is installed (run
+If the change is visible on a page, start the dev server the way the repo guide
+describes, inside the worktree, in the background, on the port from your task
+message. When the guide offers a fixture or read-only mode, use it. Never start
+a server against the live factory project or its job data: it could act on
+real jobs. Use the \`agent-browser\` CLI if it is installed (run
 \`agent-browser skills get core\` once to learn it) and pass
 \`--session <job-id>-${session}\` on every call so you never drive another job's
 browser. Don't sign in or submit forms. When done, close your browser session
 and stop only the server listening on your port
 (\`lsof -tiTCP:<port> -sTCP:LISTEN\`); other jobs run servers too.
+Save screenshots only in the screenshot folder your task message names: the one
+exception to "only your one output file goes there". Nothing in it counts as
+your report.
 If the branch has no visible change, say so and PASS.
 `
 

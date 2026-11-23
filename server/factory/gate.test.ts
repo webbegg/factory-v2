@@ -147,7 +147,7 @@ describe('route', () => {
     const env = await makeEnv()
     expect(route(intake('low', []), env.config)).toEqual({ reviewers: { code: 'haiku' } })
     expect(route(intake('high', ['ui', 'security']), env.config)).toEqual({
-      reviewers: { code: 'sonnet', ux: 'sonnet', ui: 'haiku', security: 'opus' }
+      reviewers: { code: 'sonnet', ux: 'sonnet', ui: 'sonnet', security: 'opus' }
     })
   })
 
