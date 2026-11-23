@@ -174,6 +174,49 @@ describe('orchestrator', () => {
     expect(review!.message).toContain('Review round 1.')
   })
 
+  describe('the builder\'s stop check', () => {
+    async function stopping(after?: (env: TestEnv) => void) {
+      const made = await factory({
+        ...happy,
+        builder: async (t) => {
+          await write(t, 'build.md', 'STATUS: READY\n\n# Build\n')
+          expect(await t.stopCheck!()).toBeNull()
+          after?.(made.env)
+        }
+      })
+      const env = made.env
+      const runs = join(env.paths.repo, 'checks-runs')
+      env.git.committed.set('.factory/checks.sh', `echo run >> ${runs}; echo from-stop-check\n`)
+      // origin/main stays put when the job branch's remote moves
+      env.git.remoteHeads.set('main', 'b'.repeat(40))
+      env.github.addIssue({ number: 1 })
+      await made.orch.drain()
+      await made.orch.idle()
+      const count = (await readFile(runs, 'utf8')).trim().split('\n').length
+      return { ...made, count, id: (await env.store.list())[0]!.id }
+    }
+
+    test('a pass on the same HEAD and base is reused by the gate and then the merge gate', async () => {
+      const { env, orch, count, id } = await stopping()
+      expect(orch.errors.size).toBe(0)
+      expect((await env.store.load(id)).stage).toBe('merged')
+      expect(count).toBe(1)
+      expect(await env.store.read(id, 'round-1/checks.md')).toContain('checks.sh not re-run: reused the builder\'s stop check')
+      expect(await env.store.read(id, 'round-1/checks.log')).toBe('from-stop-check\n')
+      expect(await env.store.read(id, 'round-1/merge-checks.md')).toContain('reused round-1/checks.md')
+    })
+
+    test('a commit after the stop check makes the gate run checks.sh', async () => {
+      const { env, count, id } = await stopping((e) => {
+        // committed and pushed, so the machine lets the build through to the gate
+        e.git.headSha = e.git.remoteSha = 'd'.repeat(40)
+      })
+      expect((await env.store.load(id)).stage).toBe('merged')
+      expect(count).toBe(2)
+      expect(await env.store.read(id, 'round-1/checks.md')).not.toContain('not re-run')
+    })
+  })
+
   test('every agent run is capped by limits.agentTurns and limits.agentBudgetUsd', async () => {
     const { env, runner, orch } = await factory({ ...happy }, { limits: { checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
     env.github.addIssue({ number: 1 })

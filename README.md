@@ -20,7 +20,9 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
 
 On the board, an escalated job's **Merge** button approves it: the factory
 syncs with the base, gates again, and merges through `gh pr merge`, as after an
-APPROVE. A PR you merge by hand on GitHub moves its job to merged.
+APPROVE. Gating again reuses the round gate's pass, without re-running
+`checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
+`BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
 
 The orchestrator is deterministic TypeScript; only the judgment steps are
 agents (Claude Agent SDK). Every step writes one markdown file in
@@ -107,6 +109,15 @@ in the running factory and is not kept across a restart.
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
   and a second gate. The factory never deploys.
+- `checks.md` and `merge-checks.md` start with `GATE:`, `COMMIT:` (the
+  worktree HEAD) and `BASE:` (the `origin/<base>` sha the checks ran against).
+  The round gate skips `checks.sh` when the builder's last stop check
+  (recorded in the factory's memory, never in a file an agent can write) or
+  this round's `checks.md` passed on a clean worktree at the same HEAD and
+  `BASE:`; the merge gate skips it only when the sync left HEAD unchanged and
+  the round's `checks.md` passed against the current `origin/<base>`. A
+  skipped run is written down with its source, only a PASS is reused, and
+  protected paths are checked every time.
 - `checks.sh` runs without environment variables named like secrets (`*TOKEN*`,
   `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `AUTH`), so branch code
   never sees the factory's credentials; checks that need one must get it some
