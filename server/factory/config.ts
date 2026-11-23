@@ -21,7 +21,8 @@ export function defaultConfig(): FactoryConfig {
     },
     protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],
     ports: { base: 5100, step: 10 },
-    limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 }
+    limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 },
+    ci: { wait: true, startMinutes: 2, minutes: 30 }
   }
 }
 
@@ -30,7 +31,7 @@ export function factoryPaths(repo: string): FactoryPaths {
   return { repo, factory, jobs: join(factory, 'jobs'), worktrees: join(repo, '.worktrees') }
 }
 
-/** Reads <repo>/.factory/config.json over the defaults (top-level keys, and each limit on its own). */
+/** Reads <repo>/.factory/config.json over the defaults (top-level keys, and each limit and ci key on its own). */
 export async function loadConfig(paths: FactoryPaths): Promise<FactoryConfig> {
   const text = await readFile(join(paths.factory, 'config.json'), 'utf8')
   return withDefaults(JSON.parse(text) as Partial<FactoryConfig>)
@@ -39,11 +40,21 @@ export async function loadConfig(paths: FactoryPaths): Promise<FactoryConfig> {
 function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
   const defaults = defaultConfig()
   // a zero, negative or non-numeric limit would switch the cap off or fail every job, so it falls back
+  const positive = (value: unknown, fallback: number) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
   const limits = Object.fromEntries(Object.entries(defaults.limits).map(([key, fallback]) => {
-    const value = (raw.limits as Record<string, unknown> | undefined)?.[key]
-    return [key, typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback]
+    return [key, positive((raw.limits as Record<string, unknown> | undefined)?.[key], fallback)]
   })) as FactoryConfig['limits']
-  return { ...defaults, ...raw, limits }
+  const ci: Record<string, unknown> = isObject(raw.ci) ? raw.ci : {}
+  return {
+    ...defaults,
+    ...raw,
+    limits,
+    ci: {
+      wait: typeof ci.wait === 'boolean' ? ci.wait : defaults.ci.wait,
+      startMinutes: positive(ci.startMinutes, defaults.ci.startMinutes),
+      minutes: positive(ci.minutes, defaults.ci.minutes)
+    }
+  }
 }
 
 /** The keys the Settings page edits; everything else in the file is left alone. */

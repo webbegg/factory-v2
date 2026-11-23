@@ -91,6 +91,15 @@ export interface FactoryConfig {
     /** USD per agent run (a resumed builder counts from the resume) */
     agentBudgetUsd: number
   }
+  /** GitHub CI on the gated commit, waited for between the push and `gh pr merge` */
+  ci: {
+    /** false merges right after the local gate, without asking GitHub for checks */
+    wait: boolean
+    /** an empty check list this long after the push means the commit has no CI, so it merges */
+    startMinutes: number
+    /** checks still pending this long after the push send the job to a human */
+    minutes: number
+  }
 }
 
 export interface FactoryPaths {

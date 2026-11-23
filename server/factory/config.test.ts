@@ -49,6 +49,33 @@ describe('validateConfigUpdate', () => {
   })
 })
 
+describe('ci config', () => {
+  async function load(raw: unknown) {
+    const env = await makeEnv()
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'config.json'), JSON.stringify(raw))
+    return (await loadConfig(env.paths)).ci
+  }
+
+  test('a missing or non-object ci gives the defaults', async () => {
+    expect(defaultConfig().ci).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+    expect(await load({})).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+    expect(await load({ ci: 'yes' })).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+    expect(await load({ ci: [1] })).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+  })
+
+  test('merges per key', async () => {
+    expect(await load({ ci: { minutes: 10 } })).toEqual({ wait: true, startMinutes: 2, minutes: 10 })
+    expect(await load({ ci: { wait: false, startMinutes: 0.5 } })).toEqual({ wait: false, startMinutes: 0.5, minutes: 30 })
+  })
+
+  test('each invalid value falls back to its own default', async () => {
+    expect(await load({ ci: { wait: 'yes', minutes: 0, startMinutes: -1 } })).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+    expect(await load({ ci: { wait: false, minutes: 'x', startMinutes: 5 } })).toEqual({ wait: false, startMinutes: 5, minutes: 30 })
+    expect(await load({ ci: { minutes: true, startMinutes: null } })).toEqual({ wait: true, startMinutes: 2, minutes: 30 })
+  })
+})
+
 describe('defaultConfig', () => {
   test('the UI reviewer defaults to sonnet; a config that sets it keeps its value', async () => {
     expect(defaultConfig().surfaceReviewers.ui!.ui).toBe('sonnet')
