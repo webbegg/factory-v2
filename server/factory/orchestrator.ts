@@ -5,7 +5,7 @@ import { dirname, join, relative } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
-import type { Gate } from './gate'
+import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
 import { firstLine } from './markdown'
 import { Refused } from './machine'
@@ -135,6 +135,12 @@ export class Orchestrator extends EventEmitter {
   private pending: number[] = []
   /** set by shutdown: nothing new starts, queued issues included */
   private stopped = false
+  /**
+   * The builder's latest stop check per job, for the gate to reuse. Memory
+   * only, out of every agent's reach; a restart loses it and the gate just
+   * runs checks.sh.
+   */
+  private stopChecks = new Map<string, StopCheckRecord>()
 
   constructor(private o: OrchestratorOptions) {
     super()
@@ -355,6 +361,8 @@ export class Orchestrator extends EventEmitter {
       .finally(async () => {
         this.cancelling.delete(id)
         this.active.delete(id)
+        // a job whose driver stopped has left build/gate as far as this record goes
+        this.stopChecks.delete(id)
         await this.tick()
         if (!this.active.size) this.send({ type: 'idle' })
       })
@@ -399,7 +407,9 @@ export class Orchestrator extends EventEmitter {
       case 'build':
         return this.build(job, signal)
       case 'gate': {
-        const result = await gate.run(job.id, { signal })
+        const stopCheck = this.stopChecks.get(job.id)
+        this.stopChecks.delete(job.id)
+        const result = await gate.run(job.id, { signal, stopCheck })
         await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit })
         if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
@@ -457,8 +467,16 @@ export class Orchestrator extends EventEmitter {
     const resuming = !job.sessions.builder && (await store.read(job.id, 'build.md')) !== null
     const purpose = [this.buildPurpose(job), resuming ? 'A previous builder stopped mid-round: read build.md and git log to see how far it got.' : '']
       .filter(Boolean).join(' ')
+    // a record from an earlier build of this job must never stand in for this one's
+    this.stopChecks.delete(job.id)
     const stopCheck = async () => {
+      this.stopChecks.delete(job.id)
+      const { git } = this.o.ports
+      const before = await git.head(job.worktree)
+      const cleanBefore = await git.isClean(job.worktree)
       const checks = await gate.runChecks(job.worktree, signal)
+      const after = await git.head(job.worktree)
+      this.stopChecks.set(job.id, { ...checks, round: job.round, before, cleanBefore, after })
       if (checks.code === 0) return null
       const tail = checks.output.trimEnd().split('\n').slice(-40).join('\n')
       return `.factory/checks.sh fails in your worktree (exit ${checks.code}); the gate will reject this build. `
@@ -479,6 +497,7 @@ export class Orchestrator extends EventEmitter {
     const toGate = async () => {
       await updated()
       if (firstLine(await store.read(job.id, 'build.md') ?? '') === 'STATUS: BLOCKED') {
+        this.stopChecks.delete(job.id)
         await machine.advance(job.id, 'needs-human')
       } else {
         await machine.advance(job.id, 'gate')

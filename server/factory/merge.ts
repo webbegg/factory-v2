@@ -15,7 +15,9 @@ export interface MergerOptions {
 
 /**
  * APPROVE → merged, one job at a time. Another job may have merged since this
- * branch was gated, so it syncs with the base, gates again, pushes, and merges through
+ * branch was gated, so it syncs with the base, gates again (reusing the round's
+ * checks.md only when the sync left HEAD unchanged and its BASE is still
+ * origin/<base>), pushes, and merges through
  * `gh pr merge` (branch protection and required checks still apply). A
  * conflict with the base goes back to the builder while rounds remain; any
  * other failure, or a conflict on the last round, hands the job to a human.
@@ -49,6 +51,7 @@ export class Merger {
       return machine.advance(id, 'needs-human')
     }
 
+    const before = await ports.git.head(job.worktree)
     await ports.git.fetch(job.worktree, base)
     const synced = await ports.git.merge(job.worktree, `origin/${base}`)
     if (!synced.ok) {
@@ -57,7 +60,8 @@ export class Merger {
       return fail(`The branch conflicts with ${base}:\n\n\`\`\`\n${synced.output}\n\`\`\``)
     }
 
-    const result = await gate.run(id, { merge: true, signal })
+    const headUnchanged = await ports.git.head(job.worktree) === before
+    const result = await gate.run(id, { merge: true, signal, headUnchanged })
     // stopped mid-gate: leave the job in merging for the next start
     if (signal?.aborted) throw new Error('merge cancelled')
     if (result.verdict !== 'PASS') {

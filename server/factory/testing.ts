@@ -95,6 +95,8 @@ export class FakeGit implements GitPort {
   clean = true
   headSha = 'a'.repeat(40)
   remoteSha: string | null = 'a'.repeat(40)
+  /** per-branch overrides of `remoteSha`, so origin/<base> can move apart from the job branch */
+  remoteHeads = new Map<string, string | null>()
   ahead = 1
 
   async fetch(cwd: string, ref: string) {
@@ -126,8 +128,8 @@ export class FakeGit implements GitPort {
     return this.headSha
   }
 
-  async remoteHead() {
-    return this.remoteSha
+  async remoteHead(_cwd: string, branch: string) {
+    return this.remoteHeads.has(branch) ? this.remoteHeads.get(branch)! : this.remoteSha
   }
 
   async commitsAhead() {
