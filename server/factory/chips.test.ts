@@ -1,6 +1,6 @@
 // The round chips on a board card: gate first, then the routed reviewers once
 // the gate passed. A chip whose step is executing right now, in a job the
-// factory is running, is `running`.
+// factory is running, is `running`; reviewers run one at a time.
 import { describe, expect, test } from 'bun:test'
 import { roundChips } from '../../app/utils/chips'
 import { makeEnv, newJob } from './testing'
@@ -34,14 +34,14 @@ describe('roundChips', () => {
     expect(states({ stage: 'build', round: 2, gate: 'FAIL' })).toEqual(['gate:FAIL'])
   })
 
-  test('in review, reviewers without a verdict are running, in routing order', () => {
-    expect(states({ stage: 'review', gate: 'PASS', reviews: { code: 'PASS', ux: 'pending', security: 'CHANGES' } }))
-      .toEqual(['gate:PASS', 'code:PASS', 'ux:running', 'sec:CHANGES'])
+  test('in review, the first reviewer without a verdict runs and later ones wait, in routing order', () => {
+    expect(states({ stage: 'review', gate: 'PASS', reviews: { code: 'PASS', ux: 'pending', security: 'pending' } }))
+      .toEqual(['gate:PASS', 'code:PASS', 'ux:running', 'sec:pending'])
   })
 
-  test('every reviewer without a verdict runs at once', () => {
+  test('reviewers run one at a time: only the first without a verdict runs', () => {
     expect(states({ stage: 'review', gate: 'PASS', reviews: {} }))
-      .toEqual(['gate:PASS', 'code:running', 'ux:running', 'sec:running'])
+      .toEqual(['gate:PASS', 'code:running', 'ux:pending', 'sec:pending'])
   })
 
   test('in a review the factory is not running, missing verdicts wait', () => {

@@ -4,6 +4,10 @@ export const STAGES = [
 ] as const
 
 export type Stage = typeof STAGES[number]
+
+// Here rather than in machine.ts, which has Node imports, so the board can use them too.
+export const TERMINAL: ReadonlySet<Stage> = new Set(['merged', 'rejected'])
+export const WAITING: ReadonlySet<Stage> = new Set(['needs-info', 'needs-human'])
 export type Risk = 'low' | 'medium' | 'high'
 export type Verdict = 'PASS' | 'CHANGES' | 'pending' | 'invalid'
 export type GateVerdict = 'PASS' | 'FAIL'
