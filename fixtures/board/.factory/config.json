@@ -1,0 +1,30 @@
+{
+  "concurrency": 2,
+  "maxRounds": 3,
+  "baseBranch": "main",
+  "mergeMethod": "merge",
+  "routing": {
+    "low": {
+      "code": "haiku"
+    },
+    "medium": {
+      "code": "sonnet"
+    },
+    "high": {
+      "code": "sonnet"
+    }
+  },
+  "surfaceReviewers": {
+    "ui": {
+      "ux": "sonnet",
+      "ui": "sonnet"
+    },
+    "security": {
+      "security": "opus"
+    }
+  },
+  "ports": {
+    "base": 5100,
+    "step": 10
+  }
+}

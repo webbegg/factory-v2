@@ -1,0 +1,36 @@
+{
+  "id": "004-fix-search-typo",
+  "issue": 14,
+  "title": "Fix typo in search placeholder",
+  "issueUrl": "https://github.com/example/notes-app/issues/14",
+  "pr": 214,
+  "prUrl": "https://github.com/example/notes-app/pull/214",
+  "branch": "factory/004-fix-search-typo",
+  "worktree": "/placeholder/.worktrees/004-fix-search-typo",
+  "stage": "merged",
+  "round": 1,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "ACCEPT",
+    "rescoped": false,
+    "risk": "low",
+    "surfaces": []
+  },
+  "agents": {
+    "reviewers": {
+      "code": "haiku"
+    }
+  },
+  "gate": "PASS",
+  "reviews": {
+    "code": "PASS"
+  },
+  "roundReason": "spec",
+  "sessions": {},
+  "costs": {
+    "sample-session-4": 0.8
+  },
+  "costUsd": 0.8,
+  "started": "2026-11-20T09:00:00Z",
+  "ended": "2026-11-20T09:40:00Z"
+}

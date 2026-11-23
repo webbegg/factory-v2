@@ -1,0 +1,40 @@
+{
+  "id": "001-dark-mode-toggle",
+  "issue": 11,
+  "title": "Dark mode toggle",
+  "issueUrl": "https://github.com/example/notes-app/issues/11",
+  "pr": null,
+  "prUrl": null,
+  "branch": "factory/001-dark-mode-toggle",
+  "worktree": "/placeholder/.worktrees/001-dark-mode-toggle",
+  "stage": "build",
+  "round": 1,
+  "roundLimit": 3,
+  "intake": {
+    "decision": "ACCEPT",
+    "rescoped": false,
+    "risk": "medium",
+    "surfaces": [
+      "ui"
+    ]
+  },
+  "agents": {
+    "reviewers": {
+      "code": "sonnet",
+      "ux": "sonnet",
+      "ui": "sonnet"
+    }
+  },
+  "gate": null,
+  "reviews": {},
+  "roundReason": "spec",
+  "sessions": {
+    "builder": "sample-session-1"
+  },
+  "costs": {
+    "sample-session-1": 1.42
+  },
+  "costUsd": 1.42,
+  "started": "2026-11-23T08:10:00Z",
+  "ended": null
+}

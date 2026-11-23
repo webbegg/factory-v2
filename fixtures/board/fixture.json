@@ -1,0 +1,85 @@
+{
+  "running": [
+    "001-dark-mode-toggle"
+  ],
+  "errors": {
+    "006-keyboard-shortcuts": "spec-writer failed: rate limited"
+  },
+  "events": [
+    {
+      "type": "log",
+      "message": "001-dark-mode-toggle: builder started"
+    },
+    {
+      "type": "agent",
+      "jobId": "001-dark-mode-toggle",
+      "agent": "builder",
+      "event": {
+        "kind": "start",
+        "text": "opus"
+      }
+    },
+    {
+      "type": "agent",
+      "jobId": "001-dark-mode-toggle",
+      "agent": "builder",
+      "event": {
+        "kind": "text",
+        "text": "Reading the theme tokens before adding the toggle."
+      }
+    },
+    {
+      "type": "agent",
+      "jobId": "001-dark-mode-toggle",
+      "agent": "builder",
+      "event": {
+        "kind": "tool",
+        "text": "Read app/app.config.ts"
+      }
+    },
+    {
+      "type": "agent",
+      "jobId": "001-dark-mode-toggle",
+      "agent": "builder",
+      "event": {
+        "kind": "tool",
+        "text": "Edit app/components/AppHeader.vue"
+      }
+    },
+    {
+      "type": "log",
+      "message": "002-export-notes-csv: reviewer-ux -> VERDICT: PASS"
+    },
+    {
+      "type": "log",
+      "message": "004-fix-search-typo: merged #214"
+    }
+  ],
+  "checks": [
+    {
+      "name": "git repository",
+      "ok": true,
+      "detail": "sample project"
+    },
+    {
+      "name": "gh signed in",
+      "ok": true,
+      "detail": "not checked in fixture mode"
+    },
+    {
+      "name": "claude CLI",
+      "ok": true,
+      "detail": "not checked in fixture mode"
+    },
+    {
+      "name": ".factory/config.json",
+      "ok": true,
+      "detail": "found"
+    },
+    {
+      "name": ".factory/checks.sh",
+      "ok": true,
+      "detail": "found"
+    }
+  ]
+}
