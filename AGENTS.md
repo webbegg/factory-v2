@@ -25,7 +25,9 @@ view; this file is for whoever changes the code.
   `setup.ts` (`init` / `doctor`; `baseChecks` runs `checks.sh` on
   `origin/<base>` in a temporary detached worktree through the gate's
   `runChecksScript`, and `doctor(repo, { baseChecks: true })`, used only by the
-  CLI, includes it), `service.ts` (what the server and CLI share),
+  CLI, includes it), `service.ts` (what the server and CLI share;
+  `jobFiles` lists a job's `.md` files and each round's `.log` files, which
+  `JobDetail` shows as plain text),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
   the board imports it too).
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
@@ -131,7 +133,8 @@ runs, and if it started it could act on real jobs.
   `{ cause: err }`; unknown Tailwind classes fail (custom classes must be
   defined in `app/assets/css/main.css` and allowed in `eslint.config.mjs`).
 - Never render untrusted markdown with `v-html` except through
-  `renderMarkdown` in `app/utils/markdown.ts`, which escapes raw HTML.
+  `renderMarkdown` in `app/utils/markdown.ts`, which escapes raw HTML and
+  renders `https://` images only.
 - Keep the trust boundary: issue text is data, agents write only their own
   files, merges go only through `gh pr merge`. Do not weaken
   `server/factory/agents/runner.ts` (protected) or the local-only middleware.
