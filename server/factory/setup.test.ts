@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { agentsGuideCheck, checksScript, detectChecks, ensureGitignore, mergeMethodCheck, versionAtLeast } from './setup'
+import { addendumBody } from './agents/prompts'
+import { agentsGuideCheck, checksScript, detectChecks, ensureGitignore, mergeMethodCheck, scaffoldAddenda, versionAtLeast } from './setup'
 
 describe('detectChecks', () => {
   test('package.json scripts in lint → typecheck → test → build order, with the lockfile\'s manager', () => {
@@ -42,6 +43,33 @@ describe('ensureGitignore', () => {
     expect(await ensureGitignore(dir)).toEqual(['/.factory/jobs/', '/.factory/orchestrator.lock'])
     expect(await readFile(join(dir, '.gitignore'), 'utf8')).toBe('node_modules\n/.worktrees/\n/.factory/jobs/\n/.factory/orchestrator.lock\n')
     expect(await ensureGitignore(dir)).toEqual([])
+  })
+})
+
+describe('scaffoldAddenda', () => {
+  const FILES = ['approver.append.md', 'intake.append.md', 'reviewer-security.append.md', 'reviewer-ui.append.md', 'reviewer-ux.append.md']
+
+  test('writes five comment-only addenda', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'factory-addenda-'))
+    const done = await scaffoldAddenda(dir)
+    expect(done).toHaveLength(5)
+    expect(done).toContain('wrote .factory/agents/intake.append.md')
+    expect((await readdir(join(dir, 'agents'))).sort()).toEqual(FILES)
+    for (const f of FILES) {
+      const text = await readFile(join(dir, 'agents', f), 'utf8')
+      expect(text).toContain('## This project')
+      expect(addendumBody(text)).toBeNull()
+    }
+  })
+
+  test('never overwrites an existing file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'factory-addenda-'))
+    await scaffoldAddenda(dir)
+    const edited = join(dir, 'agents', 'reviewer-ux.append.md')
+    await writeFile(edited, 'Users are nurses on shift.\n')
+    await rm(join(dir, 'agents', 'intake.append.md'))
+    expect(await scaffoldAddenda(dir)).toEqual(['wrote .factory/agents/intake.append.md'])
+    expect(await readFile(edited, 'utf8')).toBe('Users are nurses on shift.\n')
   })
 })
 
