@@ -1,14 +1,44 @@
-import { mkdir, realpath } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { mkdir, readFile, realpath } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { exec, run } from './exec'
 import type { GitPort } from './ports'
 
+/**
+ * Hooks and fsmonitor run commands. Agents can write a worktree (and, through
+ * a hooks path like .husky, the hooks), so the factory's own git never runs them.
+ */
+const SAFE = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+
 /** GitPort over the git CLI. `repo` is the main checkout. */
 export class GitCli implements GitPort {
+  private common: Promise<string> | null = null
+
   constructor(private repo: string) {}
 
-  private git(cwd: string, ...args: string[]) {
-    return exec('git', args, { cwd })
+  /**
+   * Global options for git in `cwd`. In a job worktree, the git dir is named
+   * outright: the worktree's `.git` file is agent-writable and could point git
+   * at a gitdir whose config runs commands.
+   */
+  private async scope(cwd: string): Promise<string[]> {
+    const at = await realpath(cwd).catch(() => resolve(cwd))
+    const worktrees = await realpath(join(this.repo, '.worktrees')).catch(() => resolve(this.repo, '.worktrees'))
+    if (dirname(at) !== worktrees) return SAFE
+    this.common ??= exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: this.repo }).then(s => s.trim())
+    const gitDir = join(await this.common, 'worktrees', basename(at))
+    // git records the worktree's own path in its gitdir; a mismatch means it isn't this worktree's
+    const recorded = await readFile(join(gitDir, 'gitdir'), 'utf8').catch(() => '')
+    const points = await realpath(dirname(recorded.trim())).catch(() => '')
+    if (points !== at) throw new Error(`${cwd} isn't a worktree of ${this.repo} (no matching ${gitDir})`)
+    return [...SAFE, `--git-dir=${gitDir}`, `--work-tree=${at}`]
+  }
+
+  private async git(cwd: string, ...args: string[]) {
+    return exec('git', [...await this.scope(cwd), ...args], { cwd })
+  }
+
+  private async tryGit(cwd: string, ...args: string[]) {
+    return run('git', [...await this.scope(cwd), ...args], { cwd })
   }
 
   /** Forced and spelled out, so a remote-tracking ref moved by hand is put back to what origin has. */
@@ -30,7 +60,7 @@ export class GitCli implements GitPort {
       if (found === branch) return
       throw new Error(`${path} is a worktree on ${found}, not ${branch}`)
     }
-    const exists = (await run('git', ['show-ref', '--verify', '-q', `refs/heads/${branch}`], { cwd: this.repo })).code === 0
+    const exists = (await this.tryGit(this.repo, 'show-ref', '--verify', '-q', `refs/heads/${branch}`)).code === 0
     if (exists) await this.git(this.repo, 'worktree', 'add', '-q', path, branch)
     else await this.git(this.repo, 'worktree', 'add', '-q', '-b', branch, path, from)
   }
@@ -40,12 +70,12 @@ export class GitCli implements GitPort {
   }
 
   async deleteBranch(branch: string) {
-    await run('git', ['branch', '-D', branch], { cwd: this.repo })
+    await this.tryGit(this.repo, 'branch', '-D', branch)
   }
 
   /** Best effort: GitHub may already have deleted it on merge. */
   async deleteRemoteBranch(branch: string) {
-    await run('git', ['push', '-q', 'origin', '--delete', branch], { cwd: this.repo })
+    await this.tryGit(this.repo, 'push', '-q', 'origin', '--delete', branch)
   }
 
   async isClean(cwd: string) {
@@ -57,7 +87,7 @@ export class GitCli implements GitPort {
   }
 
   async remoteHead(cwd: string, branch: string) {
-    const res = await run('git', ['rev-parse', '--verify', '-q', `refs/remotes/origin/${branch}`], { cwd })
+    const res = await this.tryGit(cwd, 'rev-parse', '--verify', '-q', `refs/remotes/origin/${branch}`)
     return res.code === 0 ? res.stdout.trim() : null
   }
 
@@ -80,15 +110,15 @@ export class GitCli implements GitPort {
   }
 
   async show(cwd: string, ref: string, path: string) {
-    const res = await run('git', ['show', `${ref}:${path}`], { cwd })
+    const res = await this.tryGit(cwd, 'show', `${ref}:${path}`)
     return res.code === 0 ? res.stdout : null
   }
 
   /** Merges `ref` into the worktree's branch; aborts and reports on conflict. */
   async merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }> {
-    const res = await run('git', ['merge', '--no-edit', ref], { cwd })
+    const res = await this.tryGit(cwd, 'merge', '--no-edit', ref)
     if (res.code === 0) return { ok: true, output: res.stdout }
-    await run('git', ['merge', '--abort'], { cwd })
+    await this.tryGit(cwd, 'merge', '--abort')
     return { ok: false, output: (res.stdout + res.stderr).trim() }
   }
 }

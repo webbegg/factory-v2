@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec } from './exec'
@@ -248,6 +248,42 @@ describe('GitCli against a real repo', () => {
       expect(await git.show(repo, 'refs/remotes/origin/main', 'a.txt')).toBe('a\n')
     } finally {
       await exec('git', ['tag', '-d', 'origin/main'], { cwd: repo })
+    }
+  }, 30_000)
+
+  test('a worktree can\'t redirect the factory\'s git to a gitdir it planted, and hooks never run (#49)', async () => {
+    const wt5 = join(repo, '.worktrees', '005-h')
+    await git.addWorktree(wt5, 'factory/005-h', 'origin/main')
+    const marker = join(repo, '..', 'pwned')
+    // an agent points the worktree's .git file at a gitdir whose config runs a command on every status
+    const evil = join(repo, '..', 'evil.git')
+    await exec('git', ['init', '-q', '--bare', evil], { cwd: repo })
+    await exec('git', ['config', '--file', join(evil, 'config'), 'core.bare', 'false'], { cwd: repo })
+    await exec('git', ['config', '--file', join(evil, 'config'), 'core.fsmonitor', `touch ${marker}`], { cwd: repo })
+    const dotGit = join(wt5, '.git')
+    const real = await readFile(dotGit, 'utf8')
+    await writeFile(dotGit, `gitdir: ${evil}\n`)
+    // and a hook the repo's own hooks folder would run on merge
+    const hook = join(repo, '.git', 'hooks', 'post-merge')
+    await writeFile(hook, `#!/bin/sh\ntouch ${marker}-hook\n`, { mode: 0o755 })
+    try {
+      expect(await git.isClean(wt5)).toBe(true)
+      expect(await git.head(wt5)).toBe((await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim())
+      expect(existsSync(marker)).toBe(false)
+      // the base moves, so the merge does something and post-merge would fire
+      await exec('git', ['commit', '-q', '--allow-empty', '-m', 'base moved'], { cwd: repo })
+      await exec('git', ['push', '-q', 'origin', 'main'], { cwd: repo })
+      await git.fetch(repo, 'main')
+      expect((await git.merge(wt5, 'origin/main')).ok).toBe(true)
+      expect(await git.head(wt5)).toBe((await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim())
+      expect(existsSync(`${marker}-hook`)).toBe(false)
+    } finally {
+      await writeFile(dotGit, real)
+      await rm(hook, { force: true })
+      await rm(marker, { force: true })
+      await rm(`${marker}-hook`, { force: true })
+      await git.removeWorktree(wt5)
+      await git.deleteBranch('factory/005-h')
     }
   }, 30_000)
 
