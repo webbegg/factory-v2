@@ -135,10 +135,11 @@ export async function main(argv: string[], repo = process.cwd()): Promise<void> 
     console.log('\nNext: review .factory/checks.sh, then `factory doctor`.')
   } else if (cmd === 'doctor') {
     let failed = false
-    for (const c of await doctor(repo)) {
+    for (const c of await doctor(repo, { baseChecks: true })) {
       const mark = c.ok ? 'ok  ' : c.optional ? 'warn' : 'FAIL'
       if (!c.ok && !c.optional) failed = true
       console.log(`${mark}  ${c.name}: ${c.detail}`)
+      if (!c.ok && c.tail) console.log(c.tail.split('\n').map(l => `      ${l}`).join('\n'))
     }
     if (failed) process.exitCode = 1
   } else {

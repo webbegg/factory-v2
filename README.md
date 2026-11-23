@@ -41,11 +41,18 @@ bun install && bun run build           # once, in this package
 cd ~/code/my-project
 bun ~/code/factory-v2/bin/factory.ts init     # .factory/, .gitignore lines, GitHub labels
 # review .factory/checks.sh: lint, typecheck, tests, build; it must pass on main
-bun ~/code/factory-v2/bin/factory.ts doctor
+bun ~/code/factory-v2/bin/factory.ts doctor   # runs checks.sh on origin/main, checks mergeMethod, AGENTS.md
 bun ~/code/factory-v2/bin/factory.ts          # board on http://localhost:4400
 ```
 
+`factory doctor` runs `checks.sh` as committed on `origin/<base>` in a
+temporary worktree, the way the gate does (a red base fails every job), checks
+that the repo allows the configured `mergeMethod`, and warns when `AGENTS.md`
+(or `CLAUDE.md`) never mentions a port, since UX/UI reviewers need the
+dev-server instructions to look at the app.
+
 The board's **Setup** page (`/setup`) runs the same checks as `factory doctor`,
+except the slow base run, which has its own **Run checks on base** button; it
 can run `factory init` for you and shows `.factory/checks.sh`; it works before
 the project has a `.factory/`.
 

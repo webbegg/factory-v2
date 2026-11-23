@@ -1,10 +1,14 @@
 // `factory init` and `factory doctor`: put a project in shape to run the
 // factory, and check that it is. Shared by the CLI and the setup screen.
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { defaultConfig, factoryPaths } from './config'
+import { defaultConfig, factoryPaths, loadConfig } from './config'
 import { run } from './exec'
+import { runChecksScript, TAIL } from './gate'
+import { Refused } from './machine'
+import type { FactoryConfig } from './types'
 
 interface ProjectFacts {
   packageJson?: { scripts?: Record<string, string> }
@@ -126,10 +130,107 @@ export interface DoctorCheck {
   detail: string
   /** optional checks warn instead of failing */
   optional?: boolean
+  /** the end of a run's output, for checks that run something (the base checks) */
+  tail?: string
 }
 
-/** Preflight: can the factory run in this project? */
-export async function doctor(repoDir: string): Promise<DoctorCheck[]> {
+type MergeMethod = FactoryConfig['mergeMethod']
+
+const MERGE_FIELDS: Record<MergeMethod, string> = {
+  merge: 'allow_merge_commit',
+  squash: 'allow_squash_merge',
+  rebase: 'allow_rebase_merge'
+}
+
+/** Does the repo allow `mergeMethod`? `repo` is the `gh api repos/{owner}/{repo}` JSON. */
+export function mergeMethodCheck(method: MergeMethod, repo: unknown): DoctorCheck {
+  const name = `merge method ${method} allowed`
+  const fields = typeof repo === 'object' && repo !== null ? repo as Record<string, unknown> : {}
+  const methods = Object.keys(MERGE_FIELDS) as MergeMethod[]
+  // GitHub leaves the allow_* fields out without admin access: not knowing isn't a disallowed method
+  if (methods.some(m => typeof fields[MERGE_FIELDS[m]] !== 'boolean')) {
+    return { name, ok: false, detail: 'couldn\'t read the repo\'s merge settings (they need admin access)', optional: true }
+  }
+  if (fields[MERGE_FIELDS[method]] === true) return { name, ok: true, detail: 'ok', optional: false }
+  const allowed = methods.filter(m => fields[MERGE_FIELDS[m]] === true)
+  const which = allowed.length ? `the repo allows only ${allowed.join(', ')}` : 'the repo allows no merge method'
+  return { name, ok: false, detail: `${which}: change mergeMethod or the repo's merge settings`, optional: false }
+}
+
+/** Does the agents' guide (the first of `files` that exists) say how to start the dev server on a port? */
+export function agentsGuideCheck(files: Array<{ name: string, text: string | null }>, base = '<base>'): DoctorCheck {
+  const name = 'AGENTS.md (dev server port)'
+  const found = files.find(f => f.text !== null)
+  if (!found) return { name, ok: false, detail: `no AGENTS.md or CLAUDE.md on origin/${base}`, optional: true }
+  if (!/\bports?\b/i.test(found.text!)) {
+    return { name, ok: false, detail: `${found.name} doesn't say how to start the dev server on a port: UX/UI reviewers will read code only`, optional: true }
+  }
+  return { name, ok: true, detail: `${found.name} mentions a port`, optional: true }
+}
+
+export interface BaseChecksResult {
+  check: DoctorCheck
+  /** checks.sh's exit code, null when it didn't run */
+  code: number | null
+  /** the last TAIL lines of its output */
+  tail: string
+}
+
+let baseChecksRunning = false
+
+/**
+ * Runs `.factory/checks.sh` as committed on origin/<base> in a temporary
+ * detached worktree of origin/<base>, the way the gate does. A red base fails
+ * every job, so doctor says so before any job starts. Slow: as long as the checks.
+ */
+export async function baseChecks(repoDir: string, opts: { signal?: AbortSignal } = {}): Promise<BaseChecksResult> {
+  if (baseChecksRunning) throw new Refused('checks are already running on the base')
+  baseChecksRunning = true
+  try {
+    const paths = factoryPaths(repoDir)
+    if (!existsSync(join(paths.factory, 'config.json'))) {
+      return { check: { name: 'checks.sh passes on origin/<base>', ok: false, detail: 'skipped: no .factory/config.json (run factory init)' }, code: null, tail: '' }
+    }
+    const config = await loadConfig(paths)
+    const base = config.baseBranch
+    const name = `checks.sh passes on origin/${base}`
+    const sh = (args: string[]) => run('git', args, { cwd: repoDir })
+    const ref = `refs/remotes/origin/${base}`
+    await sh(['fetch', '-q', 'origin', base])
+    const script = await sh(['show', `${ref}:.factory/checks.sh`])
+    if (script.code !== 0) {
+      return { check: { name, ok: false, detail: `skipped: .factory/checks.sh isn't committed on origin/${base}` }, code: null, tail: '' }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'factory-base-'))
+    const tree = join(dir, 'base')
+    try {
+      const added = await sh(['worktree', 'add', '--detach', tree, ref])
+      if (added.code !== 0) {
+        return { check: { name, ok: false, detail: `skipped: couldn't create a worktree of origin/${base}: ${added.stderr.trim().split('\n')[0]}` }, code: null, tail: '' }
+      }
+      const res = await runChecksScript(script.stdout, tree, config.limits.checksMinutes, opts.signal)
+      const detail = res.code === 0
+        ? `passed in ${res.seconds}s`
+        : res.code === 124
+          ? `timed out after ${config.limits.checksMinutes} min`
+          : `failed with exit ${res.code} in ${res.seconds}s`
+      const tail = res.output.trimEnd().split('\n').slice(-TAIL).join('\n')
+      return { check: { name, ok: res.code === 0, detail }, code: res.code, tail }
+    } finally {
+      await sh(['worktree', 'remove', '--force', tree])
+      await rm(dir, { recursive: true, force: true })
+      await sh(['worktree', 'prune'])
+    }
+  } finally {
+    baseChecksRunning = false
+  }
+}
+
+/**
+ * Preflight: can the factory run in this project? `baseChecks` also runs
+ * checks.sh on origin/<base>, which takes as long as the checks do.
+ */
+export async function doctor(repoDir: string, opts: { baseChecks?: boolean } = {}): Promise<DoctorCheck[]> {
   const paths = factoryPaths(repoDir)
   const out: DoctorCheck[] = []
   const sh = (cmd: string, args: string[]) => run(cmd, args, { cwd: repoDir })
@@ -145,10 +246,19 @@ export async function doctor(repoDir: string): Promise<DoctorCheck[]> {
   add('claude ≥ 2.1.257', claude.code === 0 && versionAtLeast(claude.stdout, '2.1.257'), claude.stdout.trim() || 'claude not found')
 
   const configPath = join(paths.factory, 'config.json')
-  const hasConfig = existsSync(configPath)
-  add('.factory/config.json', hasConfig, hasConfig ? 'ok' : 'run factory init')
-  if (hasConfig) {
-    const base = (JSON.parse(await readFile(configPath, 'utf8')) as { baseBranch?: string }).baseBranch ?? 'main'
+  let config: FactoryConfig | null = null
+  let configError = 'run factory init'
+  if (existsSync(configPath)) {
+    try {
+      config = await loadConfig(paths)
+    } catch (err) {
+      configError = err instanceof Error ? err.message : String(err)
+    }
+  }
+  const hasConfig = config !== null
+  add('.factory/config.json', hasConfig, hasConfig ? 'ok' : configError)
+  if (config) {
+    const base = config.baseBranch
     const remote = await sh('git', ['ls-remote', '--exit-code', '--heads', 'origin', base])
     add(`base branch ${base} on origin`, remote.code === 0, remote.code === 0 ? 'ok' : 'missing on origin')
     add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
@@ -156,6 +266,30 @@ export async function doctor(repoDir: string): Promise<DoctorCheck[]> {
     await sh('git', ['fetch', '-q', 'origin', base])
     const pushed = await sh('git', ['cat-file', '-e', `refs/remotes/origin/${base}:.factory/checks.sh`])
     add(`checks.sh on origin/${base}`, pushed.code === 0, pushed.code === 0 ? 'ok' : `commit and push .factory/ to ${base}: the gate runs that copy`)
+    if (opts.baseChecks) {
+      const { check, tail } = await baseChecks(repoDir)
+      out.push(tail ? { ...check, tail } : check)
+    }
+    // a disallowed method would only fail at the final `gh pr merge`
+    const repo = await sh('gh', ['api', 'repos/{owner}/{repo}'])
+    let settings: unknown
+    try {
+      settings = repo.code === 0 ? JSON.parse(repo.stdout) : undefined
+    } catch {
+      settings = undefined
+    }
+    if (settings === undefined) {
+      const why = repo.stderr.trim().split('\n')[0] || 'gh api returned no JSON'
+      add(`merge method ${config.mergeMethod} allowed`, false, `couldn't read the repo's merge settings: ${why}`, true)
+    } else {
+      out.push(mergeMethodCheck(config.mergeMethod, settings))
+    }
+    // agents read the guide in their worktrees, which are checkouts of origin/<base>
+    const guides = await Promise.all(['AGENTS.md', 'CLAUDE.md'].map(async (name) => {
+      const res = await sh('git', ['show', `refs/remotes/origin/${base}:${name}`])
+      return { name, text: res.code === 0 ? res.stdout : null }
+    }))
+    out.push(agentsGuideCheck(guides, base))
   } else {
     add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
   }

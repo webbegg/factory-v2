@@ -80,6 +80,17 @@
       "name": ".factory/checks.sh",
       "ok": true,
       "detail": "found"
+    },
+    {
+      "name": "merge method merge allowed",
+      "ok": true,
+      "detail": "ok"
+    },
+    {
+      "name": "AGENTS.md (dev server port)",
+      "ok": true,
+      "detail": "AGENTS.md mentions a port",
+      "optional": true
     }
   ]
 }

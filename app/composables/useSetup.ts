@@ -1,6 +1,8 @@
-import type { DoctorCheck } from '~~/server/factory/setup'
+import type { BaseChecksResult, DoctorCheck } from '~~/server/factory/setup'
 
 const checks = ref<DoctorCheck[]>([])
+const baseResult = ref<BaseChecksResult | null>(null)
+const baseRunning = ref(false)
 const checksScript = ref<string | null>(null)
 const loaded = ref(false)
 const loading = ref(false)
@@ -38,5 +40,16 @@ export function useSetup() {
     return res.done
   }
 
-  return { checks, checksScript, loaded, loading, error, recheck, initialize }
+  /** Runs checks.sh on origin/<base>; a refusal is shown as a toast and keeps the last result. */
+  async function runBaseChecks() {
+    baseRunning.value = true
+    try {
+      const res = await act<BaseChecksResult>('/api/setup/base-checks')
+      if (res) baseResult.value = res
+    } finally {
+      baseRunning.value = false
+    }
+  }
+
+  return { checks, checksScript, loaded, loading, error, recheck, initialize, baseResult, baseRunning, runBaseChecks }
 }
