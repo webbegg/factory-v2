@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { agentEnv, bashRefusal, browserSocketDir, sandboxSettings, toolRefusal } from './agents/runner'
+import { agentEnv, bashRefusal, sandboxSettings, toolRefusal } from './agents/runner'
 import type { AgentTask } from './agents/runner'
 
 const BRANCH = 'factory/001-x'
@@ -157,11 +157,11 @@ describe('agentEnv (#49)', () => {
   const base = { PATH: '/bin', HOME: '/h' }
 
   test('unsandboxed agents get the factory\'s env as it is', () => {
-    expect(agentEnv({ agent: 'builder', jobId: '1' }, base, 'gho_x')).toEqual({ ...base, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' })
+    expect(agentEnv({ agent: 'builder' }, base, 'gho_x')).toEqual({ ...base, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' })
   })
 
   test('a sandboxed builder gets the GitHub token and a git helper that reads it, since the keychain is closed in the sandbox', () => {
-    const env = agentEnv({ agent: 'builder', jobId: '1', sandbox }, base, 'gho_x')
+    const env = agentEnv({ agent: 'builder', sandbox }, base, 'gho_x')
     expect(env.GH_TOKEN).toBe('gho_x')
     expect(env.GIT_CONFIG_COUNT).toBe('2')
     expect([env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_VALUE_0]).toEqual(['credential.https://github.com.helper', ''])
@@ -169,7 +169,7 @@ describe('agentEnv (#49)', () => {
   })
 
   test('a token already in the env wins; git config entries already in the env are kept', () => {
-    const env = agentEnv({ agent: 'builder', jobId: '1', sandbox }, { ...base, GH_TOKEN: 'mine', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }, 'gho_x')
+    const env = agentEnv({ agent: 'builder', sandbox }, { ...base, GH_TOKEN: 'mine', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }, 'gho_x')
     expect(env.GH_TOKEN).toBe('mine')
     expect(env.GIT_CONFIG_COUNT).toBe('3')
     expect([env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_VALUE_0]).toEqual(['a.b', 'c'])
@@ -177,25 +177,9 @@ describe('agentEnv (#49)', () => {
   })
 
   test('other sandboxed agents get no token and no helper', () => {
-    const env = agentEnv({ agent: 'reviewer-code', jobId: '1', sandbox }, base, 'gho_x')
+    const env = agentEnv({ agent: 'reviewer-code', sandbox }, base, 'gho_x')
     expect(env.GH_TOKEN).toBeUndefined()
     expect(env.GIT_CONFIG_COUNT).toBeUndefined()
-    expect(env.AGENT_BROWSER_SOCKET_DIR).toBeUndefined()
-  })
-
-  test('sandboxed agents that look at pages get their own agent-browser socket folder', () => {
-    for (const agent of ['builder', 'reviewer-ux', 'reviewer-ui'] as const) {
-      expect(agentEnv({ agent, jobId: '031-a-long-job-name-like-real-ones', sandbox }, base, null).AGENT_BROWSER_SOCKET_DIR)
-        .toBe(browserSocketDir({ agent, jobId: '031-a-long-job-name-like-real-ones' }))
-    }
-    expect(agentEnv({ agent: 'reviewer-ui', jobId: '1' }, base, null).AGENT_BROWSER_SOCKET_DIR).toBeUndefined()
-  })
-
-  test('socket folders are short (macOS caps a socket path at 104 bytes) and differ per job and agent', () => {
-    const a = browserSocketDir({ agent: 'reviewer-ui', jobId: '031-a-long-job-name-like-real-ones-and-then-some' })
-    expect(a.length).toBeLessThan(40)
-    expect(a).not.toBe(browserSocketDir({ agent: 'reviewer-ux', jobId: '031-a-long-job-name-like-real-ones-and-then-some' }))
-    expect(a).not.toBe(browserSocketDir({ agent: 'reviewer-ui', jobId: '032-other' }))
   })
 })
 
@@ -203,13 +187,13 @@ describe('sandboxSettings (#49)', () => {
   const GIT = '/r/.git'
   const WT = '/r/.worktrees/001-x'
   const task = (agent: AgentTask['agent'], writable: string[], sandbox: AgentTask['sandbox'] = { gitDir: GIT, domains: [] }) =>
-    ({ agent, jobId: '001-x', cwd: WT, branch: BRANCH, writable, sandbox })
+    ({ agent, cwd: WT, branch: BRANCH, writable, sandbox })
   const builder = sandboxSettings(task('builder', [`${WT}/`, '/r/.factory/jobs/001-x/build.md']))!
   const reviewer = sandboxSettings(task('reviewer-code', ['/r/.factory/jobs/001-x/round-1/review-code.md']))!
   const ui = sandboxSettings(task('reviewer-ui', ['/r/.factory/jobs/001-x/round-1/review-ui.md', '/r/.factory/jobs/001-x/round-1/screenshots-ui/']))!
 
   test('off unless the task asks for it', () => {
-    expect(sandboxSettings({ agent: 'builder', jobId: '001-x', cwd: WT, writable: [] })).toBeUndefined()
+    expect(sandboxSettings({ agent: 'builder', cwd: WT, writable: [] })).toBeUndefined()
   })
 
   test('every shell is sandboxed, fails closed and can\'t opt out per command', () => {
@@ -254,12 +238,11 @@ describe('sandboxSettings (#49)', () => {
     expect(builder.network?.allowLocalBinding).toBe(true)
     expect(ui.network?.allowLocalBinding).toBe(true)
     expect(reviewer.network?.allowLocalBinding).toBe(false)
-    // agent-browser's daemon socket: written and connected to only in the agent's own folder
-    const sock = browserSocketDir({ agent: 'reviewer-ui', jobId: '001-x' })
-    expect(ui.filesystem?.allowWrite).toContain(sock)
-    expect(ui.network?.allowUnixSockets).toEqual([sock])
-    expect(reviewer.network?.allowUnixSockets).toBeUndefined()
-    expect(reviewer.filesystem?.allowWrite?.some(w => w.startsWith('/tmp/'))).toBe(false)
+    // no browser under the sandbox (Chrome can't start in it), so no unix sockets and no temp folders for anyone
+    for (const s of [builder, reviewer, ui]) {
+      expect(s.network?.allowUnixSockets).toBeUndefined()
+      expect(s.filesystem?.allowWrite?.some(w => w.startsWith('/tmp') || w.startsWith('/var/folders'))).toBe(false)
+    }
   })
 
   test('credentials: model keys hidden from every shell; GitHub tokens and gh config only for the builder', () => {

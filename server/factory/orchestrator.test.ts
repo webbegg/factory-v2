@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isWritable } from './agents/runner'
+import { isWritable, NO_BROWSER } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -131,12 +131,17 @@ describe('orchestrator', () => {
     await on.orch.idle()
     expect(on.runner.tasks.length).toBeGreaterThan(3)
     for (const t of on.runner.tasks) expect(t.sandbox).toEqual({ gitDir: join(on.env.paths.repo, '.git'), domains: ['pypi.org'] })
+    // Chrome can't start in the sandbox: agents that look at pages are told so, the rest aren't
+    const looks = new Set(['builder', 'reviewer-ux', 'reviewer-ui'])
+    expect(on.runner.tasks.some(t => looks.has(t.agent))).toBe(true)
+    for (const t of on.runner.tasks) expect(t.message.includes(NO_BROWSER)).toBe(looks.has(t.agent))
 
     const off = await factory({ ...happy })
     off.env.github.addIssue({ number: 1, title: 'Add subtract' })
     await off.orch.drain()
     await off.orch.idle()
     for (const t of off.runner.tasks) expect(t.sandbox).toBeUndefined()
+    for (const t of off.runner.tasks) expect(t.message).not.toContain(NO_BROWSER)
   })
 
   test('a report answered as the final reply instead of written is saved for the agent', async () => {

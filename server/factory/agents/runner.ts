@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk'
 import { run } from '../exec'
@@ -265,19 +263,17 @@ const GITHUB_HOSTS = ['github.com', 'api.github.com', '*.githubusercontent.com']
 const REGISTRY_HOSTS = ['registry.npmjs.org']
 /** agents that start a dev server and look at it */
 const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
+export const viewsPages = (agent: AgentName) => SERVES.has(agent)
+/**
+ * Chrome can't start in the sandbox (its singleton socket and crash reporter
+ * need the shared user temp folder and Mach services), so with the sandbox on
+ * the agents that look at pages are told there is no browser.
+ */
+export const NO_BROWSER = 'The sandbox is on, so there is no browser: agent-browser won\'t start. Check pages by reading the code and fetching your dev server with curl.'
 /** the claude process keeps these; no shell needs them */
 const MODEL_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']
 /** only the builder pushes and opens its PR */
 const GITHUB_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
-/**
- * agent-browser's daemon socket folder for one sandboxed agent. Its default,
- * ~/.agent-browser, also holds the browser it launches, so it stays read-only.
- * Short, since macOS caps a socket path at 104 bytes.
- */
-export function browserSocketDir(task: Pick<AgentTask, 'jobId' | 'agent'>): string {
-  return join('/tmp', 'factory-ab', createHash('sha256').update(`${task.jobId}/${task.agent}`).digest('hex').slice(0, 12))
-}
-
 const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json']
 const GITHUB_FILES = ['~/.config/gh', '~/.git-credentials']
 
@@ -286,15 +282,12 @@ const GITHUB_FILES = ['~/.config/gh', '~/.git-credentials']
  * builder also to what commit and push touch in .git), network only for the
  * builder, and no credentials it doesn't need. Commands may not opt out.
  */
-export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'jobId' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
+export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
   if (!task.sandbox) return undefined
   const { gitDir, domains } = task.sandbox
   const builder = task.agent === 'builder'
-  const serves = SERVES.has(task.agent)
   const worktreeGit = join(gitDir, 'worktrees', basename(task.cwd))
-  const sockets = browserSocketDir(task)
   const allowWrite = task.writable.map(w => w.replace(/\/+$/, ''))
-  if (serves) allowWrite.push(sockets)
   // objects and refs for commits and the remote-tracking ref a push updates; the worktree's own index and HEAD
   if (builder) allowWrite.push(join(gitDir, 'objects'), join(gitDir, 'refs'), join(gitDir, 'logs'), join(gitDir, 'packed-refs'), worktreeGit)
   return {
@@ -313,8 +306,7 @@ export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'jobId' | 'cwd' 
     network: {
       allowedDomains: builder ? [...GITHUB_HOSTS, ...REGISTRY_HOSTS, ...domains] : [],
       strictAllowlist: true,
-      allowLocalBinding: serves,
-      ...(serves ? { allowUnixSockets: [sockets] } : {}),
+      allowLocalBinding: SERVES.has(task.agent),
       // macOS: gh (Go) verifies TLS through trustd; the keychain itself stays closed
       ...(builder ? { allowMachLookup: ['com.apple.trustd.agent'] } : {})
     },
@@ -330,11 +322,10 @@ export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'jobId' | 'cwd' 
  * the token and a git credential helper that reads it. Through the env, not
  * a config file: the guard refuses GIT_CONFIG_* from the agent itself.
  */
-export function agentEnv(task: Pick<AgentTask, 'agent' | 'jobId' | 'sandbox'>, base: Record<string, string | undefined>, token: string | null): Record<string, string> {
+export function agentEnv(task: Pick<AgentTask, 'agent' | 'sandbox'>, base: Record<string, string | undefined>, token: string | null): Record<string, string> {
   const env: Record<string, string> = { CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' }
   for (const [k, v] of Object.entries(base)) if (v !== undefined) env[k] = v
   env.CLAUDE_AGENT_SDK_CLIENT_APP = 'factory-v2'
-  if (task.sandbox && SERVES.has(task.agent)) env.AGENT_BROWSER_SOCKET_DIR = browserSocketDir(task)
   if (!task.sandbox || task.agent !== 'builder') return env
   if (!env.GH_TOKEN && token) env.GH_TOKEN = token
   const count = Number(env.GIT_CONFIG_COUNT) || 0
@@ -367,7 +358,6 @@ export class SdkRunner implements AgentRunner {
     let reply = ''
     let costUsd = 0
     let error: string | undefined
-    if (task.sandbox && SERVES.has(task.agent)) await mkdir(browserSocketDir(task), { recursive: true, mode: 0o700 })
     const token = task.sandbox && task.agent === 'builder' && !process.env.GH_TOKEN
       ? await run('gh', ['auth', 'token'], { cwd: task.cwd }).then(r => r.code === 0 ? r.stdout.trim() : null, () => null)
       : null
