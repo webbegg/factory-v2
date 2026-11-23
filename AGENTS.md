@@ -8,7 +8,8 @@ view; this file is for whoever changes the code.
 
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk),
-  `store.ts` (job.json + per-step markdown), `queue.ts`, `gate.ts`,
+  `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
+  job's `events.jsonl` and never throws), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event), `agents/` (prompts and the
@@ -16,6 +17,13 @@ view; this file is for whoever changes the code.
   `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
   the board imports it too).
+  `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
+  approve, reject, after job.json is saved) and agent, gate and merge lines from
+  `orchestrator.ts`, which writes `agent-start` before an agent's watch is
+  taken and `agent-end` after its check so its own lines are never undone.
+  A driver failure is saved as `job.json` `error` (not for a shutdown abort),
+  cleared by `start()` and by every stage move, and read back into
+  `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of

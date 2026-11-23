@@ -49,7 +49,18 @@ export interface Job {
   costUsd: number
   started: string
   ended: string | null
+  /** the last failure that stalled the job, kept across restarts until it starts again; absent in older jobs */
+  error?: { message: string, at: string } | null
 }
+
+/** One line of a job's events.jsonl, written only by the factory. */
+export type JobEvent = { at: string } & (
+  | { type: 'stage', from: Stage, to: Stage }
+  | { type: 'agent-start', agent: string, model: string, round: number }
+  | { type: 'agent-end', agent: string, model: string, round: number, seconds: number, cost: number, ok: boolean, error?: string }
+  | { type: 'gate', verdict: GateVerdict, seconds: number, commit: string }
+  | { type: 'merge', outcome: Stage | 'error', error?: string }
+)
 
 export interface FactoryConfig {
   concurrency: number

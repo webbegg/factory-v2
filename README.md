@@ -70,8 +70,14 @@ it to the running factory without a restart; the change still needs committing.
 `limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
 default 30; it and everything it started are killed) and each agent run
 (`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
-stalls with the reason, like any other failure. Stopping the factory aborts
-running agents and checks.
+stalls with the reason, like any other failure. A stalled job's error is kept
+in its `job.json`, so it stays stalled across a restart until you retry it.
+Stopping the factory aborts running agents and checks; a job stopped that way
+is not marked as failed and resumes on the next start.
+
+Each job folder has an `events.jsonl`: one JSON line per stage change, agent
+run (start and end, with model, round, seconds, cost and any error), gate and
+merge attempt. Only the factory writes it.
 
 Running one issue (**Run issue** on the board, or **Run it now** on New request)
 while every slot is busy queues it: the board shows it as queued, and it starts on
@@ -91,9 +97,9 @@ in the running factory and is not kept across a restart.
   reads commands, it is not a sandbox: a shell that writes files or builds a
   command it can't read still runs as you, so protect the base branch on
   GitHub. After every agent the factory also checks what it changed: any job
-  file other than its report (links included), the job's routing and stage in
-  `job.json`, or a report whose verdict differs from the agent's reply, is put
-  back or refused and the job stalls, and so does an agent that only reads but
+  file other than its report (links included, `events.jsonl` too), the job's
+  routing, stage and error in `job.json`, or a report whose verdict differs
+  from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.
 - The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,

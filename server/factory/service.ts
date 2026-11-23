@@ -50,6 +50,7 @@ export async function createFactory(repo: string, runner: AgentRunner = new SdkR
   const gate = new Gate({ paths, config, store, ports })
   const merger = new Merger({ config, store, ports, machine, gate })
   const orchestrator = new Orchestrator({ paths, config, store, ports, machine, queue, gate, merger, runner })
+  await orchestrator.loadErrors()
   return { paths, config, store, github, ports, machine, queue, gate, merger, orchestrator }
 }
 
