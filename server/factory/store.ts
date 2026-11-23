@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { FactoryPaths, Job } from './types'
+import type { FactoryPaths, Job, JobEvent } from './types'
 
 /**
  * Job state on disk: <repo>/.factory/jobs/<id>/job.json plus the agents' files.
@@ -56,6 +56,15 @@ export class JobStore {
     const tmp = `${target}.${process.pid}.tmp`
     await writeFile(tmp, text)
     await rename(tmp, target)
+  }
+
+  /** Appends one line to the job's events.jsonl. The log is a record, not state: a failed append never fails the job. */
+  async appendEvent(id: string, event: JobEvent): Promise<void> {
+    try {
+      await appendFile(this.path(id, 'events.jsonl'), `${JSON.stringify(event)}\n`)
+    } catch {
+      // nothing depends on the log
+    }
   }
 
   async move(id: string, from: string, to: string): Promise<void> {

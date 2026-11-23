@@ -89,8 +89,11 @@ async function snapshot(dir: string): Promise<Map<string, string>> {
   return files
 }
 
-/** job.json fields only the factory sets; an agent changing them could reroute or skip its own review. */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents'] as const
+/**
+ * job.json fields only the factory sets; an agent changing them could reroute
+ * or skip its own review, or hide or fake a stall that survives a restart.
+ */
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error'] as const
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -115,7 +118,7 @@ export class Orchestrator extends EventEmitter {
   private active = new Map<string, { controller: AbortController, done: Promise<void> }>()
   private draining = false
   private ticking: Promise<void> = Promise.resolve()
-  /** last failure per job; the drain leaves these alone until `retry` */
+  /** last failure per job, also kept in job.json (see `loadErrors`); the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
   /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
   private pending: number[] = []
@@ -140,6 +143,13 @@ export class Orchestrator extends EventEmitter {
 
   private send(e: FactoryEvent) {
     this.emit('event', e)
+  }
+
+  /** Errors saved by an earlier process, so its stalled jobs stay stalled until retried. */
+  async loadErrors(): Promise<void> {
+    for (const job of await this.o.store.list()) {
+      if (job.error) this.errors.set(job.id, job.error.message)
+    }
   }
 
   // ---- Control ------------------------------------------------------------
@@ -281,10 +291,14 @@ export class Orchestrator extends EventEmitter {
     const controller = new AbortController()
     this.errors.delete(id)
     const done = this.drive(id, controller.signal)
-      .catch((err: Error) => {
+      .catch(async (err: Error) => {
         const message = redact(err.message)
         this.errors.set(id, message)
         this.send({ type: 'error', jobId: id, message })
+        // stopped by shutdown, the job resumes on the next start instead of stalling
+        if (this.stopped && controller.signal.aborted) return
+        await this.o.store.update(id, j => ({ ...j, error: { message, at: this.o.ports.now() } }))
+          .catch((e: Error) => this.send({ type: 'log', message: `${id}: couldn't save its error: ${e.message}` }))
       })
       .finally(async () => {
         this.active.delete(id)
@@ -295,6 +309,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async drive(id: string, signal: AbortSignal) {
+    if ((await this.o.store.load(id)).error) await this.o.store.update(id, j => ({ ...j, error: null }))
     while (!signal.aborted) {
       const job = await this.o.store.load(id)
       this.send({ type: 'job', job })
@@ -306,7 +321,7 @@ export class Orchestrator extends EventEmitter {
 
   /** Runs the work of the job's stage and moves it on. False when it waits or is done. */
   private async step(job: Job, signal: AbortSignal): Promise<boolean> {
-    const { machine, gate, merger, store, config } = this.o
+    const { machine, gate, store, config } = this.o
     switch (job.stage) {
       case 'intake': {
         await this.agent(job, 'intake', signal)
@@ -332,6 +347,7 @@ export class Orchestrator extends EventEmitter {
         return this.build(job, signal)
       case 'gate': {
         const result = await gate.run(job.id, { signal })
+        await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit })
         if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
         if (result.verdict === 'PASS') await machine.advance(job.id, 'review')
@@ -345,15 +361,26 @@ export class Orchestrator extends EventEmitter {
         await store.archive(job.id, 'decision.md')
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
-        if (line === 'APPROVE') await merger.merge(job.id, signal)
+        if (line === 'APPROVE') await this.merge(job, signal)
         else await machine.advance(job.id, 'needs-human')
         return true
       }
       case 'merging':
-        await merger.merge(job.id, signal)
+        await this.merge(job, signal)
         return true
       default:
         return false
+    }
+  }
+
+  private async merge(job: Job, signal: AbortSignal) {
+    const { merger, store, ports } = this.o
+    try {
+      const merged = await merger.merge(job.id, signal)
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: merged.stage })
+    } catch (err) {
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: 'error', error: redact((err as Error).message) })
+      throw err
     }
   }
 
@@ -561,7 +588,7 @@ export class Orchestrator extends EventEmitter {
 
   private async agent(job: Job, agent: AgentName, signal: AbortSignal, purpose = '',
     extra: Pick<AgentTask, 'stopCheck'> = {}) {
-    const { store, paths } = this.o
+    const { store, paths, ports } = this.o
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
@@ -587,24 +614,39 @@ export class Orchestrator extends EventEmitter {
       ...extra
     }
     this.send({ type: 'log', message: `${job.id}: ${agent} started` })
-    const watch = await this.watch(job, agent)
-    const result = await this.o.runner.run(task)
-    await store.update(job.id, (j) => {
-      const costs = { ...j.costs }
-      const sessions = { ...j.sessions }
-      if (result.sessionId) {
-        costs[result.sessionId] = result.costUsd
-        if (agent === 'builder') sessions.builder = result.sessionId
-      }
-      const costUsd = Math.round(Object.values(costs).reduce((a, b) => a + b, 0) * 100) / 100
-      return { ...j, costs, sessions, costUsd }
+    // logged outside the watch, so the factory's own lines are never taken for the agent's
+    const run = { agent, model: task.model, round: job.round }
+    await store.appendEvent(job.id, { at: ports.now(), type: 'agent-start', ...run })
+    const t0 = performance.now()
+    let cost = 0
+    const end = (ok: boolean, error?: string) => store.appendEvent(job.id, {
+      at: ports.now(), type: 'agent-end', ...run, seconds: Math.round((performance.now() - t0) / 1000), cost, ok, ...(error === undefined ? {} : { error })
     })
-    await watch.check()
-    if (signal.aborted) throw new Error(`${agent} cancelled`)
-    if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
-    await this.matchesReply(job, agent, result.reply)
-    await this.keepRepliedReport(job, agent, result.reply)
-    this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
-    return result
+    try {
+      const watch = await this.watch(job, agent)
+      const result = await this.o.runner.run(task)
+      cost = result.costUsd
+      await store.update(job.id, (j) => {
+        const costs = { ...j.costs }
+        const sessions = { ...j.sessions }
+        if (result.sessionId) {
+          costs[result.sessionId] = result.costUsd
+          if (agent === 'builder') sessions.builder = result.sessionId
+        }
+        const costUsd = Math.round(Object.values(costs).reduce((a, b) => a + b, 0) * 100) / 100
+        return { ...j, costs, sessions, costUsd }
+      })
+      await watch.check()
+      if (signal.aborted) throw new Error(`${agent} cancelled`)
+      if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
+      await this.matchesReply(job, agent, result.reply)
+      await this.keepRepliedReport(job, agent, result.reply)
+      this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
+      await end(true)
+      return result
+    } catch (err) {
+      await end(false, redact((err as Error).message))
+      throw err
+    }
   }
 }
