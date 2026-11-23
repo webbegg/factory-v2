@@ -75,6 +75,7 @@ const links = computed(() => [
         color="warning"
         variant="subtle"
         class="shrink-0 rounded-none"
+        :ui="{ title: 'text-amber-800 dark:text-amber-300' }"
       />
       <UScrollArea
         class="flex-1 min-h-0"
