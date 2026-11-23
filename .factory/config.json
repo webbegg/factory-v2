@@ -1,7 +1,7 @@
 {
-  "concurrency": 1,
+  "concurrency": 2,
   "maxRounds": 3,
-  "baseBranch": "master",
+  "baseBranch": "main",
   "mergeMethod": "merge",
   "labels": {
     "queue": "factory",
