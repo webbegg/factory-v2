@@ -16,7 +16,11 @@ view; this file is for whoever changes the code.
   in `job.json` `move` as each finishes, skipped on a retry of the same move,
   and cleared when the move is saved, and `Machine.answer` posts the operator's
   reply as one of these steps), `queue.ts`, `gate.ts`,
-  `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
+  `route.ts`, `merge.ts` (after the push it polls `commitChecks` on the gated
+  commit per `ci.wait` / `ci.startMinutes` / `ci.minutes`, through injectable
+  `sleep`/`now` that `makeEnv()` fakes; the jobs inside that wait are
+  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`),
+  `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
   in the same session, when its report is missing or its first line invalid,

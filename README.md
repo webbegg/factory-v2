@@ -99,6 +99,20 @@ and a review without a verdict is removed and run again. A stalled job's error i
 in its `job.json`, so it stays stalled across a restart until you retry it.
 Retrying a job that stalled in the middle of a stage change doesn't repeat the
 comments or labels that change already posted.
+
+`ci` in `.factory/config.json` makes a merge wait for GitHub CI on the gated
+commit, between the push and `gh pr merge`. The factory polls that commit's
+check runs and commit statuses every 15 seconds. When every check passed
+(success, neutral or skipped), it merges. When any check failed, was cancelled
+or timed out, the job goes to needs-human with the failing checks named. When
+no check appeared within `startMinutes` (default 2) of the push, the commit has
+no CI, so it merges and notes that in `round-N/merge-checks.md`. When checks are
+still pending `minutes` (default 30) after the push, the job goes to
+needs-human, naming them. `wait` (default `true`) set to `false` restores
+merging right after the local gate. Merges run one at a time, so the next one
+queues behind a job's CI wait, for up to `ci.minutes`. The board shows the job
+as "merging: waiting for CI" meanwhile. Because the factory now waits, the base
+branch's protection can require the CI check.
 Stopping the factory aborts running agents and checks; a job stopped that way
 is not marked as failed and resumes on the next start. Cancel on the board
 pauses a job instead of stalling it: it stays paused until you click Resume,
