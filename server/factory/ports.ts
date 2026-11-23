@@ -21,6 +21,13 @@ export interface IssueData {
   comments: IssueComment[]
 }
 
+/** One check run or commit status, reduced to what decides a merge. */
+export interface CommitCheck {
+  name: string
+  state: 'pending' | 'success' | 'failure'
+  url: string | null
+}
+
 /** Every GitHub side effect the state machine needs. */
 export interface GitHubPort {
   /** login of the user running the factory */
@@ -36,6 +43,8 @@ export interface GitHubPort {
   prClose(number: number): Promise<void>
   /** merges only while the PR head is still `headSha` */
   prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string): Promise<void>
+  /** every check run and commit status on `sha`; a list GitHub reports as incomplete gets a pending entry */
+  commitChecks(sha: string): Promise<CommitCheck[]>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
   /** hosts images for issue bodies and comments; one URL per image, in order */
   uploadImages(images: UploadImage[]): Promise<string[]>

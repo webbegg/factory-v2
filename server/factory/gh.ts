@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { UploadImage } from './attachments'
 import { exec, redact } from './exec'
 import { MARKER } from './issue'
-import type { GitHubPort, IssueData, PrState, ThreadKind } from './ports'
+import type { CommitCheck, GitHubPort, IssueData, PrState, ThreadKind } from './ports'
 
 /** Runs `gh <args>` and returns stdout; throws on failure. */
 export type GhRunner = (args: string[]) => Promise<string>
@@ -95,6 +95,43 @@ export class GhCli implements GitHubPort {
 
   async prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string) {
     await this.gh(['pr', 'merge', String(number), `--${method}`, '--match-head-commit', headSha])
+  }
+
+  /**
+   * Check runs and commit statuses on `sha`, every page. `--jq` turns each page
+   * into one line, so pages never run together into one unparseable blob.
+   * Names and URLs are GitHub's text and are redacted like any other gh output.
+   */
+  async commitChecks(sha: string): Promise<CommitCheck[]> {
+    if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error(`not a commit sha: ${JSON.stringify(sha.slice(0, 60))}`)
+    const pages = async <T>(endpoint: string, jq: string) =>
+      (await this.gh(['api', `repos/{owner}/{repo}/commits/${sha}/${endpoint}?per_page=100`, '--paginate', '--jq', jq]))
+        .split('\n').filter(line => line.trim()).map(line => JSON.parse(line) as { total: number, items: T[] })
+    const checks: CommitCheck[] = []
+    const add = <T>(source: string, list: Array<{ total: number, items: T[] }>, map: (item: T) => CommitCheck) => {
+      const items = list.flatMap(p => p.items)
+      checks.push(...items.map(map))
+      // a partial list must never read as "all passed"
+      const total = Math.max(0, ...list.map(p => p.total))
+      if (items.length < total) {
+        checks.push({ name: `${source} list incomplete: GitHub returned ${items.length} of ${total}`, state: 'pending', url: null })
+      }
+    }
+    const runs = await pages<{ name: string, status: string, conclusion: string | null, html_url: string | null }>(
+      'check-runs', '{total: .total_count, items: [.check_runs[] | {name, status, conclusion, html_url}]}')
+    add('check runs', runs, r => ({
+      name: r.name,
+      state: r.status !== 'completed' ? 'pending' : ['success', 'neutral', 'skipped'].includes(r.conclusion ?? '') ? 'success' : 'failure',
+      url: r.html_url
+    }))
+    const statuses = await pages<{ context: string, state: string, target_url: string | null }>(
+      'status', '{total: .total_count, items: [.statuses[] | {context, state, target_url}]}')
+    add('commit statuses', statuses, s => ({
+      name: s.context,
+      state: s.state === 'success' ? 'success' : s.state === 'pending' ? 'pending' : 'failure',
+      url: s.target_url
+    }))
+    return checks.map(c => ({ ...c, name: redact(c.name), url: c.url === null ? null : redact(c.url) }))
   }
 
   openPrsForBranch(branch: string) {

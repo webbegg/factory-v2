@@ -13,6 +13,7 @@ export default defineEventHandler(async () => {
     queued: f.orchestrator.queuedIssues(),
     errors: Object.fromEntries(f.orchestrator.errors),
     paused: [...f.orchestrator.paused],
+    ciWaiting: [...f.merger.ciWaiting],
     jobs: await f.store.list()
   }
 })

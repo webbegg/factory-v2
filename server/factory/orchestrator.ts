@@ -34,6 +34,7 @@ export type FactoryEvent
     | { type: 'agent', jobId: string, agent: AgentName, event: AgentEvent }
     | { type: 'error', jobId: string, message: string }
     | { type: 'paused', jobId: string }
+    | { type: 'ci', jobId: string, waiting: boolean }
     | { type: 'archived', jobId: string, archived: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
@@ -163,6 +164,7 @@ export class Orchestrator extends EventEmitter {
 
   constructor(private o: OrchestratorOptions) {
     super()
+    o.merger.onCiWait = (jobId, waiting) => this.send({ type: 'ci', jobId, waiting })
   }
 
   get isDraining() {

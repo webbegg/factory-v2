@@ -8,7 +8,7 @@ import { Gate } from './gate'
 import { Machine } from './machine'
 import { Merger } from './merge'
 import { GitHubIssues } from './issue'
-import type { GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
+import type { CommitCheck, GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
 import { Queue } from './queue'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, Job } from './types'
@@ -78,6 +78,14 @@ export class FakeGitHub implements GitHubPort {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
     this.calls.push(['merge', number, method, headSha])
+  }
+
+  /** answers to `commitChecks`, in order; the last one repeats */
+  checkResponses: CommitCheck[][] = [[]]
+  private checkCalls = 0
+  async commitChecks(sha: string) {
+    this.calls.push(['commitChecks', sha])
+    return this.checkResponses[Math.min(this.checkCalls++, this.checkResponses.length - 1)] ?? []
   }
 
   async openPrsForBranch(branch: string) {
@@ -170,6 +178,8 @@ export interface TestEnv {
   queue: Queue
   gate: Gate
   merger: Merger
+  /** the merger's clock in ms; its sleep advances this instead of waiting */
+  clock: { ms: number }
 }
 
 export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
@@ -189,8 +199,15 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<T
   const machine = new Machine({ paths, config, store, ports })
   const queue = new Queue({ paths, config, store, ports, machine })
   const gate = new Gate({ paths, config, store, ports })
-  const merger = new Merger({ config, store, ports, machine, gate })
-  return { paths, config, store, github, git, ports, machine, queue, gate, merger }
+  const clock = { ms: 0 }
+  const merger = new Merger({
+    config, store, ports, machine, gate,
+    now: () => clock.ms,
+    sleep: async (ms) => {
+      clock.ms += ms
+    }
+  })
+  return { paths, config, store, github, git, ports, machine, queue, gate, merger, clock }
 }
 
 export function newJob(env: TestEnv, fields: Partial<Job> = {}): Job {
