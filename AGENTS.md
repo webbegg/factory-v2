@@ -9,7 +9,11 @@ view; this file is for whoever changes the code.
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk),
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
-  job's `events.jsonl` and never throws), `queue.ts`, `gate.ts`,
+  job's `events.jsonl` and never throws; a move's unrepeatable steps — comments,
+  labels, PR close, remote branch delete, the `intake.md` rename — are recorded
+  in `job.json` `move` as each finishes, skipped on a retry of the same move,
+  and cleared when the move is saved, and `Machine.answer` posts the operator's
+  reply as one of these steps), `queue.ts`, `gate.ts`,
   `route.ts`, `merge.ts`, `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,

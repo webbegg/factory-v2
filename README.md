@@ -77,6 +77,8 @@ missing or whose first line isn't valid is asked once more, with the error,
 before the job stalls; `spec.md` must have a `## Acceptance criteria` section,
 and a review without a verdict is removed and run again. A stalled job's error is kept
 in its `job.json`, so it stays stalled across a restart until you retry it.
+Retrying a job that stalled in the middle of a stage change doesn't repeat the
+comments or labels that change already posted.
 Stopping the factory aborts running agents and checks; a job stopped that way
 is not marked as failed and resumes on the next start. Cancel on the board
 pauses a job instead of stalling it: it stays paused until you click Resume,

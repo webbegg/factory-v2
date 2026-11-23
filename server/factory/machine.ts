@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir } from 'node:fs/promises'
 import { body, firstLine, header, section } from './markdown'
-import type { Ports } from './ports'
+import type { Ports, ThreadKind } from './ports'
 import type { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Risk, RoundReason, Stage, Verdict } from './types'
 
@@ -38,7 +39,15 @@ export function holdsSlot(job: Job): boolean {
   return !TERMINAL.has(job.stage) && !WAITING.has(job.stage)
 }
 
-type Via = 'advance' | 'feedback' | 'reject' | 'approve'
+type Via = 'advance' | 'feedback' | 'reject' | 'approve' | 'answer'
+
+/** Runs one step of a move that isn't safe to repeat, unless an earlier try of the same move finished it. */
+type Step = (key: string, run: () => Promise<unknown>) => Promise<void>
+
+/** Short enough for a key, long enough that a step with other content never matches. */
+function hash(text: string) {
+  return createHash('sha256').update(text).digest('hex').slice(0, 12)
+}
 
 export interface MachineOptions {
   paths: FactoryPaths
@@ -98,10 +107,26 @@ export class Machine {
     let from: Stage = stage
     const job = await this.store.update(id, async (raw) => {
       from = raw.stage
-      return this.transition(await this.sync(raw), stage, 'advance')
+      return this.transition(await this.sync(raw), stage, 'advance', this.steps(raw, stage))
     })
     await this.logMove(job, from)
     return job
+  }
+
+  /**
+   * A move's unrepeatable steps go through the returned function. Each one that finishes is saved in
+   * job.json `move` at once, with the rest of the job as loaded (stage unchanged), so a retry of the
+   * same move after a throw or a crash skips it. A record left by another move skips nothing.
+   */
+  private steps(raw: Job, to: Stage): Step {
+    const from = raw.stage
+    const done = raw.move?.from === from && raw.move.to === to ? [...raw.move.done] : []
+    return async (key, run) => {
+      if (done.includes(key)) return
+      await run()
+      done.push(key)
+      await this.store.save({ ...raw, move: { from, to, done: [...done] } })
+    }
   }
 
   /** Every move made through the machine is logged here, after its job.json is saved, whoever made it. */
@@ -128,7 +153,7 @@ export class Machine {
       const k = (await this.store.files(id, /^feedback-\d+\.md$/)).length + 1
       file = `feedback-${k}.md`
       await this.store.write(id, file, `# Feedback ${k}\n\nFrom @${operator} after the job escalated.\n\n${text.trim()}\n`)
-      return this.transition(await this.sync(raw), 'build', 'feedback', file)
+      return this.transition(await this.sync(raw), 'build', 'feedback', this.steps(raw, 'build'), file)
     })
     await this.logMove(job, 'needs-human')
     return { job, file }
@@ -147,7 +172,7 @@ export class Machine {
         const k = (await readdir(this.store.path(id, rd))).filter(f => /^sync-\d+\.md$/.test(f)).length + 1
         await this.store.move(id, `${rd}/sync.md`, `${rd}/sync-${k}.md`)
       }
-      return this.transition(await this.sync(raw), 'merging', 'approve')
+      return this.transition(await this.sync(raw), 'merging', 'approve', this.steps(raw, 'merging'))
     })
     await this.logMove(job, 'needs-human')
     return job
@@ -162,9 +187,25 @@ export class Machine {
       from = raw.stage
       await this.store.write(id, 'rejection.md',
         `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n\n${text.trim()}\n`)
-      return this.transition(await this.sync(raw), 'rejected', 'reject')
+      return this.transition(await this.sync(raw), 'rejected', 'reject', this.steps(raw, 'rejected'))
     })
     await this.logMove(job, from)
+    return job
+  }
+
+  /**
+   * needs-info → intake on the operator's answer. The reply is posted after the slot check and before
+   * the issue is read again, as a recorded step, so neither a refusal nor a retry posts it twice.
+   */
+  async answer(id: string, text: string, reply: (issue: number, body: string) => Promise<void>): Promise<Job> {
+    const job = await this.store.update(id, async (raw) => {
+      require(raw.stage === 'needs-info', `${id} is in ${raw.stage}, not needs-info`)
+      await this.requireSlot(id)
+      const step = this.steps(raw, 'intake')
+      await step(`reply:${hash(text)}`, () => reply(raw.issue, text))
+      return this.transition(await this.sync(raw), 'intake', 'answer', step)
+    })
+    await this.logMove(job, 'needs-info')
     return job
   }
 
@@ -198,37 +239,42 @@ export class Machine {
     return last
   }
 
-  private async transition(input: Job, stage: Stage, via: Via, feedbackFile?: string): Promise<Job> {
+  private async transition(input: Job, stage: Stage, via: Via, step: Step, feedbackFile?: string): Promise<Job> {
     const job = { ...input }
     const old = job.stage
     const { github, git, issues } = this.ports
     const { labels, baseBranch: base } = this.config
+    const comment = this.commenter(step)
+    const editLabels = this.labeller(step)
     require((TRANSITIONS[old] ?? []).includes(stage) || (stage === 'merged' && !TERMINAL.has(old)),
       `${job.id}: ${old} → ${stage} is not a legal transition`)
 
     if (stage === 'merged') {
       require(job.pr && await github.prState(job.pr) === 'MERGED', 'the PR isn\'t merged')
-      if (old === 'needs-human') await github.editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+      if (old === 'needs-human') await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (stage === 'rejected' && WAITING.has(old)) {
       require(via === 'reject', 'use reject to reject a waiting job')
       const reason = body(await this.read(job, 'rejection.md') ?? '')
       const reasonText = reason.split('\n\n').slice(1).join('\n\n').trim() || reason
-      await github.comment('issue', job.issue, `### Factory: rejected\n\n${reasonText}`)
+      await comment('issue', job.issue, `### Factory: rejected\n\n${reasonText}`)
       const waiting = old === 'needs-info' ? labels.needsInfo : labels.needsHuman
-      await github.editLabels('issue', job.issue, { remove: [labels.queue, waiting] })
+      await editLabels('issue', job.issue, { remove: [labels.queue, waiting] })
       if (job.pr) {
-        await github.prClose(job.pr)
-        await git.deleteRemoteBranch(job.branch)
+        const pr = job.pr
+        await step(`close:pr:${pr}`, () => github.prClose(pr))
+        await step(`delete-remote:${job.branch}`, () => git.deleteRemoteBranch(job.branch))
       }
     } else if (old === 'intake') {
-      await this.leaveIntake(job, stage)
+      await this.leaveIntake(job, stage, step)
     } else if (old === 'needs-info') {
       await this.requireSlot(job.id)
-      const k = (await this.store.files(job.id, /^intake-\d+\.md$/)).length + 1
-      await this.store.move(job.id, 'intake.md', `intake-${k}.md`)
+      await step('rename:intake.md', async () => {
+        const k = (await this.store.files(job.id, /^intake-\d+\.md$/)).length + 1
+        await this.store.move(job.id, 'intake.md', `intake-${k}.md`)
+      })
       job.intake = null
       await issues.refresh(job)
-      await github.editLabels('issue', job.issue, { remove: [labels.needsInfo] })
+      await editLabels('issue', job.issue, { remove: [labels.needsInfo] })
     } else if (old === 'spec') {
       const spec = await this.read(job, 'spec.md')
       require(spec !== null, 'spec.md doesn\'t exist')
@@ -309,12 +355,12 @@ export class Machine {
       require(via === 'approve', 'use approve to merge an escalated job')
       // a fresh budget, so a conflict at the merge can still go back to build
       job.roundLimit = job.round + this.config.maxRounds
-      await github.editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+      await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (old === 'needs-human') { // → build
       require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
       job.roundLimit = job.round + this.config.maxRounds
       await this.nextRound(job, `feedback:${feedbackFile}`)
-      await github.editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+      await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     }
 
     if (stage === 'needs-human') {
@@ -322,11 +368,11 @@ export class Machine {
       const text = `### Factory: needs a human\n\n${decision.split('\n').slice(1).join('\n').trim()}`
       if (job.pr) {
         if (await github.prIsDraft(job.pr)) await github.prReady(job.pr)
-        await github.comment('pr', job.pr, text)
+        await comment('pr', job.pr, text)
       } else {
-        await github.comment('issue', job.issue, text)
+        await comment('issue', job.issue, text)
       }
-      await github.editLabels('issue', job.issue, { add: [labels.needsHuman] })
+      await editLabels('issue', job.issue, { add: [labels.needsHuman] })
     }
 
     if (TERMINAL.has(stage) && existsSync(job.worktree)) {
@@ -338,12 +384,25 @@ export class Machine {
     job.ended = TERMINAL.has(stage) || WAITING.has(stage) ? this.ports.now() : null
     // a job that moved on is past whatever stalled it
     job.error = null
+    job.move = null
     return job
   }
 
-  private async leaveIntake(job: Job, stage: Stage) {
-    const { github, git } = this.ports
+  private commenter(step: Step) {
+    return (kind: ThreadKind, n: number, text: string) =>
+      step(`comment:${kind}:${n}:${hash(text)}`, () => this.ports.github.comment(kind, n, text))
+  }
+
+  private labeller(step: Step) {
+    return (kind: ThreadKind, n: number, change: { add?: string[], remove?: string[] }) =>
+      step(`labels:${kind}:${n}:${hash(JSON.stringify(change))}`, () => this.ports.github.editLabels(kind, n, change))
+  }
+
+  private async leaveIntake(job: Job, stage: Stage, step: Step) {
+    const { git } = this.ports
     const { labels, baseBranch: base } = this.config
+    const comment = this.commenter(step)
+    const editLabels = this.labeller(step)
     const text = await this.read(job, 'intake.md') ?? ''
     const decision = job.intake?.decision ?? null
     const want = ({ 'needs-info': 'NEEDS-INFO', 'rejected': 'REJECT', 'spec': 'ACCEPT' } as Record<string, string>)[stage]
@@ -353,11 +412,11 @@ export class Machine {
       require(job.agents, `route the job first: factory route ${job.id}`)
       title += ` (risk ${job.intake?.risk}, surfaces: ${job.intake?.surfaces.join(', ') || 'none'})`
     }
-    await github.comment('issue', job.issue, `${title}\n\n${body(text)}`)
+    await comment('issue', job.issue, `${title}\n\n${body(text)}`)
     if (stage === 'needs-info') {
-      await github.editLabels('issue', job.issue, { add: [labels.needsInfo] })
+      await editLabels('issue', job.issue, { add: [labels.needsInfo] })
     } else if (stage === 'rejected') {
-      await github.editLabels('issue', job.issue, { remove: [labels.queue] })
+      await editLabels('issue', job.issue, { remove: [labels.queue] })
     } else {
       await git.fetch(this.o.paths.repo, base)
       await git.addWorktree(job.worktree, job.branch, `origin/${base}`)

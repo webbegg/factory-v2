@@ -153,6 +153,26 @@ describe('GitCli against a real repo', () => {
     ])
   }, 30_000)
 
+  test('addWorktree reuses a worktree on its branch, or the branch without one', async () => {
+    const wt3 = join(repo, '.worktrees', '003-r')
+    await git.addWorktree(wt3, 'factory/003-r', 'origin/main')
+    await git.addWorktree(wt3, 'factory/003-r', 'origin/main')
+    await writeFile(join(wt3, 'a.txt'), 'kept\n')
+    await exec('git', ['commit', '-qam', 'kept'], { cwd: wt3 })
+    const head = await git.head(wt3)
+
+    await git.removeWorktree(wt3)
+    expect(existsSync(wt3)).toBe(false)
+    await git.addWorktree(wt3, 'factory/003-r', 'origin/main')
+    expect(await git.head(wt3)).toBe(head)
+    expect((await exec('git', ['branch', '--show-current'], { cwd: wt3 })).trim()).toBe('factory/003-r')
+
+    await expect(git.addWorktree(wt3, 'factory/004-s', 'origin/main'))
+      .rejects.toThrow(`${wt3} is a worktree on factory/003-r, not factory/004-s`)
+    await git.removeWorktree(wt3)
+    await git.deleteBranch('factory/003-r')
+  }, 30_000)
+
   test('fetch puts back a remote-tracking ref moved by hand (verify B3)', async () => {
     const real = await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })
     const fake = (await exec('git', ['commit-tree', '-m', 'forged', `${real.trim()}^{tree}`], { cwd: repo })).trim()
