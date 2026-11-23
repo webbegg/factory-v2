@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { defaultConfig } from './config'
 import { globToRegExp } from './gate'
 import type { StopCheckRecord } from './gate'
+import type { CommitCheck } from './ports'
 import { route } from './route'
 import { makeEnv, seed } from './testing'
 import type { TestEnv } from './testing'
@@ -455,6 +456,126 @@ describe('merge', () => {
       expect((await env.merger.merge(ID)).stage).toBe('merged')
       expect(await runs(env)).toBe(1)
       expect(await env.store.read(ID, 'round-1/merge-checks.md')).toStartWith(`GATE: PASS\nCOMMIT: ${SHA}\nBASE: ${BASE}\n`)
+    })
+  })
+
+  describe('waiting for GitHub CI', () => {
+    const check = (name: string, state: CommitCheck['state'], url: string | null = null): CommitCheck => ({ name, state, url })
+    const merges = (env: TestEnv) => env.github.calls.filter(c => c[0] === 'merge')
+
+    test('pending then all passed merges the gated commit, after asking for its checks', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.checkResponses = [[check('build', 'pending')], [check('build', 'success'), check('lint', 'success')]]
+      expect((await env.merger.merge(ID)).stage).toBe('merged')
+      const names = env.github.calls.map(c => c[0])
+      expect(env.github.calls).toContainEqual(['commitChecks', SHA])
+      expect(names.lastIndexOf('commitChecks')).toBeLessThan(names.indexOf('merge'))
+      expect(names.filter(n => n === 'commitChecks')).toHaveLength(2)
+      expect(env.clock.ms).toBe(15_000)
+      expect(env.merger.ciWaiting.size).toBe(0)
+    })
+
+    test('a failed check escalates with its name and URL and does not merge', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.checkResponses = [[check('lint', 'success'), check('build', 'failure', 'https://github.com/o/r/actions/runs/1')]]
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('needs-human')
+      expect(merges(env)).toHaveLength(0)
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE')
+      expect(decision).toContain('GitHub CI failed on aaaaaaa')
+      expect(decision).toContain('- build: https://github.com/o/r/actions/runs/1')
+      expect(decision).not.toContain('lint')
+    })
+
+    test('no checks within startMinutes merges with a note after the gate\'s content', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      expect((await env.merger.merge(ID)).stage).toBe('merged')
+      expect(env.clock.ms).toBe(2 * 60_000)
+      const md = await env.store.read(ID, 'round-1/merge-checks.md') ?? ''
+      expect(md).toStartWith('GATE: PASS')
+      expect(md).toContain('## GitHub CI\nNo check runs or statuses appeared on aaaaaaa within 2 minutes, so the merge went ahead.')
+      expect(md.indexOf('## GitHub CI')).toBeGreaterThan(md.indexOf('## checks.sh'))
+    })
+
+    test('a check that appears by startMinutes, still pending, keeps the wait going past it', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      // polls at 0, 15 … 105 s find nothing; the one at 120 s finds e2e running
+      env.github.checkResponses = [...Array(8).fill([]), [check('e2e', 'pending')], [check('e2e', 'success')]]
+      expect((await env.merger.merge(ID)).stage).toBe('merged')
+      expect(await env.store.read(ID, 'round-1/merge-checks.md')).toContain('Every check on aaaaaaa passed.')
+    })
+
+    test('a check still pending after ci.minutes escalates naming it', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.checkResponses = [[check('e2e', 'pending'), check('lint', 'success')]]
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('needs-human')
+      expect(env.clock.ms).toBe(30 * 60_000)
+      expect(merges(env)).toHaveLength(0)
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toContain('GitHub CI was still running on aaaaaaa after 30 minutes:\n\n- e2e')
+      expect(decision).not.toContain('lint')
+    })
+
+    test('an abort during the wait leaves the job in merging and does not merge', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      const controller = new AbortController()
+      env.github.checkResponses = [[check('e2e', 'pending')]]
+      const commitChecks = env.github.commitChecks.bind(env.github)
+      let polls = 0
+      env.github.commitChecks = async (s) => {
+        if (++polls === 3) controller.abort()
+        return commitChecks(s)
+      }
+      const seen: Array<[string, boolean]> = []
+      env.merger.onCiWait = (jobId, waiting) => seen.push([jobId, waiting])
+      await expect(env.merger.merge(ID, controller.signal)).rejects.toThrow('merge cancelled')
+      expect(merges(env)).toHaveLength(0)
+      expect((await env.store.load(ID)).stage).toBe('merging')
+      expect(seen).toEqual([[ID, true], [ID, false]])
+      expect(env.merger.ciWaiting.size).toBe(0)
+    })
+
+    test('a commitChecks error escalates like a refused merge', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.commitChecks = async () => {
+        throw new Error('gh: HTTP 502')
+      }
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('needs-human')
+      expect(await env.store.read(ID, 'decision.md')).toContain('The merge failed:\n\n```\ngh: HTTP 502\n```')
+      expect(merges(env)).toHaveLength(0)
+    })
+
+    test('ci.wait false merges without asking for checks', async () => {
+      const env = await makeEnv({ ci: { wait: false, startMinutes: 2, minutes: 30 } })
+      await approved(env)
+      expect((await env.merger.merge(ID)).stage).toBe('merged')
+      expect(env.github.calls.some(c => c[0] === 'commitChecks')).toBe(false)
+      expect(merges(env)).toHaveLength(1)
+      expect(await env.store.read(ID, 'round-1/merge-checks.md')).not.toContain('## GitHub CI')
+    })
+
+    test('check names and URLs from GitHub cannot add markdown or links to decision.md', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.checkResponses = [[check('x`\n## Fake\n`y', 'failure', 'javascript:alert(1)'), check('z'.repeat(500), 'failure')]]
+      expect((await env.merger.merge(ID)).stage).toBe('needs-human')
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision.split('\n').some(l => l.startsWith('## Fake'))).toBe(false)
+      expect(decision).not.toContain('`')
+      expect(decision).not.toContain('javascript:')
+      expect(decision).toContain('- x ## Fake y\n')
+      expect(decision).toContain(`- ${'z'.repeat(200)}\n`)
+      expect(decision).not.toContain('z'.repeat(201))
     })
   })
 

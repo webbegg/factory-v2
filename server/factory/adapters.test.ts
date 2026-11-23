@@ -52,6 +52,64 @@ describe('GhCli', () => {
     ])
   })
 
+  test('commitChecks reads every page of check runs and statuses and maps their states', async () => {
+    const sha = 'f'.repeat(40)
+    const seen: string[][] = []
+    const runs = (items: object[], total: number) => JSON.stringify({ total, items })
+    const ci = new GhCli(async (args) => {
+      seen.push(args)
+      if (args[1]!.endsWith('/check-runs?per_page=100')) {
+        return [
+          runs([
+            { name: 'build', status: 'completed', conclusion: 'success', html_url: 'https://github.com/o/r/runs/1' },
+            { name: 'docs', status: 'completed', conclusion: 'neutral', html_url: null },
+            { name: 'e2e', status: 'in_progress', conclusion: null, html_url: null }
+          ], 6),
+          runs([
+            { name: 'lint', status: 'completed', conclusion: 'skipped', html_url: null },
+            { name: 'old', status: 'completed', conclusion: 'stale', html_url: null },
+            { name: 'deploy', status: 'completed', conclusion: 'timed_out', html_url: 'https://x:secret@ci.example/1' }
+          ], 6)
+        ].join('\n') + '\n'
+      }
+      return runs([
+        { context: 'ci/a', state: 'success', target_url: 'https://ci.example/a' },
+        { context: 'ci/b', state: 'pending', target_url: null },
+        { context: 'ci/c', state: 'error', target_url: null },
+        { context: 'ci/d', state: 'failure', target_url: null }
+      ], 5) + '\n'
+    })
+    expect(await ci.commitChecks(sha)).toEqual([
+      { name: 'build', state: 'success', url: 'https://github.com/o/r/runs/1' },
+      { name: 'docs', state: 'success', url: null },
+      { name: 'e2e', state: 'pending', url: null },
+      { name: 'lint', state: 'success', url: null },
+      { name: 'old', state: 'failure', url: null },
+      { name: 'deploy', state: 'failure', url: 'https://***@ci.example/1' },
+      { name: 'ci/a', state: 'success', url: 'https://ci.example/a' },
+      { name: 'ci/b', state: 'pending', url: null },
+      { name: 'ci/c', state: 'failure', url: null },
+      { name: 'ci/d', state: 'failure', url: null },
+      { name: 'commit statuses list incomplete: GitHub returned 4 of 5', state: 'pending', url: null }
+    ])
+    expect(seen.map(a => a.slice(0, 3))).toEqual([
+      ['api', `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`, '--paginate'],
+      ['api', `repos/{owner}/{repo}/commits/${sha}/status?per_page=100`, '--paginate']
+    ])
+  })
+
+  test('commitChecks refuses anything but a 40-hex sha without running gh', async () => {
+    let ran = false
+    const ci = new GhCli(async () => {
+      ran = true
+      return ''
+    })
+    for (const bad of ['abc123', `${'a'.repeat(40)}/../x`, `${'g'.repeat(40)}`, '']) {
+      await expect(ci.commitChecks(bad)).rejects.toThrow('not a commit sha')
+    }
+    expect(ran).toBe(false)
+  })
+
   test('uploadImages posts each image from a temp file, never on the command line, and removes it', async () => {
     const sent: Array<{ args: string[], bytes: number[] }> = []
     let n = 0
