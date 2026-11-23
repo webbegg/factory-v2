@@ -11,7 +11,9 @@ export function escapeHtml(s: string): string {
 function inline(raw: string): string {
   const codes: string[] = []
   const spans: string[] = []
-  let s = raw.replace(/`([^`]+)`/g, (span: string, code: string) => {
+  // NUL marks the stash below; one in the input could pull stashed HTML into a link's href
+  // eslint-disable-next-line no-control-regex
+  let s = raw.replace(/\u0000/g, '').replace(/`([^`]+)`/g, (span: string, code: string) => {
     codes.push(`<code>${escapeHtml(code)}</code>`)
     spans.push(span)
     return `\u0000${codes.length - 1}\u0000`
@@ -28,7 +30,8 @@ function inline(raw: string): string {
   })
   s = escapeHtml(s)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
   // eslint-disable-next-line no-control-regex
   return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => codes[Number(i)]!)
 }

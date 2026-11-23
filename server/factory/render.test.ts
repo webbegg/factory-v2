@@ -41,6 +41,13 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('![**b**](https://x.test/p.png)')).toBe('<p><img src="https://x.test/p.png" alt="**b**" loading="lazy"></p>')
   })
 
+  test('a NUL placeholder in the input cannot put stashed HTML inside a link URL', () => {
+    const html = renderMarkdown('![a](https://x/onmouseover=alert%281%29//) [x](https://a\u00000\u0000) [y](https://b\u00001\u0000) `c`')
+    expect(html).not.toContain('\u0000')
+    expect(html).not.toMatch(/href="[^"]*</)
+    expect(html).toBe('<p><img src="https://x/onmouseover=alert%281%29//" alt="a" loading="lazy"> <a href="https://a0" target="_blank" rel="noopener noreferrer">x</a> <a href="https://b1" target="_blank" rel="noopener noreferrer">y</a> <code>c</code></p>')
+  })
+
   test('images with any other URL stay escaped text', () => {
     for (const url of ['javascript:alert(1)', 'data:image/png;base64,AAAA', 'http://x.test/p.png', '//x.test/p.png', 'p.png']) {
       const html = renderMarkdown(`![a](${url})`)
