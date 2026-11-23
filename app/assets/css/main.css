@@ -64,3 +64,4 @@
 .md pre code { @apply bg-transparent p-0; }
 .md blockquote { @apply border-s-2 border-default ps-3 text-muted; }
 .md a { @apply text-primary underline; }
+.md img { @apply inline-block h-auto max-w-full rounded-md; }
