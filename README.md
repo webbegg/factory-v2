@@ -72,7 +72,10 @@ it to the running factory without a restart; the change still needs committing.
 `limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
 default 30; it and everything it started are killed) and each agent run
 (`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
-stalls with the reason, like any other failure. A stalled job's error is kept
+stalls with the reason, like any other failure. An agent whose report is
+missing or whose first line isn't valid is asked once more, with the error,
+before the job stalls; `spec.md` must have a `## Acceptance criteria` section,
+and a review without a verdict is removed and run again. A stalled job's error is kept
 in its `job.json`, so it stays stalled across a restart until you retry it.
 Stopping the factory aborts running agents and checks; a job stopped that way
 is not marked as failed and resumes on the next start. Cancel on the board
