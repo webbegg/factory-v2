@@ -1,3 +1,6 @@
+import type { Tone } from '~~/server/factory/service'
+// Relative, not `~~`: bun test loads this file too, and only Nuxt resolves the alias.
+import { STAGES, TERMINAL, WAITING } from '../../server/factory/types'
 import type { Stage } from '~~/server/factory/types'
 
 export const COLUMNS: Array<{ label: string, who: string, stages: Stage[], human?: boolean }> = [
@@ -10,7 +13,8 @@ export const COLUMNS: Array<{ label: string, who: string, stages: Stage[], human
   { label: 'Done', who: 'merged · rejected', stages: ['merged', 'rejected'] }
 ]
 
-export const LIVE_STAGES = new Set<Stage>(['intake', 'spec', 'build', 'gate', 'review', 'approve', 'merging'])
+/** Stages the factory works in: neither finished nor waiting on someone. */
+export const LIVE_STAGES: ReadonlySet<Stage> = new Set(STAGES.filter(s => !TERMINAL.has(s) && !WAITING.has(s)))
 
 /** The index in `COLUMNS` of the column that holds `stage`. */
 export function columnIndex(stage: Stage): number {
@@ -41,6 +45,11 @@ export function jobAction(job: { stage: Stage, running: boolean, error: string |
   if (job.running) return 'cancel'
   if (job.error) return 'retry'
   return LIVE_STAGES.has(job.stage) ? 'resume' : null
+}
+
+/** The dot colour of a job file's tone in the panel's file list. */
+export function toneColor(t: Tone): string {
+  return t === 'good' ? 'bg-success' : t === 'warn' ? 'bg-warning' : t === 'stop' ? 'bg-error' : 'bg-accented'
 }
 
 /** Who writes a job file, for the viewer's empty state. */

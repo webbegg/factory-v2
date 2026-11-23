@@ -172,13 +172,6 @@ export function elapsed(job: Job): string {
   return min >= 60 ? `${Math.floor(min / 60)}h${String(min % 60).padStart(2, '0')}m` : `${min}m`
 }
 
-export function verdictColor(v: string | null | undefined) {
-  if (v === 'PASS') return 'success' as const
-  if (v === 'CHANGES') return 'warning' as const
-  if (v === 'FAIL' || v === 'invalid') return 'error' as const
-  return 'neutral' as const
-}
-
 export function riskColor(risk: string | null | undefined) {
   return risk === 'high' ? 'error' as const : risk === 'medium' ? 'warning' as const : 'neutral' as const
 }

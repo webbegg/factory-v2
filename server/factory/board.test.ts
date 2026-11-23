@@ -1,7 +1,8 @@
 // The board's selection helpers: which column a stage sits in, which job the
-// URL selects, what Esc does, who writes each job file, and which run action a job offers.
+// URL selects, what Esc does, who writes each job file, which run action a job
+// offers, which stages are live, and each file tone's colour.
 import { describe, expect, test } from 'bun:test'
-import { COLUMNS, columnIndex, escapeAction, fileWriter, jobAction, selectedJobId } from '../../app/utils/board'
+import { COLUMNS, LIVE_STAGES, columnIndex, escapeAction, fileWriter, jobAction, selectedJobId, toneColor } from '../../app/utils/board'
 import { STAGES } from './types'
 
 describe('columnIndex', () => {
@@ -109,5 +110,20 @@ describe('jobAction', () => {
     for (const stage of ['needs-human', 'needs-info', 'merged', 'rejected'] as const) {
       expect(jobAction({ stage, running: false, error: undefined })).toBeNull()
     }
+  })
+})
+
+describe('LIVE_STAGES', () => {
+  test('every stage that is neither finished nor waiting, in stage order', () => {
+    expect([...LIVE_STAGES]).toEqual(['intake', 'spec', 'build', 'gate', 'review', 'approve', 'merging'])
+  })
+})
+
+describe('toneColor', () => {
+  test('a file tone picks its dot colour', () => {
+    expect(toneColor('good')).toBe('bg-success')
+    expect(toneColor('warn')).toBe('bg-warning')
+    expect(toneColor('stop')).toBe('bg-error')
+    expect(toneColor(null)).toBe('bg-accented')
   })
 })
