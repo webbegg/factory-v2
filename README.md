@@ -24,6 +24,15 @@ APPROVE. Gating again reuses the round gate's pass, without re-running
 `checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
 `BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
 
+The board's **Inbox** lists what waits on you: escalated (needs-human) jobs and
+stalled jobs, each once. Jobs whose intake asked the issue's author a question
+are listed apart, under "Waiting on the author", and don't count. The tab title
+shows that count, e.g. `(2) Factory`, as does the Inbox badge in the header.
+Browser notifications for a job that newly needs your call or stalls are opt-in:
+turn them on in Settings, which is the only place the browser asks for
+permission. The choice is kept per browser, and notifications arrive only while
+the board is open.
+
 The orchestrator is deterministic TypeScript; only the judgment steps are
 agents (Claude Agent SDK). Every step writes one markdown file in
 `.factory/jobs/<job>/`, so a stopped factory resumes where it was.
