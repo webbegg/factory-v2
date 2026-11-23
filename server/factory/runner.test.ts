@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { bashRefusal, toolRefusal } from './agents/runner'
+import { agentEnv, bashRefusal, browserSocketDir, sandboxSettings, toolRefusal } from './agents/runner'
+import type { AgentTask } from './agents/runner'
 
 const BRANCH = 'factory/001-x'
 const builder = (cmd: string) => bashRefusal(cmd, 'builder', BRANCH)
@@ -148,5 +149,127 @@ describe('toolRefusal', () => {
     expect(toolRefusal('Write', { file_path: '/jobs/1/decision.md' }, task)).toContain('only lets reviewer-code write')
     expect(toolRefusal('Write', { file_path: '/jobs/1/round-1/review-code.md' }, task)).toBeNull()
     expect(toolRefusal('Read', { file_path: '/anything' }, task)).toBeNull()
+  })
+})
+
+describe('agentEnv (#49)', () => {
+  const sandbox = { gitDir: '/r/.git', domains: [] }
+  const base = { PATH: '/bin', HOME: '/h' }
+
+  test('unsandboxed agents get the factory\'s env as it is', () => {
+    expect(agentEnv({ agent: 'builder', jobId: '1' }, base, 'gho_x')).toEqual({ ...base, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' })
+  })
+
+  test('a sandboxed builder gets the GitHub token and a git helper that reads it, since the keychain is closed in the sandbox', () => {
+    const env = agentEnv({ agent: 'builder', jobId: '1', sandbox }, base, 'gho_x')
+    expect(env.GH_TOKEN).toBe('gho_x')
+    expect(env.GIT_CONFIG_COUNT).toBe('2')
+    expect([env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_VALUE_0]).toEqual(['credential.https://github.com.helper', ''])
+    expect([env.GIT_CONFIG_KEY_1, env.GIT_CONFIG_VALUE_1]).toEqual(['credential.https://github.com.helper', '!gh auth git-credential'])
+  })
+
+  test('a token already in the env wins; git config entries already in the env are kept', () => {
+    const env = agentEnv({ agent: 'builder', jobId: '1', sandbox }, { ...base, GH_TOKEN: 'mine', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }, 'gho_x')
+    expect(env.GH_TOKEN).toBe('mine')
+    expect(env.GIT_CONFIG_COUNT).toBe('3')
+    expect([env.GIT_CONFIG_KEY_0, env.GIT_CONFIG_VALUE_0]).toEqual(['a.b', 'c'])
+    expect(env.GIT_CONFIG_KEY_2).toBe('credential.https://github.com.helper')
+  })
+
+  test('other sandboxed agents get no token and no helper', () => {
+    const env = agentEnv({ agent: 'reviewer-code', jobId: '1', sandbox }, base, 'gho_x')
+    expect(env.GH_TOKEN).toBeUndefined()
+    expect(env.GIT_CONFIG_COUNT).toBeUndefined()
+    expect(env.AGENT_BROWSER_SOCKET_DIR).toBeUndefined()
+  })
+
+  test('sandboxed agents that look at pages get their own agent-browser socket folder', () => {
+    for (const agent of ['builder', 'reviewer-ux', 'reviewer-ui'] as const) {
+      expect(agentEnv({ agent, jobId: '031-a-long-job-name-like-real-ones', sandbox }, base, null).AGENT_BROWSER_SOCKET_DIR)
+        .toBe(browserSocketDir({ agent, jobId: '031-a-long-job-name-like-real-ones' }))
+    }
+    expect(agentEnv({ agent: 'reviewer-ui', jobId: '1' }, base, null).AGENT_BROWSER_SOCKET_DIR).toBeUndefined()
+  })
+
+  test('socket folders are short (macOS caps a socket path at 104 bytes) and differ per job and agent', () => {
+    const a = browserSocketDir({ agent: 'reviewer-ui', jobId: '031-a-long-job-name-like-real-ones-and-then-some' })
+    expect(a.length).toBeLessThan(40)
+    expect(a).not.toBe(browserSocketDir({ agent: 'reviewer-ux', jobId: '031-a-long-job-name-like-real-ones-and-then-some' }))
+    expect(a).not.toBe(browserSocketDir({ agent: 'reviewer-ui', jobId: '032-other' }))
+  })
+})
+
+describe('sandboxSettings (#49)', () => {
+  const GIT = '/r/.git'
+  const WT = '/r/.worktrees/001-x'
+  const task = (agent: AgentTask['agent'], writable: string[], sandbox: AgentTask['sandbox'] = { gitDir: GIT, domains: [] }) =>
+    ({ agent, jobId: '001-x', cwd: WT, branch: BRANCH, writable, sandbox })
+  const builder = sandboxSettings(task('builder', [`${WT}/`, '/r/.factory/jobs/001-x/build.md']))!
+  const reviewer = sandboxSettings(task('reviewer-code', ['/r/.factory/jobs/001-x/round-1/review-code.md']))!
+  const ui = sandboxSettings(task('reviewer-ui', ['/r/.factory/jobs/001-x/round-1/review-ui.md', '/r/.factory/jobs/001-x/round-1/screenshots-ui/']))!
+
+  test('off unless the task asks for it', () => {
+    expect(sandboxSettings({ agent: 'builder', jobId: '001-x', cwd: WT, writable: [] })).toBeUndefined()
+  })
+
+  test('every shell is sandboxed, fails closed and can\'t opt out per command', () => {
+    for (const s of [builder, reviewer, ui]) {
+      expect(s.enabled).toBe(true)
+      expect(s.failIfUnavailable).toBe(true)
+      expect(s.allowUnsandboxedCommands).toBe(false)
+      expect(s.network?.strictAllowlist).toBe(true)
+    }
+  })
+
+  test('writes: the agent\'s own files; the builder also what commit and push need in .git', () => {
+    expect(reviewer.filesystem?.allowWrite).toEqual(['/r/.factory/jobs/001-x/round-1/review-code.md'])
+    expect(ui.filesystem?.allowWrite).toContain('/r/.factory/jobs/001-x/round-1/screenshots-ui')
+    expect(builder.filesystem?.allowWrite).toEqual(expect.arrayContaining([
+      WT, '/r/.factory/jobs/001-x/build.md', `${GIT}/objects`, `${GIT}/refs`, `${GIT}/logs`, `${GIT}/worktrees/001-x`
+    ]))
+    // nothing grants the repo's config, hooks, other worktrees or other jobs
+    for (const s of [builder, reviewer, ui]) {
+      for (const w of s.filesystem?.allowWrite ?? []) {
+        expect(w === GIT || w === `${GIT}/config` || w.startsWith(`${GIT}/hooks`) || w === '/r/.factory/jobs' || w === '/r/.worktrees').toBe(false)
+      }
+    }
+  })
+
+  test('denied even inside what is writable: the worktree\'s .git file, the repo\'s config and hooks, the worktree\'s gitdir pointers', () => {
+    for (const s of [builder, reviewer, ui]) {
+      expect(s.filesystem?.denyWrite).toEqual(expect.arrayContaining([`${WT}/.git`, `${GIT}/config`, `${GIT}/hooks`, `${GIT}/info`]))
+    }
+    expect(builder.filesystem?.denyWrite).toEqual(expect.arrayContaining([
+      `${GIT}/worktrees/001-x/commondir`, `${GIT}/worktrees/001-x/gitdir`, `${GIT}/worktrees/001-x/config.worktree`
+    ]))
+  })
+
+  test('network: GitHub and the npm registry (plus configured hosts) for the builder, nothing for the rest', () => {
+    const extra = sandboxSettings(task('builder', [`${WT}/`], { gitDir: GIT, domains: ['pypi.org'] }))!
+    expect(builder.network?.allowedDomains).toEqual(expect.arrayContaining(['github.com', 'api.github.com', 'registry.npmjs.org']))
+    expect(extra.network?.allowedDomains).toContain('pypi.org')
+    expect(reviewer.network?.allowedDomains).toEqual([])
+    expect(ui.network?.allowedDomains).toEqual([])
+    // dev servers: the builder and the page reviewers bind local ports
+    expect(builder.network?.allowLocalBinding).toBe(true)
+    expect(ui.network?.allowLocalBinding).toBe(true)
+    expect(reviewer.network?.allowLocalBinding).toBe(false)
+    // agent-browser's daemon socket: written and connected to only in the agent's own folder
+    const sock = browserSocketDir({ agent: 'reviewer-ui', jobId: '001-x' })
+    expect(ui.filesystem?.allowWrite).toContain(sock)
+    expect(ui.network?.allowUnixSockets).toEqual([sock])
+    expect(reviewer.network?.allowUnixSockets).toBeUndefined()
+    expect(reviewer.filesystem?.allowWrite?.some(w => w.startsWith('/tmp/'))).toBe(false)
+  })
+
+  test('credentials: model keys hidden from every shell; GitHub tokens and gh config only for the builder', () => {
+    const env = (s: typeof builder) => (s.credentials?.envVars ?? []).map(e => (e as { name: string }).name)
+    const files = (s: typeof builder) => s.filesystem?.denyRead ?? []
+    for (const s of [builder, reviewer, ui]) expect(env(s)).toEqual(expect.arrayContaining(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']))
+    expect(env(reviewer)).toEqual(expect.arrayContaining(['GH_TOKEN', 'GITHUB_TOKEN']))
+    expect(env(builder)).not.toContain('GH_TOKEN')
+    expect(files(reviewer)).toEqual(expect.arrayContaining(['~/.ssh', '~/.config/gh', '~/.aws']))
+    expect(files(builder)).toContain('~/.ssh')
+    expect(files(builder)).not.toContain('~/.config/gh')
   })
 })

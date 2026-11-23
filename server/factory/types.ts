@@ -104,6 +104,12 @@ export interface FactoryConfig {
     /** checks still pending this long after the push send the job to a human */
     minutes: number
   }
+  /** agents' shells run in the Claude Agent SDK sandbox (OS-level write, network and credential limits) */
+  sandbox: {
+    enabled: boolean
+    /** hosts the builder may reach beyond GitHub and the npm registry (another package registry, say) */
+    domains: string[]
+  }
 }
 
 export interface FactoryPaths {

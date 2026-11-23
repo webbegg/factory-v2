@@ -124,6 +124,21 @@ describe('orchestrator', () => {
     expect(build.message).toContain(`Write your report to ${join(build.jobDir, 'build.md')}.`)
   })
 
+  test('with sandbox on, every agent run carries the repo\'s .git and the configured hosts; off, none does (#49)', async () => {
+    const on = await factory({ ...happy }, { sandbox: { enabled: true, domains: ['pypi.org'] } })
+    on.env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await on.orch.drain()
+    await on.orch.idle()
+    expect(on.runner.tasks.length).toBeGreaterThan(3)
+    for (const t of on.runner.tasks) expect(t.sandbox).toEqual({ gitDir: join(on.env.paths.repo, '.git'), domains: ['pypi.org'] })
+
+    const off = await factory({ ...happy })
+    off.env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await off.orch.drain()
+    await off.orch.idle()
+    for (const t of off.runner.tasks) expect(t.sandbox).toBeUndefined()
+  })
+
   test('a report answered as the final reply instead of written is saved for the agent', async () => {
     const report = 'VERDICT: PASS\n\n## Summary\n- fine'
     const { env, orch } = await factory({ ...happy, 'reviewer-code': () => ({ reply: report }) })

@@ -793,6 +793,7 @@ export class Orchestrator extends EventEmitter {
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
       branch: job.branch,
+      sandbox: this.o.config.sandbox.enabled ? { gitDir: join(paths.repo, '.git'), domains: this.o.config.sandbox.domains } : undefined,
       maxTurns: this.o.config.limits.agentTurns,
       maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,

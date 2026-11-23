@@ -1,4 +1,8 @@
-import { basename, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
+import { basename, join, resolve } from 'node:path'
+import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk'
+import { run } from '../exec'
 import type { AgentName } from './prompts'
 
 export interface AgentEvent {
@@ -22,6 +26,8 @@ export interface AgentTask {
   writable: string[]
   /** the job branch: the only one the builder may push */
   branch?: string
+  /** run the agent's shell in the SDK sandbox; `gitDir` is the main checkout's .git */
+  sandbox?: { gitDir: string, domains: string[] }
   maxTurns?: number
   maxBudgetUsd?: number
   /** Agent SDK session to continue */
@@ -250,6 +256,98 @@ export function toolRefusal(tool: string, input: unknown, task: Pick<AgentTask, 
   return `The factory only lets ${task.agent} write: ${task.writable.join(', ')}`
 }
 
+// ---- SDK sandbox ------------------------------------------------------------
+//
+// The guard reads commands; the sandbox contains what they do. It covers the
+// Bash tool only: Write and Edit stay with the PreToolUse hook above.
+
+const GITHUB_HOSTS = ['github.com', 'api.github.com', '*.githubusercontent.com']
+const REGISTRY_HOSTS = ['registry.npmjs.org']
+/** agents that start a dev server and look at it */
+const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
+/** the claude process keeps these; no shell needs them */
+const MODEL_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']
+/** only the builder pushes and opens its PR */
+const GITHUB_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
+/**
+ * agent-browser's daemon socket folder for one sandboxed agent. Its default,
+ * ~/.agent-browser, also holds the browser it launches, so it stays read-only.
+ * Short, since macOS caps a socket path at 104 bytes.
+ */
+export function browserSocketDir(task: Pick<AgentTask, 'jobId' | 'agent'>): string {
+  return join('/tmp', 'factory-ab', createHash('sha256').update(`${task.jobId}/${task.agent}`).digest('hex').slice(0, 12))
+}
+
+const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json']
+const GITHUB_FILES = ['~/.config/gh', '~/.git-credentials']
+
+/**
+ * The SDK sandbox for one agent's shell: writes only to its own files (the
+ * builder also to what commit and push touch in .git), network only for the
+ * builder, and no credentials it doesn't need. Commands may not opt out.
+ */
+export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'jobId' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
+  if (!task.sandbox) return undefined
+  const { gitDir, domains } = task.sandbox
+  const builder = task.agent === 'builder'
+  const serves = SERVES.has(task.agent)
+  const worktreeGit = join(gitDir, 'worktrees', basename(task.cwd))
+  const sockets = browserSocketDir(task)
+  const allowWrite = task.writable.map(w => w.replace(/\/+$/, ''))
+  if (serves) allowWrite.push(sockets)
+  // objects and refs for commits and the remote-tracking ref a push updates; the worktree's own index and HEAD
+  if (builder) allowWrite.push(join(gitDir, 'objects'), join(gitDir, 'refs'), join(gitDir, 'logs'), join(gitDir, 'packed-refs'), worktreeGit)
+  return {
+    enabled: true,
+    failIfUnavailable: true,
+    allowUnsandboxedCommands: false,
+    filesystem: {
+      allowWrite,
+      // the shell may write its working folder (the worktree), but never the file that tells git where its repo is
+      denyWrite: [
+        join(task.cwd, '.git'), join(gitDir, 'config'), join(gitDir, 'hooks'), join(gitDir, 'info'),
+        ...(builder ? ['commondir', 'gitdir', 'config.worktree'].map(f => join(worktreeGit, f)) : [])
+      ],
+      denyRead: builder ? SECRET_FILES : [...SECRET_FILES, ...GITHUB_FILES]
+    },
+    network: {
+      allowedDomains: builder ? [...GITHUB_HOSTS, ...REGISTRY_HOSTS, ...domains] : [],
+      strictAllowlist: true,
+      allowLocalBinding: serves,
+      ...(serves ? { allowUnixSockets: [sockets] } : {}),
+      // macOS: gh (Go) verifies TLS through trustd; the keychain itself stays closed
+      ...(builder ? { allowMachLookup: ['com.apple.trustd.agent'] } : {})
+    },
+    credentials: {
+      envVars: [...MODEL_ENV, ...(builder ? [] : GITHUB_ENV)].map(name => ({ name, mode: 'deny' as const }))
+    }
+  }
+}
+
+/**
+ * The agent process's environment. A sandboxed builder can't reach the
+ * keychain, where gh and git keep the GitHub login, so the factory hands it
+ * the token and a git credential helper that reads it. Through the env, not
+ * a config file: the guard refuses GIT_CONFIG_* from the agent itself.
+ */
+export function agentEnv(task: Pick<AgentTask, 'agent' | 'jobId' | 'sandbox'>, base: Record<string, string | undefined>, token: string | null): Record<string, string> {
+  const env: Record<string, string> = { CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' }
+  for (const [k, v] of Object.entries(base)) if (v !== undefined) env[k] = v
+  env.CLAUDE_AGENT_SDK_CLIENT_APP = 'factory-v2'
+  if (task.sandbox && SERVES.has(task.agent)) env.AGENT_BROWSER_SOCKET_DIR = browserSocketDir(task)
+  if (!task.sandbox || task.agent !== 'builder') return env
+  if (!env.GH_TOKEN && token) env.GH_TOKEN = token
+  const count = Number(env.GIT_CONFIG_COUNT) || 0
+  // an empty value first clears any github.com helper from the config files (osxkeychain, say)
+  const helpers = ['', '!gh auth git-credential']
+  helpers.forEach((value, i) => {
+    env[`GIT_CONFIG_KEY_${count + i}`] = 'credential.https://github.com.helper'
+    env[`GIT_CONFIG_VALUE_${count + i}`] = value
+  })
+  env.GIT_CONFIG_COUNT = String(count + helpers.length)
+  return env
+}
+
 function describeTool(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>
   const detail = i.command ?? i.file_path ?? i.pattern ?? i.path ?? ''
@@ -269,6 +367,10 @@ export class SdkRunner implements AgentRunner {
     let reply = ''
     let costUsd = 0
     let error: string | undefined
+    if (task.sandbox && SERVES.has(task.agent)) await mkdir(browserSocketDir(task), { recursive: true, mode: 0o700 })
+    const token = task.sandbox && task.agent === 'builder' && !process.env.GH_TOKEN
+      ? await run('gh', ['auth', 'token'], { cwd: task.cwd }).then(r => r.code === 0 ? r.stdout.trim() : null, () => null)
+      : null
     try {
       const stream = query({
         prompt: task.message,
@@ -284,7 +386,8 @@ export class SdkRunner implements AgentRunner {
           allowedTools: task.tools,
           permissionMode: 'dontAsk',
           settingSources: [],
-          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' },
+          sandbox: sandboxSettings(task),
+          env: agentEnv(task, process.env, token),
           hooks: {
             PreToolUse: [{
               hooks: [async (input) => {
