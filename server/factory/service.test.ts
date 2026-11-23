@@ -21,10 +21,28 @@ describe('job files', () => {
     const files = await jobFiles(env.store, '001-add-a-thing')
     expect(files.map(f => f.path)).toEqual([
       'issue.md', 'spec.md', 'feedback-1.md',
-      'round-1/checks.md', 'round-1/review-code.md', 'round-2/checks.md'
+      'round-1/checks.md', 'round-1/review-code.md', 'round-1/checks.log', 'round-2/checks.md'
     ])
     expect(files[3]).toEqual({ path: 'round-1/checks.md', first: 'GATE: PASS', tone: 'good' })
-    expect(files[5]!.tone).toBe('stop')
+    expect(files[6]!.tone).toBe('stop')
+  })
+
+  test('lists only round logs, after the round\'s markdown, with no tone', async () => {
+    const env = await makeEnv()
+    await seed(env, {}, {
+      'x.log': 'top',
+      'round-1/merge-checks.log': 'GATE: PASS\nmore',
+      'round-1/checks.log': 'bun run lint',
+      'round-1/checks.md': 'GATE: PASS\n',
+      'round-1/screenshots-ui/a.log': 'nested',
+      'round-1/checks.txt': 'other',
+      'round-2/checks.md': 'GATE: FAIL\n'
+    })
+    const files = await jobFiles(env.store, '001-add-a-thing')
+    expect(files.map(f => f.path)).toEqual([
+      'round-1/checks.md', 'round-1/checks.log', 'round-1/merge-checks.log', 'round-2/checks.md'
+    ])
+    expect(files[2]).toEqual({ path: 'round-1/merge-checks.log', first: 'GATE: PASS', tone: null })
   })
 
   test('screenshot folders are never listed, a review-named file inside one included', async () => {

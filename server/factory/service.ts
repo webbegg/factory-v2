@@ -157,7 +157,10 @@ const ROUND = ['checks', 'review-code', 'review-security', 'review-ux', 'review-
 function rank(path: string): [number, number, string] {
   if (TOP.includes(path)) return [0, TOP.indexOf(path), path]
   const m = /^round-(\d+)\/(.+)\.md$/.exec(path)
-  if (m) return [2, Number(m[1]) * 10 + ROUND.indexOf(m[2]!), path]
+  if (m) return [2, Number(m[1]) * 100 + ROUND.indexOf(m[2]!), path]
+  // a round's logs follow its markdown files, by name
+  const log = /^round-(\d+)\/.+\.log$/.exec(path)
+  if (log) return [2, Number(log[1]) * 100 + 50, path]
   return [1, 0, path]
 }
 
@@ -173,7 +176,7 @@ function checkId(id: string) {
   if (!SAFE_ID.test(id) || id.startsWith('.')) throw new Error(`bad job id ${id}`)
 }
 
-/** Every .md file of a job (one level of round folders), in reading order. */
+/** Every .md file of a job (one level of round folders) and each round's .log files, in reading order. */
 export async function jobFiles(store: JobStore, id: string): Promise<JobFile[]> {
   checkId(id)
   const dir = store.dir(id)
@@ -184,7 +187,7 @@ export async function jobFiles(store: JobStore, id: string): Promise<JobFile[]> 
     if (entry.isDirectory() && /^round-\d+$/.test(entry.name)) {
       // files only: a reviewer's screenshot folder is never a report
       for (const f of await readdir(join(dir, entry.name), { withFileTypes: true })) {
-        if (f.isFile() && f.name.endsWith('.md')) paths.push(`${entry.name}/${f.name}`)
+        if (f.isFile() && /\.(md|log)$/.test(f.name)) paths.push(`${entry.name}/${f.name}`)
       }
     }
   }
@@ -194,7 +197,8 @@ export async function jobFiles(store: JobStore, id: string): Promise<JobFile[]> 
   })
   return Promise.all(paths.map(async (path) => {
     const first = firstLine(await store.read(id, path) ?? '')
-    return { path, first, tone: tone(first) }
+    // a log's first line is command output, never a verdict
+    return { path, first, tone: path.endsWith('.log') ? null : tone(first) }
   }))
 }
 
