@@ -4,6 +4,19 @@ import type { ConfigUpdate } from '~~/server/factory/config'
 import type { FactoryConfig, Risk } from '~~/server/factory/types'
 
 const { act } = useBoard()
+const notifications = useNotifications()
+const { supported, permission, active: notifying } = notifications
+onMounted(notifications.recheckPermission)
+const notifyHelp = computed(() => {
+  if (!supported) return 'This browser doesn\'t support notifications.'
+  if (permission.value === 'denied') return 'Notifications are blocked for this site in the browser settings.'
+  return 'Notifies this browser, while the board is open, when a job needs your call or stalls.'
+})
+function toggleNotifications(on: boolean) {
+  if (on) void notifications.enable()
+  else notifications.disable()
+}
+
 const { data, error } = await useFetch<{ config: FactoryConfig, prompts: { name: AgentName, overridden: boolean, addendum: boolean }[] }>('/api/settings')
 
 const form = ref<ConfigUpdate | null>(null)
@@ -156,6 +169,21 @@ async function save() {
           description=".factory/config.json is committed in the repo, so commit this change too."
         />
       </form>
+    </UCard>
+
+    <UCard>
+      <div class="space-y-3">
+        <h2 class="text-sm font-semibold text-highlighted">
+          Notifications
+        </h2>
+        <USwitch
+          :model-value="notifying"
+          :disabled="!supported || permission === 'denied'"
+          label="Browser notifications"
+          :description="notifyHelp"
+          @update:model-value="toggleNotifications"
+        />
+      </div>
     </UCard>
 
     <UCard v-if="data">
