@@ -15,6 +15,7 @@ node_modules
 # Logs
 logs
 *.log
+!fixtures/board/.factory/jobs/*/round-*/*.log
 
 # Misc
 .DS_Store

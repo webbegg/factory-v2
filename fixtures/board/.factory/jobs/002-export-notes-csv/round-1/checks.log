@@ -1,0 +1,51 @@
+$ bun run lint
+$ eslint .
+
+$ bun run typecheck
+$ nuxt typecheck
+[nuxi] ℹ Running with compatibility version 4
+[nuxi] ✔ Types generated in .nuxt
+
+$ bun run test
+$ bun test
+bun test v1.3.1
+
+app/utils/csv.test.ts:
+✓ toCsv > quotes fields with commas [0.41ms]
+✓ toCsv > escapes double quotes [0.08ms]
+✓ toCsv > keeps line breaks inside quoted fields [0.06ms]
+✓ toCsv > writes a header row from the column names [0.05ms]
+
+server/api/notes.test.ts:
+✓ GET /api/notes/export > returns text/csv [3.12ms]
+✓ GET /api/notes/export > names the file after the notebook [1.07ms]
+✓ GET /api/notes/export > an empty notebook is just the header [0.88ms]
+
+# not a heading: this line starts with a hash
+**not bold**: the log viewer shows markdown literally
+
+ 7 pass
+ 0 fail
+ 19 expect() calls
+Ran 7 tests across 2 files. [142.00ms]
+
+$ bun run build
+$ nuxt build
+[nuxi] ℹ Building for Nitro preset: node-server
+ℹ Building client...
+ℹ vite v7.1.9 building for production...
+ℹ transforming...
+ℹ ✓ 1784 modules transformed.
+ℹ rendering chunks...
+ℹ computing gzip size...
+ℹ .nuxt/dist/client/manifest.json                     4.91 kB │ gzip:  0.74 kB
+ℹ .nuxt/dist/client/_nuxt/entry.CsV3x2kQ.css         61.20 kB │ gzip: 10.84 kB
+ℹ .nuxt/dist/client/_nuxt/notes.BHn2e8Ra.js           6.02 kB │ gzip:  2.33 kB
+ℹ .nuxt/dist/client/_nuxt/entry.D1cG4nVq.js         412.77 kB │ gzip: 132.05 kB
+ℹ ✓ built in 4.81s
+✔ Client built in 4852ms
+ℹ Building server...
+✔ Server built in 1203ms
+[nitro] ✔ Generated public .output/public
+[nitro] ✔ Nuxt Nitro server built
+Σ Total size: 2.41 MB (601 kB gzip)
