@@ -445,3 +445,157 @@ describe('reject', () => {
     await expect(env.machine.advance(ID, 'rejected')).rejects.toThrow('use reject')
   })
 })
+
+type Env = Awaited<ReturnType<typeof makeEnv>>
+
+/** The next editLabels call throws, as GitHub might after an earlier step went through. */
+function labelsFailOnce(env: Env) {
+  const edit = env.github.editLabels.bind(env.github)
+  let failed = false
+  env.github.editLabels = async (...args) => {
+    if (failed) return edit(...args)
+    failed = true
+    throw new Error('gh: 502')
+  }
+}
+
+const issueComments = (env: Env) => env.github.calls.filter(c => c[0] === 'comment' && c[1] === 'issue')
+
+describe('a move retried after a failed step', () => {
+  test('intake → needs-info posts its comment once and clears the record', async () => {
+    const env = await makeEnv()
+    await seed(env, {}, { 'intake.md': 'DECISION: NEEDS-INFO\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Questions\n1. which?\n' })
+    labelsFailOnce(env)
+    await expect(env.machine.advance(ID, 'needs-info')).rejects.toThrow('gh: 502')
+    const pending = await env.store.load(ID)
+    expect(pending.stage).toBe('intake')
+    expect(pending.move?.from).toBe('intake')
+    expect(pending.move?.to).toBe('needs-info')
+    expect(pending.move?.done.filter(k => k.startsWith('comment:'))).toHaveLength(1)
+
+    await env.machine.advance(ID, 'needs-info')
+    expect(issueComments(env)).toHaveLength(1)
+    expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-info'] }])
+    const saved = await env.store.load(ID)
+    expect(saved.stage).toBe('needs-info')
+    expect(saved.move).toBeNull()
+  })
+
+  test('needs-info → intake can be retried after the rename', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-info' }, { 'intake.md': 'DECISION: NEEDS-INFO\n' })
+    env.github.addIssue({ number: 1 })
+    labelsFailOnce(env)
+    await expect(env.machine.advance(ID, 'intake')).rejects.toThrow('gh: 502')
+    expect((await env.store.load(ID)).move?.done).toEqual(['rename:intake.md'])
+
+    const job = await env.machine.advance(ID, 'intake')
+    expect(job.stage).toBe('intake')
+    expect(job.intake).toBeNull()
+    expect(await env.store.read(ID, 'intake-1.md')).toBe('DECISION: NEEDS-INFO\n')
+    expect(await env.store.read(ID, 'intake-2.md')).toBeNull()
+    expect(await env.store.files(ID, /^intake/)).toEqual(['intake-1.md'])
+    expect((await env.store.load(ID)).move).toBeNull()
+  })
+
+  test('a record from another move skips nothing', async () => {
+    const env = await makeEnv()
+    await seed(env, { agents: REVIEWERS }, { 'intake.md': ACCEPT })
+    const add = env.git.addWorktree.bind(env.git)
+    let failed = false
+    env.git.addWorktree = async (...args) => {
+      if (failed) return add(...args)
+      failed = true
+      throw new Error('git: busy')
+    }
+    await expect(env.machine.advance(ID, 'spec')).rejects.toThrow('git: busy')
+    const pending = await env.store.load(ID)
+    const done = pending.move!.done
+    expect(done.filter(k => k.startsWith('comment:'))).toHaveLength(1)
+
+    // the same comment key, but recorded for a different move
+    await env.store.save({ ...pending, move: { from: 'intake', to: 'needs-info', done } })
+    const job = await env.machine.advance(ID, 'spec')
+    expect(job.stage).toBe('spec')
+    expect(issueComments(env)).toHaveLength(2)
+    expect(issueComments(env)[1]![3]).toStartWith('### Factory intake: ACCEPT')
+    expect((await env.store.load(ID)).move).toBeNull()
+  })
+
+  test('reject retried after a failed branch delete closes the PR and comments once', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    const del = env.git.deleteRemoteBranch.bind(env.git)
+    let failed = false
+    env.git.deleteRemoteBranch = async (branch) => {
+      if (failed) return del(branch)
+      failed = true
+      throw new Error('push: denied')
+    }
+    await expect(env.machine.reject(ID, 'No.', 'me')).rejects.toThrow('push: denied')
+    await env.machine.reject(ID, 'No.', 'me')
+    expect(issueComments(env)).toHaveLength(1)
+    expect(env.github.calls.filter(c => c[0] === 'close')).toHaveLength(1)
+    expect(env.github.calls.filter(c => c[0] === 'labels')).toHaveLength(1)
+    expect(env.git.calls.filter(c => c[0] === 'deleteRemoteBranch')).toHaveLength(1)
+    expect((await env.store.load(ID)).stage).toBe('rejected')
+  })
+})
+
+describe('answer', () => {
+  test('only a needs-info job can be answered', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'spec' })
+    let calls = 0
+    const reply = async () => {
+      calls += 1
+    }
+    await expect(env.machine.answer(ID, 'blue', reply)).rejects.toThrow('not needs-info')
+    expect(calls).toBe(0)
+  })
+
+  test('refused for concurrency, then repeated after the slot frees, posts one reply', async () => {
+    const env = await makeEnv({ concurrency: 1 })
+    await seed(env, { stage: 'needs-info' }, { 'intake.md': 'DECISION: NEEDS-INFO\n' })
+    const busy = await seed(env, { id: '002-busy', issue: 2, stage: 'build' })
+    env.github.addIssue({ number: 1 })
+    const replies: Array<[number, string]> = []
+    const reply = async (n: number, text: string) => {
+      replies.push([n, text])
+    }
+    await expect(env.machine.answer(ID, 'Use blue.', reply)).rejects.toThrow('concurrency 1 reached')
+    expect(replies).toEqual([])
+    await env.store.save({ ...busy, stage: 'merged' })
+    const job = await env.machine.answer(ID, 'Use blue.', reply)
+    expect(job.stage).toBe('intake')
+    expect(replies).toEqual([[1, 'Use blue.']])
+    expect((await env.store.load(ID)).move).toBeNull()
+  })
+
+  test('a move that fails after the reply, answered again with the same text, posts one reply', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-info' }, { 'intake.md': 'DECISION: NEEDS-INFO\n' })
+    let calls = 0
+    const reply = async () => {
+      calls += 1
+    }
+    env.github.addIssue({ number: 1 })
+    labelsFailOnce(env)
+    await expect(env.machine.answer(ID, 'Use blue.', reply)).rejects.toThrow('gh: 502')
+    expect((await env.store.load(ID)).stage).toBe('needs-info')
+    const job = await env.machine.answer(ID, 'Use blue.', reply)
+    expect(job.stage).toBe('intake')
+    expect(calls).toBe(1)
+    expect(await env.store.files(ID, /^intake/)).toEqual(['intake-1.md'])
+  })
+
+  test('the reply is on the issue before the issue is read again', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-info' }, { 'intake.md': 'DECISION: NEEDS-INFO\n' })
+    env.github.addIssue({ number: 1 })
+    await env.machine.answer(ID, 'Use blue.', async (n, text) => {
+      env.github.issues.get(n)!.comments.push({ author: 'operator', body: text, createdAt: '2026-11-20T11:30:00Z' })
+    })
+    expect(await env.store.read(ID, 'issue.md')).toContain('> Use blue.')
+  })
+})

@@ -115,7 +115,7 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move'] as const
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -254,10 +254,7 @@ export class Orchestrator extends EventEmitter {
 
   /** The operator answers intake's questions on the issue; the job goes back to intake. */
   async answer(id: string, text: string, reply: (issue: number, body: string) => Promise<void>): Promise<Job> {
-    const job = await this.o.store.load(id)
-    if (job.stage !== 'needs-info') throw new Refused(`${id} is in ${job.stage}, not needs-info`)
-    await reply(job.issue, text)
-    const next = await this.o.machine.advance(id, 'intake')
+    const next = await this.o.machine.answer(id, text, reply)
     this.start(id)
     return next
   }
