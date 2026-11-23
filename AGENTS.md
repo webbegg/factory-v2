@@ -20,7 +20,10 @@ view; this file is for whoever changes the code.
   in the same session, when its report is missing or its first line invalid,
   while the builder's one second try stays in `build()`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
-  `setup.ts` (`init` / `doctor`), `service.ts` (what the server and CLI share),
+  `setup.ts` (`init` / `doctor`; `baseChecks` runs `checks.sh` on
+  `origin/<base>` in a temporary detached worktree through the gate's
+  `runChecksScript`, and `doctor(repo, { baseChecks: true })`, used only by the
+  CLI, includes it), `service.ts` (what the server and CLI share),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
   the board imports it too).
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
@@ -36,7 +39,9 @@ view; this file is for whoever changes the code.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
-  `useFactory()` so they work before `.factory/config.json` exists.
+  `useFactory()` so they work before `.factory/config.json` exists;
+  `setup/base-checks.post.ts` is the slow base `checks.sh` run, kept off
+  `GET /api/setup`.
   `server/middleware/local-only.ts` applies `requestRefusal` (`service.ts`):
   foreign Host headers, API calls from another Origin or with
   `Sec-Fetch-Site` other than same-origin/none, and non-JSON writes are
