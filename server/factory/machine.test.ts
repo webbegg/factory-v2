@@ -366,6 +366,51 @@ describe('feedback', () => {
   })
 })
 
+describe('approve', () => {
+  test('needs-human → merging with an operator APPROVE and a fresh round budget, in the same round', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 3, roundLimit: 3, pr: 9 }, { 'decision.md': 'ESCALATE\n\n## Why\nx\n' })
+    const job = await env.machine.approve(ID, 'octocat')
+    expect(job).toMatchObject({ stage: 'merging', round: 3, roundLimit: 6 })
+    expect(await env.store.read(ID, 'decision-1.md')).toBe('ESCALATE\n\n## Why\nx\n')
+    const decision = await env.store.read(ID, 'decision.md')
+    expect(decision).toStartWith('APPROVE\n')
+    expect(decision).toContain('@octocat')
+    expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { remove: ['factory:needs-human'] }])
+    expect(existsSync(env.store.path(ID, 'round-4'))).toBe(false)
+  })
+
+  test('a conflict left from before the approval is set aside', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 2, roundLimit: 2, pr: 9 }, {
+      'decision.md': 'ESCALATE\n', 'round-2/sync.md': '# Conflict\n'
+    })
+    await env.machine.approve(ID, 'octocat')
+    expect(await env.store.read(ID, 'round-2/sync.md')).toBeNull()
+    expect(await env.store.read(ID, 'round-2/sync-1.md')).toBe('# Conflict\n')
+    // a gate failure after this approval's clean sync escalates, though rounds remain
+    await env.store.write(ID, 'decision.md', 'ESCALATE\n\n## Why\ngate\n')
+    expect((await env.machine.advance(ID, 'needs-human')).stage).toBe('needs-human')
+  })
+
+  test('refused outside needs-human or without a PR', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'review', round: 1, pr: 9 })
+    await expect(env.machine.approve(ID, 'me')).rejects.toThrow('is in review, not needs-human')
+    await env.store.update(ID, j => ({ ...j, stage: 'needs-human', pr: null }))
+    await env.store.write(ID, 'decision.md', 'ESCALATE\n')
+    await expect(env.machine.approve(ID, 'me')).rejects.toThrow(Refused)
+    expect((await env.store.load(ID)).stage).toBe('needs-human')
+    expect(await env.store.read(ID, 'decision.md')).toBe('ESCALATE\n')
+  })
+
+  test('advance alone cannot move a needs-human job to merging', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    await expect(env.machine.advance(ID, 'merging')).rejects.toThrow('use approve')
+  })
+})
+
 describe('reject', () => {
   test('a waiting job: reason on the issue, labels off, PR closed, branch and worktree gone', async () => {
     const env = await makeEnv()
