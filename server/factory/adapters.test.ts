@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec } from './exec'
@@ -40,15 +40,15 @@ describe('GhCli', () => {
 
   test('writes: factory comments carry the marker; labels are comma-joined', async () => {
     calls.length = 0
-    await gh.comment('pr', 9, 'hello')
+    await gh.comment('pr', 9, 'hello from https://bot:hunter2@github.com/o/r')
     await gh.reply(7, 'my answer')
     await gh.editLabels('issue', 7, { add: ['a'], remove: ['b', 'c'] })
-    await gh.prMerge(9, 'squash')
+    await gh.prMerge(9, 'squash', 'abc123')
     expect(calls).toEqual([
-      ['pr', 'comment', '9', '--body', `${MARKER}\nhello`],
+      ['pr', 'comment', '9', '--body', `${MARKER}\nhello from https://***@github.com/o/r`],
       ['issue', 'comment', '7', '--body', 'my answer'],
       ['issue', 'edit', '7', '--add-label', 'a', '--remove-label', 'b,c'],
-      ['pr', 'merge', '9', '--squash']
+      ['pr', 'merge', '9', '--squash', '--match-head-commit', 'abc123']
     ])
   })
 
@@ -104,7 +104,8 @@ describe('GitCli against a real repo', () => {
     await sh(repo, 'config', 'user.email', 't@t')
     await sh(repo, 'config', 'user.name', 't')
     await writeFile(join(repo, 'a.txt'), 'a\n')
-    await sh(repo, 'add', 'a.txt')
+    await writeFile(join(repo, 'long.txt'), Array.from({ length: 20 }, (_, i) => `line ${i}\n`).join(''))
+    await sh(repo, 'add', 'a.txt', 'long.txt')
     await sh(repo, 'commit', '-qm', 'init')
     await sh(repo, 'push', '-q', 'origin', 'main')
     git = new GitCli(repo)
@@ -123,6 +124,12 @@ describe('GitCli against a real repo', () => {
     await exec('git', ['commit', '-qam', 'change'], { cwd: wt })
     expect(await git.commitsAhead(wt, 'origin/main')).toBe(1)
     expect(await git.changedFiles(wt, 'origin/main')).toEqual([{ status: 'M', path: 'a.txt' }])
+    // a rename reports both sides, so moving a file into a protected path is seen
+    await exec('git', ['mv', 'long.txt', 'moved.txt'], { cwd: wt })
+    await exec('git', ['commit', '-qm', 'rename'], { cwd: wt })
+    expect(await git.changedFiles(wt, 'origin/main')).toEqual([
+      { status: 'M', path: 'a.txt' }, { status: 'D', path: 'long.txt' }, { status: 'A', path: 'moved.txt' }
+    ])
 
     await git.push(wt, 'factory/001-x')
     expect(await git.remoteHead(wt, 'factory/001-x')).toBe(await git.head(wt))
@@ -132,6 +139,45 @@ describe('GitCli against a real repo', () => {
     await git.deleteRemoteBranch('factory/001-x')
     expect(existsSync(wt)).toBe(false)
   }, 30_000)
+
+  test('paths git would quote are reported as they are (verify B8)', async () => {
+    const wt2 = join(repo, '.worktrees', '002-q')
+    await git.addWorktree(wt2, 'factory/002-q', 'origin/main')
+    await mkdir(join(wt2, '.github/workflows'), { recursive: true })
+    await writeFile(join(wt2, '.github/workflows/dép.yml'), 'x\n')
+    await writeFile(join(wt2, 'tab\there.txt'), 'x\n')
+    await exec('git', ['add', '.'], { cwd: wt2 })
+    await exec('git', ['commit', '-qm', 'odd names'], { cwd: wt2 })
+    expect(await git.changedFiles(wt2, 'origin/main')).toEqual([
+      { status: 'A', path: '.github/workflows/dép.yml' }, { status: 'A', path: 'tab\there.txt' }
+    ])
+  }, 30_000)
+
+  test('fetch puts back a remote-tracking ref moved by hand (verify B3)', async () => {
+    const real = await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })
+    const fake = (await exec('git', ['commit-tree', '-m', 'forged', `${real.trim()}^{tree}`], { cwd: repo })).trim()
+    await exec('git', ['update-ref', 'refs/remotes/origin/main', fake], { cwd: repo })
+    await git.fetch(repo, 'main')
+    expect(await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })).toBe(real)
+  }, 30_000)
+
+  test('a tag or branch named origin/main can\'t shadow the remote-tracking ref (verify run 2, B4)', async () => {
+    const real = (await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim()
+    const fake = (await exec('git', ['commit-tree', '-m', 'forged', `${real}^{tree}`], { cwd: repo })).trim()
+    await exec('git', ['tag', 'origin/main', fake], { cwd: repo })
+    try {
+      expect((await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })).trim()).toBe(fake)
+      expect(await git.show(repo, 'refs/remotes/origin/main', 'a.txt')).toBe('a\n')
+    } finally {
+      await exec('git', ['tag', '-d', 'origin/main'], { cwd: repo })
+    }
+  }, 30_000)
+
+  test('show reads a file as committed on a ref, or null', async () => {
+    await writeFile(join(repo, 'a.txt'), 'uncommitted\n')
+    expect(await git.show(repo, 'origin/main', 'a.txt')).toBe('a\n')
+    expect(await git.show(repo, 'origin/main', 'nope.txt')).toBeNull()
+  })
 
   test('exec failures name the command and its stderr', async () => {
     expect(exec('git', ['rev-parse', 'nope'], { cwd: repo })).rejects.toThrow('`git rev-parse nope` failed')

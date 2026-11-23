@@ -63,9 +63,18 @@ export interface FactoryConfig {
   routing: Record<Risk, Record<string, string>>
   /** surface → extra reviewers (lens → model) */
   surfaceReviewers: Record<string, Record<string, string>>
-  /** glob patterns for files no job may modify or delete */
+  /** glob patterns for files no job may add, modify or delete (`.factory/*` always is) */
   protectedPaths: string[]
   ports: { base: number, step: number }
+  /** a hung test run or a looping agent must not hold a slot forever */
+  limits: {
+    /** checks.sh wall-clock limit, gate and builder stop check alike */
+    checksMinutes: number
+    /** turns per agent run */
+    agentTurns: number
+    /** USD per agent run (a resumed builder counts from the resume) */
+    agentBudgetUsd: number
+  }
 }
 
 export interface FactoryPaths {

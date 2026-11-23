@@ -20,8 +20,12 @@ view; this file is for whoever changes the code.
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
   `useFactory()` so they work before `.factory/config.json` exists.
-  `server/middleware/local-only.ts` rejects foreign Host headers and non-JSON
-  writes: keep every new write route a JSON POST. `server/api/uploads.post.ts`
+  `server/middleware/local-only.ts` applies `requestRefusal` (`service.ts`):
+  foreign Host headers, API calls from another Origin or with
+  `Sec-Fetch-Site` other than same-origin/none, and non-JSON writes are
+  refused: keep every new write route a JSON POST, and keep GET routes
+  read-only (the merged sweep runs in the orchestrator's tick, not in
+  `/api/queue`). `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
   to the text it then sends to the existing routes.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is

@@ -1,5 +1,5 @@
 // Default role prompts. A project can replace any of them with
-// .factory/agents/<name>.md. Each agent writes exactly one file whose first
+// .factory/agents/<name>.md committed on the base. Each agent writes exactly one file whose first
 // line is machine-readable, followed by a `## Summary` of 3–5 bullets.
 
 export type AgentName
@@ -234,7 +234,8 @@ in the job folder; never touch anything else in the main checkout.
 
 ## Test
 
-Run \`cd <worktree> && bash <main checkout>/.factory/checks.sh\`; it must pass,
+Run \`cd <worktree> && bash <(git show <base>:.factory/checks.sh)\` (the copy
+on the base, which is the one the gate runs); it must pass,
 because the gate runs exactly that next. Then verify each acceptance criterion
 and record the evidence. For visible criteria, start the dev server on your
 port and look with \`agent-browser --session <job-id>-builder\` if installed;
@@ -245,10 +246,11 @@ close it and stop only the server on your port afterwards.
 - Short one-line commit messages in the repo's style; one commit per piece of
   work. Stage explicit paths, never \`git add -A\`. Leave \`git status --porcelain\`
   empty.
-- \`git push -u origin <branch>\`, only your branch.
+- \`git push -u origin <branch>\`, naming your branch every time; the factory
+  refuses a push without it, a force push, and any other branch.
 - If \`gh pr view <branch>\` fails, open a draft:
   \`gh pr create --draft --base <base> --head <branch> --title "<spec title>" --body "Closes #<issue>"\`
-  plus your Summary. Afterwards just push. Never mark it ready, never merge.
+  plus your Summary. Afterwards push the same way. Never mark it ready, never merge.
 
 ## Write build.md (rewrite each round, keep the Log)
 

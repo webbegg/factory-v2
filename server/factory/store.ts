@@ -62,6 +62,16 @@ export class JobStore {
     await rename(this.path(id, from), this.path(id, to))
   }
 
+  /** Moves a top-level `name.md` aside as `name-<k>.md`, the next free k, so a new one can't be mistaken for it. */
+  async archive(id: string, rel: string): Promise<string | null> {
+    if (!existsSync(this.path(id, rel))) return null
+    const stem = rel.replace(/\.md$/, '')
+    const k = (await this.files(id, new RegExp(`^${stem}-\\d+\\.md$`))).length + 1
+    const to = `${stem}-${k}.md`
+    await this.move(id, rel, to)
+    return to
+  }
+
   async files(id: string, pattern: RegExp): Promise<string[]> {
     if (!existsSync(this.dir(id))) return []
     return (await readdir(this.dir(id))).filter(f => pattern.test(f)).sort()

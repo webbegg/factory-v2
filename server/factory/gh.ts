@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { UploadImage } from './attachments'
-import { exec } from './exec'
+import { exec, redact } from './exec'
 import { MARKER } from './issue'
 import type { GitHubPort, IssueData, PrState, ThreadKind } from './ports'
 
@@ -60,8 +60,9 @@ export class GhCli implements GitHubPort {
     }
   }
 
+  /** Factory text quotes git and gh output, which can hold a credential; it is redacted before posting. */
   async comment(kind: ThreadKind, number: number, body: string) {
-    await this.gh([kind, 'comment', String(number), '--body', `${MARKER}\n${body}`])
+    await this.gh([kind, 'comment', String(number), '--body', `${MARKER}\n${redact(body)}`])
   }
 
   /** A comment in the operator's own words (no marker), e.g. an answer to intake. */
@@ -92,8 +93,8 @@ export class GhCli implements GitHubPort {
     await this.gh(['pr', 'close', String(number)])
   }
 
-  async prMerge(number: number, method: 'merge' | 'squash' | 'rebase') {
-    await this.gh(['pr', 'merge', String(number), `--${method}`])
+  async prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string) {
+    await this.gh(['pr', 'merge', String(number), `--${method}`, '--match-head-commit', headSha])
   }
 
   openPrsForBranch(branch: string) {

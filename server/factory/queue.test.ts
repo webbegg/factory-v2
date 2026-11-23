@@ -56,8 +56,29 @@ describe('queue', () => {
     env.github.addIssue({ number: 1 })
     await seed(env, { id: '001-a', issue: 1, stage: 'review', round: 1, pr: 5 })
     env.github.prStates.set(5, 'MERGED')
+    await env.queue.sweepMerged(() => false)
     expect(rows(await env.queue.rows())).toEqual(['skip #1'])
     expect((await env.store.load('001-a')).stage).toBe('merged')
+  })
+
+  test('rows only read: listing the queue changes no job', async () => {
+    const env = await makeEnv()
+    env.github.addIssue({ number: 1 })
+    await seed(env, { id: '001-a', issue: 1, stage: 'review', round: 1, pr: 5 })
+    env.github.prStates.set(5, 'MERGED')
+    await env.queue.rows()
+    expect((await env.store.load('001-a')).stage).toBe('review')
+    expect(env.git.calls).toEqual([])
+  })
+
+  test('the merged sweep leaves alone the jobs the caller is driving', async () => {
+    const env = await makeEnv()
+    await seed(env, { id: '001-a', issue: 1, stage: 'review', round: 1, pr: 5 })
+    await seed(env, { id: '002-b', issue: 2, stage: 'build', round: 1, pr: 6 })
+    env.github.prStates.set(5, 'MERGED')
+    env.github.prStates.set(6, 'MERGED')
+    await env.queue.sweepMerged(id => id === '001-a')
+    expect((await env.store.list()).map(j => j.stage)).toEqual(['review', 'merged'])
   })
 })
 

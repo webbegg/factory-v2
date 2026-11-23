@@ -46,7 +46,7 @@ export function fileWriter(path: string): string {
   if (path === 'intake.md' || /^intake-\d+\.md$/.test(path)) return 'intake'
   if (path === 'spec.md') return 'the spec writer'
   if (path === 'build.md') return 'the builder'
-  if (path === 'decision.md') return 'the approver'
+  if (path === 'decision.md' || /^decision-\d+\.md$/.test(path)) return 'the approver'
   if (path === 'rejection.md' || /^feedback-\d+\.md$/.test(path)) return 'you'
   return 'the factory'
 }

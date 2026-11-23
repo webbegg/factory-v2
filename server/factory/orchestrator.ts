@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { lstat, mkdir, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate } from './gate'
+import { redact } from './exec'
 import { firstLine } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
@@ -65,6 +66,44 @@ const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
   'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
 }
 
+/** Every file under a job folder but job.json (the factory's own) and in-flight temp files, by relative path. */
+const LINK = '\0link:'
+
+/**
+ * Every file and link under a job folder but job.json (guarded by field, see
+ * TRUSTED) and in-flight temp files, by relative path. A link is recorded as
+ * itself, never followed, so a planted link to a forged verdict shows up.
+ */
+async function snapshot(dir: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>()
+  // walked by hand: a recursive readdir follows a planted directory link out of the folder
+  const walk = async (sub: string) => {
+    for (const entry of await readdir(join(dir, sub), { withFileTypes: true })) {
+      const rel = sub ? `${sub}/${entry.name}` : entry.name
+      if (entry.isDirectory()) await walk(rel)
+      else if (entry.isSymbolicLink()) files.set(rel, `${LINK}${await readlink(join(dir, rel)).catch(() => '')}`)
+      else if (entry.isFile() && rel !== 'job.json' && !entry.name.endsWith('.tmp')) files.set(rel, await readFile(join(dir, rel), 'utf8'))
+    }
+  }
+  if (existsSync(dir)) await walk('')
+  return files
+}
+
+/** job.json fields only the factory sets; an agent changing them could reroute or skip its own review. */
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents'] as const
+
+function trusted(job: Job): string {
+  return JSON.stringify(TRUSTED.map(k => job[k]))
+}
+
+async function mtime(path: string): Promise<number | null> {
+  try {
+    return (await stat(path)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
 /**
  * Deterministic driver of every job: takes work from the queue up to the
  * concurrency limit, runs the agent or script each stage needs, and moves the
@@ -80,6 +119,8 @@ export class Orchestrator extends EventEmitter {
   readonly errors = new Map<string, string>()
   /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
   private pending: number[] = []
+  /** set by shutdown: nothing new starts, queued issues included */
+  private stopped = false
 
   constructor(private o: OrchestratorOptions) {
     super()
@@ -163,6 +204,14 @@ export class Orchestrator extends EventEmitter {
     this.active.get(id)?.controller.abort()
   }
 
+  /** Stops draining, aborts every running agent and gate, and waits for their drivers to stop. */
+  async shutdown(): Promise<void> {
+    this.pause()
+    this.stopped = true
+    for (const a of this.active.values()) a.controller.abort()
+    await Promise.all([...this.active.values()].map(a => a.done))
+  }
+
   /** Resolves once no job is running in this process. */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()].map(a => a.done))
@@ -180,8 +229,10 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async fill() {
+    if (this.stopped) return
     await this.startPending()
     if (!this.draining) return
+    await this.o.queue.sweepMerged(id => this.active.has(id))
     for (const row of await this.o.queue.rows()) {
       if (row.action === 'new') {
         const job = await this.o.queue.create(row.issue)
@@ -226,13 +277,14 @@ export class Orchestrator extends EventEmitter {
   }
 
   private start(id: string) {
-    if (this.active.has(id)) return
+    if (this.active.has(id) || this.stopped) return
     const controller = new AbortController()
     this.errors.delete(id)
     const done = this.drive(id, controller.signal)
       .catch((err: Error) => {
-        this.errors.set(id, err.message)
-        this.send({ type: 'error', jobId: id, message: err.message })
+        const message = redact(err.message)
+        this.errors.set(id, message)
+        this.send({ type: 'error', jobId: id, message })
       })
       .finally(async () => {
         this.active.delete(id)
@@ -279,7 +331,8 @@ export class Orchestrator extends EventEmitter {
       case 'build':
         return this.build(job, signal)
       case 'gate': {
-        const result = await gate.run(job.id)
+        const result = await gate.run(job.id, { signal })
+        if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
         if (result.verdict === 'PASS') await machine.advance(job.id, 'review')
         else await machine.advance(job.id, job.round >= job.roundLimit ? 'needs-human' : 'build')
@@ -288,14 +341,16 @@ export class Orchestrator extends EventEmitter {
       case 'review':
         return this.review(job, signal)
       case 'approve': {
+        // an earlier round's APPROVE must never stand in for this round's decision
+        await store.archive(job.id, 'decision.md')
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
-        if (line === 'APPROVE') await merger.merge(job.id)
+        if (line === 'APPROVE') await merger.merge(job.id, signal)
         else await machine.advance(job.id, 'needs-human')
         return true
       }
       case 'merging':
-        await merger.merge(job.id)
+        await merger.merge(job.id, signal)
         return true
       default:
         return false
@@ -323,26 +378,40 @@ export class Orchestrator extends EventEmitter {
     const purpose = [this.buildPurpose(job), resuming ? 'A previous builder stopped mid-round: read build.md and git log to see how far it got.' : '']
       .filter(Boolean).join(' ')
     const stopCheck = async () => {
-      const checks = await gate.runChecks(job.worktree)
+      const checks = await gate.runChecks(job.worktree, signal)
       if (checks.code === 0) return null
       const tail = checks.output.trimEnd().split('\n').slice(-40).join('\n')
       return `.factory/checks.sh fails in your worktree (exit ${checks.code}); the gate will reject this build. `
         + `Fix it, or write STATUS: BLOCKED in build.md if you can't.\n\n${tail}`
     }
-    await this.agent(job, 'builder', signal, purpose, { stopCheck })
-    const status = firstLine(await store.read(job.id, 'build.md') ?? '')
-    if (status === 'STATUS: BLOCKED') {
-      await machine.advance(job.id, 'needs-human')
-      return true
+    const report = store.path(job.id, 'build.md')
+    const runBuilder = async (j: Job, why: string) => {
+      const before = await mtime(report)
+      await this.agent(j, 'builder', signal, why, { stopCheck })
+      return async () => {
+        // last round's READY must not pass for this round's
+        if (before !== null && before === await mtime(report)) {
+          throw new Refused(`build.md wasn't updated in this run; rewrite it for round ${job.round}`)
+        }
+      }
+    }
+    let updated = await runBuilder(job, purpose)
+    const toGate = async () => {
+      await updated()
+      if (firstLine(await store.read(job.id, 'build.md') ?? '') === 'STATUS: BLOCKED') {
+        await machine.advance(job.id, 'needs-human')
+      } else {
+        await machine.advance(job.id, 'gate')
+      }
     }
     try {
-      await machine.advance(job.id, 'gate')
+      await toGate()
     } catch (err) {
       if (!(err instanceof Refused)) throw err
       // one more try: tell the same builder what the factory refused
-      await this.agent(await store.load(job.id), 'builder', signal,
-        `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`, { stopCheck })
-      await machine.advance(job.id, 'gate')
+      updated = await runBuilder(await store.load(job.id),
+        `The factory refused to gate this build: ${err.message}. Fix that and update build.md.`)
+      await toGate()
     }
     return true
   }
@@ -352,12 +421,16 @@ export class Orchestrator extends EventEmitter {
     // a resumed review may already have some verdicts on disk
     this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     const lenses = Object.keys(job.agents?.reviewers ?? {})
-    const missing = lenses.filter(r => !existsSync(store.path(job.id, `round-${job.round}/review-${r}.md`)))
-    await Promise.all(missing.map(async (r) => {
+    const written = async (r: string) => (await lstat(store.path(job.id, `round-${job.round}/review-${r}.md`)).catch(() => null))?.isFile()
+    const missing: string[] = []
+    for (const r of lenses) if (!await written(r)) missing.push(r)
+    // One at a time: with reviewers side by side, the watch could not tell
+    // which of them wrote a verdict, so one could overwrite another's.
+    for (const r of missing) {
       await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
-      // show each verdict on the board as it lands, not when the slowest reviewer ends
+      // show each verdict on the board as it lands
       this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
-    }))
+    }
     const synced = await machine.sync(await store.load(job.id))
     const changes = Object.values(synced.reviews).some(v => v === 'CHANGES')
     if (!changes) await machine.advance(job.id, 'approve')
@@ -380,9 +453,13 @@ export class Orchestrator extends EventEmitter {
     return base + step * Number.parseInt(job.id, 10) + offset
   }
 
+  /** A prompt override counts only once it is committed on the base, where no agent can write it. */
   private async prompt(agent: AgentName): Promise<string> {
-    const override = join(this.o.paths.factory, 'agents', `${agent}.md`)
-    return existsSync(override) ? readFile(override, 'utf8') : PROMPTS[agent]
+    const { paths, ports, config } = this.o
+    // an agent can move the local origin/<base>; fetching first puts it back
+    await ports.git.fetch(paths.repo, config.baseBranch)
+    const override = await ports.git.show(paths.repo, `refs/remotes/origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
+    return override ?? PROMPTS[agent]
   }
 
   private model(job: Job, agent: AgentName): string {
@@ -409,6 +486,22 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
+   * Agents end by replying with their report's first line. A report whose
+   * verdict says otherwise was rewritten by something else while the agent ran
+   * (a process a builder left behind), so it is refused, not trusted.
+   */
+  private async matchesReply(job: Job, agent: AgentName, reply: string) {
+    const head = REPORT_HEAD[agent]
+    const said = firstLine(reply)
+    const report = this.report(job, agent)
+    if (!head?.test(said) || !existsSync(report)) return
+    const wrote = firstLine(await readFile(report, 'utf8'))
+    if (head.test(wrote) && wrote !== said) {
+      throw new Error(`${agent} replied '${said}' but ${relative(this.o.store.dir(job.id), report)} starts with '${wrote}'; it was changed behind the agent`)
+    }
+  }
+
+  /**
    * Agents sometimes end with their report as the final reply instead of
    * writing it. When the reply is a well-formed report, keep it rather than
    * stalling the job over a missing file.
@@ -420,6 +513,50 @@ export class Orchestrator extends EventEmitter {
     await mkdir(dirname(report), { recursive: true })
     await writeFile(report, `${reply.trimEnd()}\n`)
     this.send({ type: 'log', message: `${job.id}: ${agent} replied with its report instead of writing it; saved it` })
+  }
+
+  /**
+   * Agents have a shell, so the write list alone doesn't hold. Snapshots what
+   * an agent may not change, and after it runs undoes and refuses any change to
+   * the job folder beyond its report, or to the branch by an agent that only reads.
+   */
+  private async watch(job: Job, agent: AgentName) {
+    const { git } = this.o.ports
+    const dir = this.o.store.dir(job.id)
+    const own = relative(dir, this.report(job, agent))
+    const allowed = (rel: string) => rel === own
+    const readsBranch = agent !== 'builder' && agent !== 'intake' && existsSync(job.worktree)
+    const files = await snapshot(dir)
+    const fields = await this.o.store.load(job.id)
+    const branch = readsBranch ? { head: await git.head(job.worktree), clean: await git.isClean(job.worktree) } : null
+    return {
+      check: async () => {
+        const now = await snapshot(dir)
+        const changes: string[] = []
+        for (const [rel, text] of files) {
+          if (allowed(rel) || now.get(rel) === text) continue
+          changes.push(`${rel} (${now.has(rel) ? 'changed' : 'deleted'})`)
+          await this.o.store.write(job.id, rel, text)
+        }
+        for (const [rel, text] of now) {
+          if (allowed(rel) ? !text.startsWith(LINK) : files.has(rel)) continue
+          changes.push(`${rel} (added)`)
+          await rm(join(dir, rel), { force: true })
+        }
+        const after = await this.o.store.load(job.id)
+        if (trusted(after) !== trusted(fields)) {
+          const bad = TRUSTED.filter(k => JSON.stringify(after[k]) !== JSON.stringify(fields[k]))
+          await this.o.store.update(job.id, j => ({ ...j, ...Object.fromEntries(TRUSTED.map(k => [k, fields[k]])) }))
+          throw new Error(`${agent} changed job.json fields it may not: ${bad.join(', ')}; the factory undid it`)
+        }
+        if (changes.length) {
+          throw new Error(`${agent} changed job files it may not: ${changes.sort().join(', ')}; the factory undid it`)
+        }
+        if (branch && (await git.head(job.worktree) !== branch.head || await git.isClean(job.worktree) !== branch.clean)) {
+          throw new Error(`${agent} changed the worktree (HEAD or uncommitted files); it may only read the branch`)
+        }
+      }
+    }
   }
 
   private async agent(job: Job, agent: AgentName, signal: AbortSignal, purpose = '',
@@ -441,12 +578,16 @@ export class Orchestrator extends EventEmitter {
       message,
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
+      branch: job.branch,
+      maxTurns: this.o.config.limits.agentTurns,
+      maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,
       signal,
       onEvent: event => this.send({ type: 'agent', jobId: job.id, agent, event }),
       ...extra
     }
     this.send({ type: 'log', message: `${job.id}: ${agent} started` })
+    const watch = await this.watch(job, agent)
     const result = await this.o.runner.run(task)
     await store.update(job.id, (j) => {
       const costs = { ...j.costs }
@@ -458,8 +599,10 @@ export class Orchestrator extends EventEmitter {
       const costUsd = Math.round(Object.values(costs).reduce((a, b) => a + b, 0) * 100) / 100
       return { ...j, costs, sessions, costUsd }
     })
+    await watch.check()
     if (signal.aborted) throw new Error(`${agent} cancelled`)
     if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
+    await this.matchesReply(job, agent, result.reply)
     await this.keepRepliedReport(job, agent, result.reply)
     this.send({ type: 'log', message: `${job.id}: ${agent} → ${result.reply.split('\n')[0]}` })
     return result

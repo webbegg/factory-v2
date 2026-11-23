@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { run } from './exec'
 import { Refused } from './machine'
@@ -16,6 +18,11 @@ export function globToRegExp(glob: string): RegExp {
   }).join('')
   return new RegExp(`^${src}$`)
 }
+
+/** The factory's own checks, config and prompts: no branch may touch them, whatever the config says. */
+export const ALWAYS_PROTECTED = ['.factory/*']
+
+const CHECKS = '.factory/checks.sh'
 
 export interface GateResult {
   verdict: GateVerdict
@@ -41,39 +48,57 @@ export interface GateOptions {
 }
 
 /**
- * Does the job's branch pass the repo's checks? Runs the main checkout's
- * `.factory/checks.sh` inside the worktree, so a branch can't edit the checks
- * it is judged by, and fails any branch that modifies or deletes a protected
- * file. Writes round-N/checks.md (or merge-checks.md) and its log.
+ * Does the job's branch pass the repo's checks? Runs the base branch's
+ * `.factory/checks.sh` inside the worktree, so neither a branch nor an agent
+ * can edit the checks it is judged by, and fails any branch that touches a
+ * protected file. Writes round-N/checks.md (or merge-checks.md) and its log.
  */
 export class Gate {
   constructor(private o: GateOptions) {}
 
-  get checksPath() {
-    return join(this.o.paths.factory, 'checks.sh')
-  }
-
-  async runChecks(worktree: string): Promise<ChecksRun> {
+  /**
+   * Runs `.factory/checks.sh` as committed on origin/<base>. An agent with a
+   * shell can edit the main checkout's copy; it can't change what was merged.
+   */
+  async runChecks(worktree: string, signal?: AbortSignal): Promise<ChecksRun> {
     const start = performance.now()
-    const res = await run('bash', [this.checksPath], { cwd: worktree, env: { CI: '1' } })
-    return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
+    const { baseBranch } = this.o.config
+    // an agent can move the local origin/<base>; fetching first puts it back,
+    // and the full ref name means a tag or branch called origin/<base> can't stand in
+    await this.o.ports.git.fetch(this.o.paths.repo, baseBranch)
+    const script = await this.o.ports.git.show(this.o.paths.repo, `refs/remotes/origin/${baseBranch}`, CHECKS)
+    if (script === null) {
+      return { code: 127, output: `${CHECKS} isn't committed on origin/${baseBranch}: commit and push it first.\n`, seconds: 0 }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
+    try {
+      const file = join(dir, 'checks.sh')
+      await writeFile(file, script)
+      const res = await run('bash', [file], {
+        cwd: worktree, env: { CI: '1' }, scrub: true, signal, timeoutMs: this.o.config.limits.checksMinutes * 60_000
+      })
+      return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   }
 
+  /** Protected files the branch added, changed or deleted; an added CI workflow or prompt is as dangerous as an edit. */
   async protectedChanges(worktree: string): Promise<string[]> {
-    const patterns = this.o.config.protectedPaths.map(globToRegExp)
+    const patterns = [...ALWAYS_PROTECTED, ...this.o.config.protectedPaths].map(globToRegExp)
     const changed = await this.o.ports.git.changedFiles(worktree, `origin/${this.o.config.baseBranch}`)
     return changed
-      .filter(f => f.status !== 'A' && patterns.some(p => p.test(f.path)))
+      .filter(f => patterns.some(p => p.test(f.path)))
       .map(f => `${f.status} ${f.path}`)
   }
 
-  async run(id: string, opts: { merge?: boolean } = {}): Promise<GateResult> {
+  async run(id: string, opts: { merge?: boolean, signal?: AbortSignal } = {}): Promise<GateResult> {
     const { store, ports, config } = this.o
     const job = await store.load(id)
     if (job.round < 1) throw new Refused(`${id} hasn't started a build round`)
     const commit = await ports.git.head(job.worktree)
     const protectedChanges = await this.protectedChanges(job.worktree)
-    const checks = await this.runChecks(job.worktree)
+    const checks = await this.runChecks(job.worktree, opts.signal)
     const verdict: GateVerdict = checks.code === 0 && !protectedChanges.length ? 'PASS' : 'FAIL'
     const name = opts.merge ? 'merge-checks' : 'checks'
     const rd = `round-${job.round}`

@@ -34,7 +34,8 @@ export interface GitHubPort {
   prIsDraft(number: number): Promise<boolean>
   prReady(number: number): Promise<void>
   prClose(number: number): Promise<void>
-  prMerge(number: number, method: 'merge' | 'squash' | 'rebase'): Promise<void>
+  /** merges only while the PR head is still `headSha` */
+  prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string): Promise<void>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
   /** hosts images for issue bodies and comments; one URL per image, in order */
   uploadImages(images: UploadImage[]): Promise<string[]>
@@ -55,6 +56,8 @@ export interface GitPort {
   /** files changed since forking from `base`; status is the git letter (A, M, D, R…) */
   changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>>
   push(cwd: string, branch: string): Promise<void>
+  /** `path` as committed on `ref`, or null when it isn't there */
+  show(cwd: string, ref: string, path: string): Promise<string | null>
   /** merges `ref` into the worktree's branch, aborting on conflict */
   merge(cwd: string, ref: string): Promise<{ ok: boolean, output: string }>
 }

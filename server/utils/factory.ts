@@ -17,7 +17,9 @@ export function useFactory(): Promise<Factory> {
     const release = await acquireLock(factory.paths)
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.once(signal, () => {
-        void release().finally(() => process.exit(0))
+        // abort agents and checks so none outlives the board; give up after 10s
+        const stopped = Promise.race([factory.orchestrator.shutdown(), new Promise(r => setTimeout(r, 10_000))])
+        void stopped.finally(() => release()).finally(() => process.exit(0))
       })
     }
     process.once('exit', () => {

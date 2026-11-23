@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { defaultConfig } from './config'
 import { globToRegExp } from './gate'
 import { route } from './route'
 import { makeEnv, seed } from './testing'
@@ -11,9 +12,9 @@ const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
 const AGENTS = { reviewers: { code: 'haiku' } }
 
-async function withChecks(env: TestEnv, script: string) {
-  await mkdir(env.paths.factory, { recursive: true })
-  await writeFile(join(env.paths.factory, 'checks.sh'), `set -euo pipefail\n${script}\n`)
+/** checks.sh as committed on origin/<base>, which is the copy the gate runs */
+function withChecks(env: TestEnv, script: string) {
+  env.git.committed.set('.factory/checks.sh', `set -euo pipefail\n${script}\n`)
 }
 
 async function gateJob(env: TestEnv, fields = {}) {
@@ -46,6 +47,50 @@ describe('gate', () => {
     expect((await env.machine.advance(ID, 'review')).stage).toBe('review')
   })
 
+  test('the gate runs checks.sh from origin/<base>, not the main checkout\'s working copy', async () => {
+    const env = await makeEnv()
+    withChecks(env, 'true')
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'checks.sh'), 'exit 1\n')
+    await gateJob(env)
+    expect((await env.gate.run(ID)).verdict).toBe('PASS')
+    // fetched right before reading, so a moved local origin/main can't stand in for the real one (verify B3)
+    const calls = env.git.calls.map(c => c.slice(0, 3).join(' '))
+    // the full ref: a tag or branch named origin/main would win over the short name (verify run 2, B4)
+    const show = calls.indexOf(`show ${env.paths.repo} refs/remotes/origin/main`)
+    expect(calls[show - 1]).toBe(`fetch ${env.paths.repo} main`)
+  })
+
+  test('checks.sh missing on origin/<base> fails the gate and says so', async () => {
+    const env = await makeEnv()
+    await gateJob(env)
+    const result = await env.gate.run(ID)
+    expect(result.verdict).toBe('FAIL')
+    expect(await env.store.read(ID, 'round-1/checks.log')).toContain('.factory/checks.sh isn\'t committed on origin/main')
+  })
+
+  test('checks.sh runs without the factory\'s secrets in its environment', async () => {
+    const env = await makeEnv()
+    process.env.FACTORY_TEST_TOKEN = 'leak'
+    try {
+      withChecks(env, 'echo "token=${FACTORY_TEST_TOKEN:-none} ci=$CI"')
+      await gateJob(env)
+      await env.gate.run(ID)
+      expect(await env.store.read(ID, 'round-1/checks.log')).toBe('token=none ci=1\n')
+    } finally {
+      delete process.env.FACTORY_TEST_TOKEN
+    }
+  })
+
+  test('checks.sh that runs past limits.checksMinutes fails the gate', async () => {
+    const env = await makeEnv({ limits: { ...defaultConfig().limits, checksMinutes: 0.005 } })
+    withChecks(env, 'sleep 30')
+    await gateJob(env)
+    const result = await env.gate.run(ID)
+    expect(result).toMatchObject({ verdict: 'FAIL', code: 124 })
+    expect(await env.store.read(ID, 'round-1/checks.log')).toContain('timed out after 0.3s')
+  }, 20_000)
+
   test('a failing checks.sh fails the gate with its exit code', async () => {
     const env = await makeEnv()
     await withChecks(env, 'echo boom >&2; exit 3')
@@ -55,15 +100,27 @@ describe('gate', () => {
     expect(await env.store.read(ID, 'round-1/checks.md')).toContain('failed with exit 3')
   })
 
-  test('modifying or deleting a protected file fails; adding one does not', async () => {
-    const env = await makeEnv()
+  test('adding, modifying or deleting a protected file fails', async () => {
+    const env = await makeEnv({ protectedPaths: ['.github/*', 'src/locked.ts'] })
     await withChecks(env, 'true')
     await gateJob(env)
-    env.git.changed = [{ status: 'A', path: '.factory/new.md' }, { status: 'M', path: 'src/x.ts' }]
+    env.git.changed = [{ status: 'M', path: 'src/x.ts' }]
     expect((await env.gate.run(ID)).verdict).toBe('PASS')
-    env.git.changed.push({ status: 'D', path: '.factory/checks.sh' })
+    env.git.changed.push({ status: 'A', path: '.github/workflows/x.yml' }, { status: 'D', path: 'src/locked.ts' })
     const result = await env.gate.run(ID)
-    expect(result).toMatchObject({ verdict: 'FAIL', code: 0, protectedChanges: ['D .factory/checks.sh'] })
+    expect(result).toMatchObject({ verdict: 'FAIL', code: 0, protectedChanges: ['A .github/workflows/x.yml', 'D src/locked.ts'] })
+  })
+
+  test('.factory/ is protected whatever the config says', async () => {
+    const env = await makeEnv({ protectedPaths: [] })
+    await withChecks(env, 'true')
+    await gateJob(env)
+    env.git.changed = [{ status: 'A', path: '.factory/agents/approver.md' }]
+    expect(await env.gate.run(ID)).toMatchObject({ verdict: 'FAIL', protectedChanges: ['A .factory/agents/approver.md'] })
+  })
+
+  test('the defaults protect CI config', () => {
+    expect(defaultConfig().protectedPaths).toContain('.github/*')
   })
 
   test('--merge writes merge-checks.md and leaves checks.md alone', async () => {
@@ -120,7 +177,7 @@ describe('merge', () => {
     expect(env.git.calls).toContainEqual(['merge', job.worktree, 'origin/main'])
     expect(env.git.calls).toContainEqual(['push', job.worktree, job.branch])
     expect(env.github.calls).toContainEqual(['ready', 9])
-    expect(env.github.calls).toContainEqual(['merge', 9, 'squash'])
+    expect(env.github.calls).toContainEqual(['merge', 9, 'squash', 'a'.repeat(40)])
     expect(await env.store.read(ID, 'round-1/merge-checks.md')).toStartWith('GATE: PASS')
   })
 
@@ -172,6 +229,33 @@ describe('merge', () => {
     expect((await env.merger.merge(ID)).stage).toBe('merged')
     expect(env.git.calls.map(c => c[0])).toEqual(['removeWorktree', 'deleteBranch'])
   })
+
+  test('merges run one at a time, so each is gated against the base the previous one left', async () => {
+    const env = await makeEnv()
+    const trace = join(env.paths.repo, 'trace')
+    await withChecks(env, `echo "start $(basename "$PWD")" >> ${trace}; sleep 0.2; echo "end $(basename "$PWD")" >> ${trace}`)
+    for (const [id, pr] of [['001-a', 9], ['002-b', 10]] as const) {
+      const job = await seed(env, { id, issue: pr, stage: 'approve', round: 1, pr, agents: AGENTS }, { 'decision.md': 'APPROVE\n' })
+      await mkdir(job.worktree, { recursive: true })
+    }
+    await Promise.all([env.merger.merge('001-a'), env.merger.merge('002-b')])
+    const lines = (await Bun.file(trace).text()).trim().split('\n')
+    expect(lines).toHaveLength(4)
+    // no second start before the first one's end
+    expect(lines[1]).toBe(lines[0]!.replace('start', 'end'))
+    expect(lines[3]).toBe(lines[2]!.replace('start', 'end'))
+  }, 30_000) // four real bash runs with sleeps; busy hosts exceed the 5s default
+
+  test('an aborted merge stops after the gate and doesn\'t merge (review R4-001)', async () => {
+    const env = await makeEnv()
+    await approved(env)
+    withChecks(env, 'sleep 30')
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 300)
+    await expect(env.merger.merge(ID, controller.signal)).rejects.toThrow('merge cancelled')
+    expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    expect((await env.store.load(ID)).stage).toBe('merging')
+  }, 20_000)
 
   test('only an approved job merges', async () => {
     const env = await makeEnv()

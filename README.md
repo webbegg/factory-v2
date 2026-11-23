@@ -57,10 +57,17 @@ They are uploaded when you send and appended to the text as markdown images.
 | `factory --version` / `-v` | print the factory version |
 
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until
-you trust it. Commit `.factory/config.json`, `.factory/checks.sh` and any
-`.factory/agents/<agent>.md` prompt overrides; job state and worktrees are
+you trust it. Commit and push `.factory/config.json`, `.factory/checks.sh` and any
+`.factory/agents/<agent>.md` prompt overrides: the gate and the agents use the
+copies on `origin/<base>`, never the working copy; job state and worktrees are
 gitignored. The board's Settings page edits `.factory/config.json` and applies
 it to the running factory without a restart; the change still needs committing.
+
+`limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
+default 30; it and everything it started are killed) and each agent run
+(`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
+stalls with the reason, like any other failure. Stopping the factory aborts
+running agents and checks.
 
 Running one issue (**Run issue** on the board, or **Run it now** on New request)
 while every slot is busy queues it: the board shows it as queued, and it starts on
@@ -73,12 +80,31 @@ in the running factory and is not kept across a restart.
   reaches agents only as quoted data in `issue.md`, with comments from the
   author and the operator only.
 - Each agent may write only its own file (the builder: its worktree and
-  `build.md`); other writes are denied.
-- The gate runs the main checkout's `checks.sh`, and fails a branch that edits
-  `protectedPaths`. Merges happen only through `gh pr merge`, after a re-sync
+  `build.md`); other Write/Edit calls are denied. Their shell is guarded too:
+  no agent may merge, ready, close or review a PR, write to GitHub through
+  `gh`, or pass or change git config; read-only agents run only git reads, and
+  the builder pushes only by naming its own branch, without force. The guard
+  reads commands, it is not a sandbox: a shell that writes files or builds a
+  command it can't read still runs as you, so protect the base branch on
+  GitHub. After every agent the factory also checks what it changed: any job
+  file other than its report (links included), the job's routing and stage in
+  `job.json`, or a report whose verdict differs from the agent's reply, is put
+  back or refused and the job stalls, and so does an agent that only reads but
+  moved the branch or left uncommitted files. Reviewers run one after another,
+  so each can be held to its own verdict.
+- The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
+  edits, deletes or renames a file under `protectedPaths` (default
+  `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
+  `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
   and a second gate. The factory never deploys.
-- The board listens on 127.0.0.1, refuses foreign `Host` headers and non-JSON
-  writes.
+- `checks.sh` runs without environment variables named like secrets (`*TOKEN*`,
+  `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `AUTH`), so branch code
+  never sees the factory's credentials; checks that need one must get it some
+  other way. Text the factory posts on GitHub or shows as an error has
+  credentials in URLs and GitHub/Anthropic tokens masked.
+- The board listens on 127.0.0.1, refuses foreign `Host` headers, API calls
+  from any other origin (other localhost ports included, where job dev servers
+  run branch code) and non-JSON writes.
 - Attached screenshots are uploaded to GitHub as user attachments of the
   project's repository (the way `gh issue create --attach` does it); nothing is
   committed or released. Anyone who can see the repository can open them:

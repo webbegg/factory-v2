@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { acquireLock, isLocalHost, jobFiles, readJobFile } from './service'
+import { acquireLock, isLocalHost, jobFiles, readJobFile, requestRefusal } from './service'
 import { makeEnv, seed } from './testing'
 
 describe('job files', () => {
@@ -45,6 +45,36 @@ describe('lock', () => {
     await writeFile(join(env.paths.factory, 'orchestrator.lock'), '999999999\n')
     const again = await acquireLock(env.paths)
     await again()
+  })
+})
+
+describe('requestRefusal', () => {
+  const req = (over: Partial<Parameters<typeof requestRefusal>[0]> = {}) => requestRefusal({
+    host: 'localhost:4400', method: 'POST', path: '/api/run', contentType: 'application/json', ...over
+  })
+
+  test('the board\'s own requests pass', () => {
+    expect(req({ origin: 'http://localhost:4400', fetchSite: 'same-origin' })).toBeNull()
+    expect(req({ method: 'GET', path: '/api/state', fetchSite: 'same-origin' })).toBeNull()
+    // a navigation to a page from elsewhere (a link on GitHub) is fine; only the API is guarded
+    expect(req({ method: 'GET', path: '/', fetchSite: 'cross-site' })).toBeNull()
+    // curl and the CLI send neither header
+    expect(req({ method: 'GET', path: '/api/queue' })).toBeNull()
+  })
+
+  test('foreign hosts, origins and cross-site API calls are refused', () => {
+    expect(req({ host: 'evil.com' })).toMatchObject({ status: 403 })
+    expect(req({ origin: 'http://localhost:5110' })).toMatchObject({ status: 403 })
+    expect(req({ origin: 'https://evil.com' })).toMatchObject({ status: 403 })
+    expect(req({ origin: 'null' })).toMatchObject({ status: 403 })
+    expect(req({ method: 'GET', path: '/api/queue', fetchSite: 'cross-site' })).toMatchObject({ status: 403 })
+    // another localhost port (a job's dev server) is same-site, not same-origin
+    expect(req({ method: 'GET', path: '/api/events', fetchSite: 'same-site' })).toMatchObject({ status: 403 })
+  })
+
+  test('API writes must be JSON', () => {
+    expect(req({ contentType: 'application/x-www-form-urlencoded' })).toMatchObject({ status: 415 })
+    expect(req({ method: 'GET', contentType: undefined })).toBeNull()
   })
 })
 

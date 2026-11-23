@@ -148,6 +148,7 @@ export class Machine {
   }
 
   private async escalate(job: Job, why: string) {
+    await this.store.archive(job.id, 'decision.md')
     await this.store.write(job.id, 'decision.md', `ESCALATE\n\n## Why\n${why}\n`)
   }
 

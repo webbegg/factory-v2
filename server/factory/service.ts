@@ -153,3 +153,41 @@ export function isLocalHost(host: string | undefined): boolean {
   const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
   return name === 'localhost' || name === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(name ?? '')
 }
+
+export interface RequestFacts {
+  host?: string
+  origin?: string
+  /** the browser's Sec-Fetch-Site header */
+  fetchSite?: string
+  method: string
+  path: string
+  contentType?: string
+}
+
+/**
+ * Why the local-only server refuses a request, or null. The factory acts with
+ * the user's credentials, so the API answers only the board's own pages:
+ * foreign Host headers (DNS rebinding), any other Origin, including other
+ * localhost ports where job dev servers run branch code, and cross-site or
+ * same-site fetches, reads included. Writes must be JSON, which no form can send.
+ */
+export function requestRefusal(r: RequestFacts): { status: number, message: string } | null {
+  if (!isLocalHost(r.host)) return { status: 403, message: 'factory UI is local only' }
+  if (!r.path.startsWith('/api/')) return null
+  if (r.origin !== undefined) {
+    let host: string | null = null
+    try {
+      host = new URL(r.origin).host
+    } catch {
+      // `null` and other opaque origins
+    }
+    if (host !== r.host) return { status: 403, message: 'the factory API answers only its own pages' }
+  }
+  if (r.fetchSite && !['same-origin', 'none'].includes(r.fetchSite)) {
+    return { status: 403, message: 'the factory API answers only its own pages' }
+  }
+  if (r.method !== 'GET' && r.method !== 'HEAD' && !(r.contentType ?? '').startsWith('application/json')) {
+    return { status: 415, message: 'send application/json' }
+  }
+  return null
+}

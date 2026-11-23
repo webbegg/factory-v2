@@ -74,10 +74,10 @@ export class FakeGitHub implements GitHubPort {
   }
 
   mergeError: string | null = null
-  async prMerge(number: number, method: string) {
+  async prMerge(number: number, method: string, headSha: string) {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
-    this.calls.push(['merge', number, method])
+    this.calls.push(['merge', number, method, headSha])
   }
 
   async openPrsForBranch(branch: string) {
@@ -142,6 +142,13 @@ export class FakeGit implements GitPort {
 
   async push(cwd: string, branch: string) {
     this.calls.push(['push', cwd, branch])
+  }
+
+  /** path → content on origin/<base>, as `show` returns it */
+  committed = new Map<string, string>()
+  async show(cwd: string, ref: string, path: string) {
+    this.calls.push(['show', cwd, ref, path])
+    return this.committed.get(path) ?? null
   }
 
   async merge(cwd: string, ref: string) {

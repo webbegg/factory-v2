@@ -36,17 +36,24 @@ export function slugify(title: string): string {
 export class Queue {
   constructor(private o: QueueOptions) {}
 
-  async rows(): Promise<QueueRow[]> {
-    const { store, ports, config, machine } = this.o
-    const { github } = ports
-    const queueLabel = config.labels.queue
-
-    // A job is done once its PR is merged on GitHub, by us or by a person.
+  /**
+   * A job is done once its PR is merged on GitHub, by us or by a person. Moving
+   * it removes its worktree, so jobs the caller is driving are left to it.
+   */
+  async sweepMerged(driving: (id: string) => boolean): Promise<void> {
+    const { store, ports, machine } = this.o
     for (const j of await store.list()) {
-      if (!TERMINAL.has(j.stage) && j.pr && await github.prState(j.pr) === 'MERGED') {
+      if (!TERMINAL.has(j.stage) && !driving(j.id) && j.pr && await ports.github.prState(j.pr) === 'MERGED') {
         await machine.advance(j.id, 'merged')
       }
     }
+  }
+
+  /** Read-only: what a run would do with each labeled issue. */
+  async rows(): Promise<QueueRow[]> {
+    const { store, ports, config } = this.o
+    const { github } = ports
+    const queueLabel = config.labels.queue
     const jobs = await store.list()
     const byIssue = new Map(jobs.map(j => [j.issue, j]))
     const issues = (await github.listIssues(queueLabel)).sort((a, b) => a.number - b.number)
