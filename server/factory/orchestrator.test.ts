@@ -9,7 +9,7 @@ import type { AgentName } from './agents/prompts'
 import { Refused } from './machine'
 import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
-import { makeEnv } from './testing'
+import { makeEnv, seed } from './testing'
 import type { TestEnv } from './testing'
 import type { Job } from './types'
 
@@ -572,6 +572,66 @@ describe('orchestrator', () => {
     expect((await env.store.list())[0]!.stage).toBe('merged')
     expect(runner.tasks.filter(t => t.agent === 'builder').at(-1)!.message).toContain('The user gave feedback: read feedback-1.md')
     expect(existsSync(join(env.paths.jobs, '001-issue-1', 'feedback-1.md'))).toBe(true)
+  })
+
+  describe('merge from needs-human', () => {
+    async function escalated(overrides = {}) {
+      const f = await factory({
+        ...happy,
+        // a second build resolved the conflict
+        builder: async (t, n) => {
+          if (n > 1) f.env.git.mergeResult = { ok: true, output: '' }
+          await write(t, 'build.md', 'STATUS: READY\n')
+        },
+        approver: t => write(t, 'decision.md', 'ESCALATE\n\n## For the human\nLooks fine.\n')
+      }, overrides)
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      f.orch.pause()
+      expect((await f.env.store.list())[0]!.stage).toBe('needs-human')
+      return f
+    }
+
+    test('Merge syncs, gates and merges through GitHub', async () => {
+      const { env, orch } = await escalated()
+      await orch.approve('001-issue-1')
+      await orch.idle()
+      expect((await env.store.load('001-issue-1')).stage).toBe('merged')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
+      expect(await env.store.read('001-issue-1', 'decision-1.md')).toStartWith('ESCALATE')
+    })
+
+    test('a conflict at the merge goes back to the builder, even after the last round escalated', async () => {
+      const { env, runner, orch } = await escalated({ maxRounds: 1 })
+      env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
+      await orch.approve('001-issue-1')
+      await orch.idle()
+      expect(runner.tasks.filter(t => t.agent === 'builder').at(-1)!.message).toContain('read round-1/sync.md')
+      expect((await env.store.load('001-issue-1')).round).toBe(2)
+    })
+
+    test('an already merged PR moves to merged with no gate', async () => {
+      const { env, orch } = await escalated()
+      const job = await env.store.load('001-issue-1')
+      env.github.prStates.set(job.pr!, 'MERGED')
+      expect((await orch.approve(job.id)).stage).toBe('merged')
+      await orch.idle()
+      expect(await env.store.read(job.id, `round-${job.round}/merge-checks.md`)).toBeNull()
+      expect(await env.store.read(job.id, 'decision.md')).toStartWith('ESCALATE')
+    })
+
+    test('checkMerged moves hand-merged needs-human jobs while paused, and only those', async () => {
+      const { env, orch } = await escalated()
+      const job = await env.store.load('001-issue-1')
+      await seed(env, { id: '002-other', issue: 2, stage: 'review', round: 1, pr: 200 })
+      env.github.prStates.set(job.pr!, 'MERGED')
+      env.github.prStates.set(200, 'MERGED')
+      expect(orch.isDraining).toBe(false)
+      await orch.checkMerged()
+      expect((await env.store.load(job.id)).stage).toBe('merged')
+      expect((await env.store.load('002-other')).stage).toBe('review')
+    })
   })
 
   test('a single issue run while every slot is busy queues, then starts when the slot frees', async () => {

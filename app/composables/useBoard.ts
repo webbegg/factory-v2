@@ -35,6 +35,7 @@ let feedId = 0
 const connected = ref(false)
 let source: EventSource | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
+let checkedMerged = false
 
 const MAX_LINES = 300
 
@@ -95,6 +96,11 @@ export function useBoard() {
     source.onopen = () => {
       connected.value = true
       void refresh()
+      // no tick runs while paused, so PRs merged by hand are looked for once per page load
+      if (!checkedMerged) {
+        checkedMerged = true
+        void act('/api/merged')
+      }
     }
     source.onerror = () => {
       connected.value = false

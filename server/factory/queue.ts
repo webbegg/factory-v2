@@ -39,10 +39,12 @@ export class Queue {
   /**
    * A job is done once its PR is merged on GitHub, by us or by a person. Moving
    * it removes its worktree, so jobs the caller is driving are left to it.
+   * `only` limits the sweep to jobs in that stage.
    */
-  async sweepMerged(driving: (id: string) => boolean): Promise<void> {
+  async sweepMerged(driving: (id: string) => boolean, only?: Stage): Promise<void> {
     const { store, ports, machine } = this.o
     for (const j of await store.list()) {
+      if (only && j.stage !== only) continue
       if (!TERMINAL.has(j.stage) && !driving(j.id) && j.pr && await ports.github.prState(j.pr) === 'MERGED') {
         await machine.advance(j.id, 'merged')
       }

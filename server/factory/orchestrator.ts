@@ -185,6 +185,31 @@ export class Orchestrator extends EventEmitter {
     return job
   }
 
+  /** The operator's Merge on an escalated job: the merging step syncs, gates and merges it. */
+  async approve(id: string): Promise<Job> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    // merged by hand already: nothing was approved through the factory, so no APPROVE is written
+    if (current.stage === 'needs-human' && current.pr && await ports.github.prState(current.pr) === 'MERGED') {
+      const job = await machine.advance(id, 'merged')
+      this.send({ type: 'job', job })
+      return job
+    }
+    const job = await machine.approve(id, await ports.github.operator())
+    this.start(id)
+    return job
+  }
+
+  /** Paused or not, needs-human jobs whose PR someone merged on GitHub move to merged. */
+  checkMerged(): Promise<void> {
+    // on the tick's chain so it never overlaps a fill; the caller still sees a failure
+    const run = this.ticking.then(() => this.o.queue.sweepMerged(id => this.active.has(id), 'needs-human'))
+    this.ticking = run.catch((err) => {
+      this.send({ type: 'log', message: `queue: ${(err as Error).message}` })
+    })
+    return run
+  }
+
   async reject(id: string, text: string): Promise<Job> {
     const job = await this.o.machine.reject(id, text, await this.o.ports.github.operator())
     this.send({ type: 'job', job })

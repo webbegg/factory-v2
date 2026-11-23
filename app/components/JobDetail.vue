@@ -70,7 +70,22 @@ const empty = computed(() => {
 })
 
 const lines = computed(() => activity.value[props.jobId] ?? [])
-const sending = ref<'feedback' | 'reject' | 'answer' | null>(null)
+const sending = ref<'feedback' | 'reject' | 'answer' | 'merge' | null>(null)
+const confirmingMerge = ref(false)
+async function merge() {
+  if (sending.value) return
+  confirmingMerge.value = false
+  sending.value = 'merge'
+  const ok = await act(`/api/jobs/${props.jobId}/merge`)
+  sending.value = null
+  if (ok) await refresh()
+}
+
+// While paused no tick runs, so a PR merged by hand is looked for when its escalated job is opened.
+watch(() => job.value?.stage === 'needs-human' && job.value.pr ? props.jobId : null, (id) => {
+  if (id) void act('/api/merged')
+}, { immediate: true })
+
 async function send(action: 'feedback' | 'reject' | 'answer') {
   // One action per job at a time: a second click would upload and send again.
   if (sending.value) return
@@ -162,14 +177,20 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
         <div class="space-y-3">
           <p class="text-sm text-highlighted">
             <template v-if="job.stage === 'needs-human'">
-              This job needs your decision. Merge
-              <a
-                v-if="job.prUrl"
-                :href="job.prUrl"
-                target="_blank"
-                class="text-primary underline"
-              >PR #{{ job.pr }}</a>
-              on GitHub to approve it, tell the builder what to change, or reject it.
+              This job needs your decision.
+              <template v-if="job.pr">
+                Merge
+                <a
+                  v-if="job.prUrl"
+                  :href="job.prUrl"
+                  target="_blank"
+                  class="text-primary underline"
+                >PR #{{ job.pr }}</a>
+                here to approve it, tell the builder what to change, or reject it.
+              </template>
+              <template v-else>
+                Tell the builder what to change, or reject it.
+              </template>
             </template>
             <template v-else>
               Intake asked the author a question on the issue. Answer it here (posted as you) to send the job back to intake, or reject it.
@@ -199,6 +220,15 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               @click="send('answer')"
             />
             <UButton
+              v-if="job.stage === 'needs-human' && job.pr"
+              label="Merge"
+              color="success"
+              variant="subtle"
+              :loading="sending === 'merge'"
+              :disabled="!!sending"
+              @click="confirmingMerge = true"
+            />
+            <UButton
               label="Reject"
               color="error"
               variant="subtle"
@@ -207,6 +237,27 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               @click="send('reject')"
             />
           </div>
+          <UModal
+            v-model:open="confirmingMerge"
+            :title="`Merge PR #${job.pr}?`"
+            description="The factory will sync the branch with the base, run the gate again, and merge through GitHub."
+          >
+            <template #footer="{ close }">
+              <div class="flex w-full justify-end gap-2">
+                <UButton
+                  label="Cancel"
+                  color="neutral"
+                  variant="ghost"
+                  @click="close"
+                />
+                <UButton
+                  label="Merge"
+                  color="success"
+                  @click="merge"
+                />
+              </div>
+            </template>
+          </UModal>
         </div>
       </UCard>
 
