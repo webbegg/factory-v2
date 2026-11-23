@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import { waitingOnYou } from '~/utils/waiting'
+
 const { state } = useBoard()
 
-const waiting = computed(() => (state.value?.jobs ?? []).filter(j => j.stage === 'needs-human' || j.stage === 'needs-info'))
-const stalled = computed(() => (state.value?.jobs ?? []).filter(j => state.value?.errors[j.id]))
+const errors = computed(() => state.value?.errors ?? {})
+const waiting = computed(() => waitingOnYou(state.value?.jobs ?? [], errors.value))
+const onAuthor = computed(() => (state.value?.jobs ?? []).filter(j => j.stage === 'needs-info' && !errors.value[j.id]))
 </script>
 
 <template>
@@ -11,40 +14,51 @@ const stalled = computed(() => (state.value?.jobs ?? []).filter(j => state.value
       Waiting on you
     </h1>
 
-    <InboxItem
+    <template
       v-for="job in waiting"
       :key="job.id"
-      :job="job"
-    />
-
-    <UCard
-      v-for="job in stalled"
-      :key="`stalled-${job.id}`"
     >
-      <div class="flex items-center gap-2">
-        <UBadge
-          label="stalled"
-          color="error"
-          variant="subtle"
-        />
-        <span class="text-sm text-highlighted">{{ job.title }}</span>
-        <UButton
-          :to="{ path: '/', query: { job: job.id } }"
-          label="Open"
-          size="sm"
-          class="ms-auto"
-        />
-      </div>
-      <p class="mt-2 text-sm text-error">
-        {{ state?.errors[job.id] }}
-      </p>
-    </UCard>
+      <UCard v-if="errors[job.id]">
+        <div class="flex items-center gap-2">
+          <UBadge
+            label="stalled"
+            color="error"
+            variant="subtle"
+          />
+          <span class="text-sm text-highlighted">{{ job.title }}</span>
+          <UButton
+            :to="{ path: '/', query: { job: job.id } }"
+            label="Open"
+            size="sm"
+            class="ms-auto"
+          />
+        </div>
+        <p class="mt-2 text-sm text-error">
+          {{ errors[job.id] }}
+        </p>
+      </UCard>
+      <InboxItem
+        v-else
+        :job="job"
+      />
+    </template>
+
+    <template v-if="onAuthor.length">
+      <h2 class="pt-2 text-lg font-semibold text-highlighted">
+        Waiting on the author
+      </h2>
+      <InboxItem
+        v-for="job in onAuthor"
+        :key="job.id"
+        :job="job"
+      />
+    </template>
 
     <UEmpty
-      v-if="!waiting.length && !stalled.length"
+      v-if="!waiting.length && !onAuthor.length"
       icon="i-lucide-inbox"
       title="Nothing waits on you"
-      description="Escalated PRs, intake questions and stalled jobs show up here."
+      description="Escalated PRs and stalled jobs show up here, and jobs whose author was asked a question under their own heading."
     />
   </UContainer>
 </template>
