@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import type { Job } from '~/composables/useBoard'
 
-const props = defineProps<{ job: Job, error?: string, running?: boolean, paused?: boolean, selected?: boolean }>()
+const props = defineProps<{ job: Job, error?: string, running?: boolean, paused?: boolean, ciWaiting?: boolean, selected?: boolean }>()
 
 const num = computed(() => props.job.id.split('-')[0])
 const flag = computed(() => {
   if (props.error) return { label: 'stalled', color: 'error' as const }
   if (props.paused) return { label: 'paused', color: 'neutral' as const }
+  if (props.ciWaiting) return { label: 'merging: waiting for CI', color: 'info' as const }
   if (props.job.stage === 'needs-human') return { label: 'your call', color: 'warning' as const }
   if (props.job.stage === 'needs-info') return { label: 'asked author', color: 'info' as const }
   if (props.job.stage === 'rejected') return { label: 'rejected', color: 'neutral' as const }

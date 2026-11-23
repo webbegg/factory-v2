@@ -161,6 +161,7 @@ onUnmounted(() => {
                 :error="state?.errors[job.id]"
                 :running="state?.running.includes(job.id)"
                 :paused="state?.paused.includes(job.id)"
+                :ci-waiting="state?.ciWaiting.includes(job.id)"
                 :selected="job.id === selected"
               />
               <p
