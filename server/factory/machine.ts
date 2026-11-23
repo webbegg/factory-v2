@@ -284,7 +284,8 @@ export class Machine {
       const status = firstLine(await this.read(job, 'build.md') ?? '')
       require(status === 'STATUS: READY', `build.md starts with '${status}', not STATUS: READY`)
       require(await git.isClean(job.worktree), 'the worktree has uncommitted changes')
-      require(await git.commitsAhead(job.worktree, `origin/${base}`) > 0,
+      // full ref names: a shell can plant refs/tags/origin/<base>, which `origin/<base>` would resolve to first
+      require(await git.commitsAhead(job.worktree, `refs/remotes/origin/${base}`) > 0,
         `${job.branch} has no commits on top of origin/${base}`)
       await git.fetch(job.worktree, job.branch)
       const head = await git.head(job.worktree)
@@ -419,7 +420,7 @@ export class Machine {
       await editLabels('issue', job.issue, { remove: [labels.queue] })
     } else {
       await git.fetch(this.o.paths.repo, base)
-      await git.addWorktree(job.worktree, job.branch, `origin/${base}`)
+      await git.addWorktree(job.worktree, job.branch, `refs/remotes/origin/${base}`)
     }
   }
 }

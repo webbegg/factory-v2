@@ -162,7 +162,7 @@ export class Gate {
   /** Protected files the branch added, changed or deleted; an added CI workflow or prompt is as dangerous as an edit. */
   async protectedChanges(worktree: string): Promise<string[]> {
     const patterns = [...ALWAYS_PROTECTED, ...this.o.config.protectedPaths].map(globToRegExp)
-    const changed = await this.o.ports.git.changedFiles(worktree, `origin/${this.o.config.baseBranch}`)
+    const changed = await this.o.ports.git.changedFiles(worktree, `refs/remotes/origin/${this.o.config.baseBranch}`)
     return changed
       .filter(f => patterns.some(p => p.test(f.path)))
       .map(f => `${f.status} ${f.path}`)

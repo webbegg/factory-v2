@@ -189,6 +189,16 @@ describe('GitCli against a real repo', () => {
       { status: 'M', path: 'a.txt' }, { status: 'D', path: 'long.txt' }, { status: 'A', path: 'moved.txt' }
     ])
 
+    // verify B1: a ref planted as refs/tags/origin/main wins over the short name, never over the full one the factory uses
+    const planted = join(repo, '.git', 'refs', 'tags', 'origin', 'main')
+    await mkdir(join(planted, '..'), { recursive: true })
+    await writeFile(planted, `${await git.head(wt)}\n`)
+    await git.fetch(repo, 'main')
+    expect(await git.commitsAhead(wt, 'origin/main')).toBe(0)
+    expect(await git.commitsAhead(wt, 'refs/remotes/origin/main')).toBe(2)
+    expect((await git.changedFiles(wt, 'refs/remotes/origin/main')).map(f => f.path)).toEqual(['a.txt', 'long.txt', 'moved.txt'])
+    await rm(planted)
+
     await git.push(wt, 'factory/001-x')
     expect(await git.remoteHead(wt, 'factory/001-x')).toBe(await git.head(wt))
 

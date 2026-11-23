@@ -156,11 +156,19 @@ in the running factory and is not kept across a restart.
 - Opt-in agent sandbox: `"sandbox": { "enabled": true, "domains": [] }` in
   `.factory/config.json` runs every agent's shell in the Claude Agent SDK
   sandbox, and an agent run fails if the sandbox can't start (`doctor` says
-  whether it can). A shell may write only the agent's own files; the builder
-  also its worktree and the `.git` objects, refs and logs that commit and push
-  need. No shell may write the worktree's `.git` file, or the repo's
-  `.git/config`, hooks or info, so `git push -u` can't record an upstream (the
-  push still goes through). Only the builder reaches the network: GitHub, the
+  whether it can). A shell may write the agent's own files and its working
+  folder, the job's worktree (the SDK always allows that; after a read-only
+  agent the factory still checks that HEAD moved and no files were left).
+  In the repo's `.git`, which the SDK opens to shells in a worktree, the
+  factory denies everything to every agent but the builder, and to the builder
+  everything but the objects, its worktree's gitdir and its own branch's refs
+  and reflogs: not `main`, other jobs' branches or gitdirs, tags, replace refs,
+  `packed-refs`, `HEAD` or `config`, so `git push -u` can't record an upstream
+  (the push still goes through). Writable objects remain a gap: a builder can
+  swap an object's content, as it can already run code at the gate. The factory
+  names refs in full (`refs/remotes/origin/<base>`), so a planted
+  `refs/tags/origin/<base>` can't stand in for the base. Verified on macOS;
+  Linux is untested. Only the builder reaches the network: GitHub, the
   npm registry and the hosts in `domains`. On macOS it also gets the TLS trust
   service `gh` needs. The builder and the UX and UI reviewers may bind local
   ports for dev servers. Model keys are hidden from every shell; the GitHub

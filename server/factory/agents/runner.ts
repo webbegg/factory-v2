@@ -1,4 +1,6 @@
-import { basename, join, resolve } from 'node:path'
+import { readdirSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk'
 import { run } from '../exec'
 import type { AgentName } from './prompts'
@@ -288,14 +290,60 @@ const GITHUB_FILES = ['~/.config/gh', '~/.git-credentials']
  * builder also to what commit and push touch in .git), network only for the
  * builder, and no credentials it doesn't need. Commands may not opt out.
  */
-export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
+/**
+ * The refs a builder's commit and push touch: its branch and the branch's
+ * remote-tracking ref, each with its lock file and reflog. Nothing else under
+ * refs/, so it can't move another job's branch or plant a ref named like
+ * origin/<base> (verify B1).
+ */
+export function ownRefs(gitDir: string, branch: string | undefined): string[] {
+  if (!branch) return []
+  return [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]
+    .flatMap(r => [join(gitDir, r), join(gitDir, `${r}.lock`), join(gitDir, 'logs', r)])
+}
+
+const listDir = (dir: string): string[] => {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Every entry under `root` that is neither one of `keep` nor on the way down
+ * to one, as it exists now. Deny rules win over allow rules, so denying these
+ * leaves the sandbox's own grant of `root` with only `keep` in it.
+ */
+export function denyAround(root: string, keep: string[], list: (dir: string) => string[] = listDir): string[] {
+  const holds = (p: string) => keep.some(k => k === p || k.startsWith(`${p}/`))
+  const out: string[] = []
+  const walk = (dir: string) => {
+    for (const name of list(dir)) {
+      const p = join(dir, name)
+      if (!holds(p)) out.push(p)
+      else if (!keep.includes(p)) walk(p)
+    }
+  }
+  walk(root)
+  return out
+}
+
+/** what git reads in a .git that may not exist yet, so a listing of what does would miss it */
+const GIT_FILES_READ = ['HEAD', 'packed-refs', 'index', 'FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+  'shallow', 'modules', 'refs/tags', 'refs/replace', 'refs/notes', 'refs/origin', 'refs/stash']
+
+export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox' | 'branch'>, list: (dir: string) => string[] = listDir): SandboxSettings | undefined {
   if (!task.sandbox) return undefined
   const { gitDir, domains } = task.sandbox
   const builder = task.agent === 'builder'
   const worktreeGit = join(gitDir, 'worktrees', basename(task.cwd))
   const allowWrite = task.writable.map(w => w.replace(/\/+$/, ''))
-  // objects and refs for commits and the remote-tracking ref a push updates; the worktree's own index and HEAD
-  if (builder) allowWrite.push(join(gitDir, 'objects'), join(gitDir, 'refs'), join(gitDir, 'logs'), join(gitDir, 'packed-refs'), worktreeGit)
+  // objects for commits, the worktree's own index and HEAD, and only its own branch's refs
+  const gitKeep = [join(gitDir, 'objects'), worktreeGit, ...ownRefs(gitDir, task.branch)]
+  if (builder) allowWrite.push(...gitKeep)
+  // the SDK lets a shell in a worktree write the main .git (all but config, hooks and its pointers); deny the rest of it
+  const gitDeny = builder ? [...denyAround(gitDir, gitKeep, list), ...GIT_FILES_READ.map(p => join(gitDir, p))] : [gitDir]
   return {
     enabled: true,
     failIfUnavailable: true,
@@ -303,10 +351,11 @@ export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writabl
     filesystem: {
       allowWrite,
       // the shell may write its working folder (the worktree), but never the file that tells git where its repo is
-      denyWrite: [
+      denyWrite: [...new Set([
         join(task.cwd, '.git'), join(gitDir, 'config'), join(gitDir, 'hooks'), join(gitDir, 'info'),
-        ...(builder ? ['commondir', 'gitdir', 'config.worktree'].map(f => join(worktreeGit, f)) : [])
-      ],
+        ...(builder ? ['commondir', 'gitdir', 'config.worktree'].map(f => join(worktreeGit, f)) : []),
+        ...gitDeny
+      ])],
       denyRead: builder ? SECRET_FILES : [...SECRET_FILES, ...GITHUB_FILES]
     },
     network: {
@@ -364,6 +413,10 @@ export class SdkRunner implements AgentRunner {
     let reply = ''
     let costUsd = 0
     let error: string | undefined
+    // a sandboxed builder may write its refs but not create the folders they live in
+    if (task.sandbox && task.agent === 'builder') {
+      await Promise.all(ownRefs(task.sandbox.gitDir, task.branch).map(f => mkdir(dirname(f), { recursive: true })))
+    }
     const token = task.sandbox && task.agent === 'builder' && !process.env.GH_TOKEN
       ? await run('gh', ['auth', 'token'], { cwd: task.cwd }).then(r => r.code === 0 ? r.stdout.trim() : null, () => null)
       : null

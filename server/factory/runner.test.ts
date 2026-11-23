@@ -208,9 +208,17 @@ describe('sandboxSettings (#49)', () => {
   test('writes: the agent\'s own files; the builder also what commit and push need in .git', () => {
     expect(reviewer.filesystem?.allowWrite).toEqual(['/r/.factory/jobs/001-x/round-1/review-code.md'])
     expect(ui.filesystem?.allowWrite).toContain('/r/.factory/jobs/001-x/round-1/screenshots-ui')
-    expect(builder.filesystem?.allowWrite).toEqual(expect.arrayContaining([
-      WT, '/r/.factory/jobs/001-x/build.md', `${GIT}/objects`, `${GIT}/refs`, `${GIT}/logs`, `${GIT}/worktrees/001-x`
-    ]))
+    // refs: only the job branch and its remote-tracking ref (and their lock files and logs), never refs/ as a whole (verify B1)
+    const own = [`refs/heads/${BRANCH}`, `refs/remotes/origin/${BRANCH}`]
+    expect(builder.filesystem?.allowWrite).toEqual([
+      WT, '/r/.factory/jobs/001-x/build.md', `${GIT}/objects`, `${GIT}/worktrees/001-x`,
+      ...own.flatMap(r => [`${GIT}/${r}`, `${GIT}/${r}.lock`, `${GIT}/logs/${r}`])
+    ])
+    for (const w of builder.filesystem?.allowWrite ?? []) {
+      expect([`${GIT}/refs`, `${GIT}/logs`, `${GIT}/packed-refs`, `${GIT}/refs/tags`, `${GIT}/refs/heads`]).not.toContain(w)
+    }
+    // no branch, no refs at all
+    expect(sandboxSettings({ ...task('builder', [`${WT}/`]), branch: undefined })!.filesystem?.allowWrite?.some(w => w.includes('/refs/'))).toBe(false)
     // nothing grants the repo's config, hooks, other worktrees or other jobs
     for (const s of [builder, reviewer, ui]) {
       for (const w of s.filesystem?.allowWrite ?? []) {
@@ -226,6 +234,51 @@ describe('sandboxSettings (#49)', () => {
     expect(builder.filesystem?.denyWrite).toEqual(expect.arrayContaining([
       `${GIT}/worktrees/001-x/commondir`, `${GIT}/worktrees/001-x/gitdir`, `${GIT}/worktrees/001-x/config.worktree`
     ]))
+  })
+
+  // the SDK sandbox lets a shell in a worktree write the main .git (all but config, hooks and a few pointers): only denyWrite narrows it
+  const tree: Record<string, string[]> = {
+    [GIT]: ['HEAD', 'config', 'hooks', 'info', 'objects', 'refs', 'logs', 'worktrees', 'packed-refs', 'index', 'FETCH_HEAD'],
+    [`${GIT}/refs`]: ['heads', 'remotes', 'tags'],
+    [`${GIT}/refs/heads`]: ['main', 'factory'],
+    [`${GIT}/refs/heads/factory`]: ['001-x', '002-y'],
+    [`${GIT}/refs/remotes`]: ['origin'],
+    [`${GIT}/refs/remotes/origin`]: ['HEAD', 'main', 'factory'],
+    [`${GIT}/refs/remotes/origin/factory`]: ['001-x', '002-y'],
+    [`${GIT}/logs`]: ['HEAD', 'refs'],
+    [`${GIT}/logs/refs`]: ['heads', 'remotes'],
+    [`${GIT}/logs/refs/heads`]: ['main', 'factory'],
+    [`${GIT}/logs/refs/heads/factory`]: ['001-x', '002-y'],
+    [`${GIT}/worktrees`]: ['001-x', '002-y']
+  }
+  const list = (dir: string) => tree[dir] ?? []
+
+  test('the builder\'s shell may write in .git only its objects, its worktree\'s gitdir and its own branch refs (verify B1)', () => {
+    const s = sandboxSettings(task('builder', [`${WT}/`]), list)!
+    const deny = s.filesystem?.denyWrite ?? []
+    for (const p of ['HEAD', 'packed-refs', 'index', 'FETCH_HEAD', 'refs/tags', 'refs/heads/main', 'refs/heads/factory/002-y',
+      'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', 'refs/remotes/origin/factory/002-y',
+      'logs/HEAD', 'logs/refs/heads/main', 'logs/refs/heads/factory/002-y', 'worktrees/002-y']) {
+      expect(deny).toContain(`${GIT}/${p}`)
+    }
+    // deny wins over allow, so nothing denied may hold what commit and push write
+    for (const a of s.filesystem?.allowWrite ?? []) {
+      for (const d of deny) expect(a === d || a.startsWith(`${d}/`)).toBe(false)
+    }
+  })
+
+  test('what git reads but doesn\'t exist yet is denied by name: packed-refs, HEAD files, shallow, tags, replace refs', () => {
+    const deny = sandboxSettings(task('builder', [`${WT}/`]), () => [])!.filesystem?.denyWrite ?? []
+    for (const p of ['packed-refs', 'HEAD', 'index', 'FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD', 'shallow', 'modules',
+      'refs/tags', 'refs/replace', 'refs/notes', 'refs/origin', 'refs/stash']) {
+      expect(deny).toContain(`${GIT}/${p}`)
+    }
+  })
+
+  test('every other agent\'s shell may not write .git at all', () => {
+    for (const agent of ['spec-writer', 'reviewer-code', 'reviewer-security', 'reviewer-ux', 'reviewer-ui', 'approver'] as const) {
+      expect(sandboxSettings(task(agent, ['/r/.factory/jobs/001-x/x.md']), list)!.filesystem?.denyWrite).toContain(GIT)
+    }
   })
 
   test('network: GitHub and the npm registry (plus configured hosts) for the builder, nothing for the rest', () => {

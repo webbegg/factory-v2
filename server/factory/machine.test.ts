@@ -70,7 +70,7 @@ describe('intake', () => {
     expect(text).not.toContain('DECISION:')
     expect(env.git.calls).toEqual([
       ['fetch', env.paths.repo, 'main'],
-      ['addWorktree', job.worktree, job.branch, 'origin/main']
+      ['addWorktree', job.worktree, job.branch, 'refs/remotes/origin/main']
     ])
   })
 

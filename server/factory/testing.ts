@@ -98,6 +98,16 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/**
+ * `origin/<x>` is ambiguous: git tries refs/origin/<x>, refs/tags/origin/<x> and
+ * refs/heads/origin/<x> first, which a shell in a worktree can plant. The
+ * factory names the remote-tracking ref in full.
+ */
+function fullRef(ref: string): string {
+  if (/^origin\//.test(ref)) throw new Error(`ambiguous ref ${ref}: use refs/remotes/${ref}`)
+  return ref
+}
+
 export class FakeGit implements GitPort {
   calls: Call[] = []
   clean = true
@@ -112,6 +122,7 @@ export class FakeGit implements GitPort {
   }
 
   async addWorktree(path: string, branch: string, from: string) {
+    fullRef(from)
     await mkdir(path, { recursive: true })
     this.calls.push(['addWorktree', path, branch, from])
   }
@@ -140,13 +151,15 @@ export class FakeGit implements GitPort {
     return this.remoteHeads.has(branch) ? this.remoteHeads.get(branch)! : this.remoteSha
   }
 
-  async commitsAhead() {
+  async commitsAhead(_cwd: string, base: string) {
+    fullRef(base)
     return this.ahead
   }
 
   changed: Array<{ status: string, path: string }> = []
   mergeResult = { ok: true, output: '' }
-  async changedFiles() {
+  async changedFiles(_cwd: string, base: string) {
+    fullRef(base)
     return this.changed
   }
 
@@ -157,12 +170,12 @@ export class FakeGit implements GitPort {
   /** path → content on origin/<base>, as `show` returns it */
   committed = new Map<string, string>()
   async show(cwd: string, ref: string, path: string) {
-    this.calls.push(['show', cwd, ref, path])
+    this.calls.push(['show', cwd, fullRef(ref), path])
     return this.committed.get(path) ?? null
   }
 
   async merge(cwd: string, ref: string) {
-    this.calls.push(['merge', cwd, ref])
+    this.calls.push(['merge', cwd, fullRef(ref)])
     return this.mergeResult
   }
 }

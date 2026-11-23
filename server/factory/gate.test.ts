@@ -333,7 +333,7 @@ describe('merge', () => {
     env.github.drafts.add(9)
     const done = await env.merger.merge(ID)
     expect(done.stage).toBe('merged')
-    expect(env.git.calls).toContainEqual(['merge', job.worktree, 'origin/main'])
+    expect(env.git.calls).toContainEqual(['merge', job.worktree, 'refs/remotes/origin/main'])
     expect(env.git.calls).toContainEqual(['push', job.worktree, job.branch])
     expect(env.github.calls).toContainEqual(['ready', 9])
     expect(env.github.calls).toContainEqual(['merge', 9, 'squash', 'a'.repeat(40)])
