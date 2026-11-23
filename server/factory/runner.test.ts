@@ -111,6 +111,34 @@ describe('bashRefusal against shell spellings (verify B1, B2)', () => {
   })
 })
 
+describe('bashRefusal recheck (verify run 2)', () => {
+  test('quoted separators, line continuations and quoted commands are read as the shell reads them', () => {
+    for (const bad of [
+      'git push -q origin factory/001-x --repo=";" HEAD:main', 'gi\\\nt push -q origin HEAD:main',
+      'bash -c "git push origin HEAD:main"', 'G=git bash -c \'$G push origin HEAD:main\'', 'G=git; env $G push origin HEAD:main',
+      'x=$(echo Z2g= | base64 -d); command eval $x', 'git${IFS}push${IFS}origin${IFS}HEAD:main', '{git,push,origin,HEAD:main}',
+      '/usr/bin/gi? push origin HEAD:main'
+    ]) expect(builder(bad)).not.toBeNull()
+    expect(builder('git commit -qm "fix: a; b && c"')).toBeNull()
+    expect(builder('cd $(git rev-parse --show-toplevel) && git status')).toBeNull()
+  })
+
+  test('git config through the environment is refused', () => {
+    expect(builder('GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=x git p')).not.toBeNull()
+    expect(builder('export GIT_CONFIG_PARAMETERS=x; git push -u origin factory/001-x')).not.toBeNull()
+  })
+
+  test('bundled gh api flags and git push plumbing', () => {
+    expect(reviewer('gh api -iXPUT repos/o/r/pulls/5/merge')).not.toBeNull()
+    expect(reviewer('gh api -iX PUT repos/o/r/pulls/5/merge')).not.toBeNull()
+    expect(reviewer('gh api -iflabels=x repos/o/r/issues/1/labels')).not.toBeNull()
+    expect(reviewer('gh api -i repos/o/r/pulls/5')).toBeNull()
+    for (const bad of ['git send-pack ../origin.git HEAD:refs/heads/main', 'git subtree push --prefix=x origin main', 'git http-push x']) {
+      expect(builder(bad)).not.toBeNull()
+    }
+  })
+})
+
 describe('toolRefusal', () => {
   const task = { agent: 'reviewer-code' as const, branch: BRANCH, writable: ['/jobs/1/round-1/review-code.md'] }
 

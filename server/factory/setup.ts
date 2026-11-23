@@ -154,7 +154,7 @@ export async function doctor(repoDir: string): Promise<DoctorCheck[]> {
     add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')
     // the gate and prompt overrides read .factory/ from origin/<base>, never the working copy
     await sh('git', ['fetch', '-q', 'origin', base])
-    const pushed = await sh('git', ['cat-file', '-e', `origin/${base}:.factory/checks.sh`])
+    const pushed = await sh('git', ['cat-file', '-e', `refs/remotes/origin/${base}:.factory/checks.sh`])
     add(`checks.sh on origin/${base}`, pushed.code === 0, pushed.code === 0 ? 'ok' : `commit and push .factory/ to ${base}: the gate runs that copy`)
   } else {
     add('.factory/checks.sh', existsSync(join(paths.factory, 'checks.sh')), 'the gate runs it in every worktree')

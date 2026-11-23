@@ -161,6 +161,18 @@ describe('GitCli against a real repo', () => {
     expect(await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })).toBe(real)
   }, 30_000)
 
+  test('a tag or branch named origin/main can\'t shadow the remote-tracking ref (verify run 2, B4)', async () => {
+    const real = (await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim()
+    const fake = (await exec('git', ['commit-tree', '-m', 'forged', `${real}^{tree}`], { cwd: repo })).trim()
+    await exec('git', ['tag', 'origin/main', fake], { cwd: repo })
+    try {
+      expect((await exec('git', ['rev-parse', 'origin/main'], { cwd: repo })).trim()).toBe(fake)
+      expect(await git.show(repo, 'refs/remotes/origin/main', 'a.txt')).toBe('a\n')
+    } finally {
+      await exec('git', ['tag', '-d', 'origin/main'], { cwd: repo })
+    }
+  }, 30_000)
+
   test('show reads a file as committed on a ref, or null', async () => {
     await writeFile(join(repo, 'a.txt'), 'uncommitted\n')
     expect(await git.show(repo, 'origin/main', 'a.txt')).toBe('a\n')

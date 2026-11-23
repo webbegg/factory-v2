@@ -56,7 +56,8 @@ describe('gate', () => {
     expect((await env.gate.run(ID)).verdict).toBe('PASS')
     // fetched right before reading, so a moved local origin/main can't stand in for the real one (verify B3)
     const calls = env.git.calls.map(c => c.slice(0, 3).join(' '))
-    const show = calls.indexOf(`show ${env.paths.repo} origin/main`)
+    // the full ref: a tag or branch named origin/main would win over the short name (verify run 2, B4)
+    const show = calls.indexOf(`show ${env.paths.repo} refs/remotes/origin/main`)
     expect(calls[show - 1]).toBe(`fetch ${env.paths.repo} main`)
   })
 

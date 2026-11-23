@@ -63,12 +63,12 @@ export class Gate {
   async runChecks(worktree: string, signal?: AbortSignal): Promise<ChecksRun> {
     const start = performance.now()
     const { baseBranch } = this.o.config
-    const ref = `origin/${baseBranch}`
-    // an agent can move the local origin/<base>; fetching first puts it back
+    // an agent can move the local origin/<base>; fetching first puts it back,
+    // and the full ref name means a tag or branch called origin/<base> can't stand in
     await this.o.ports.git.fetch(this.o.paths.repo, baseBranch)
-    const script = await this.o.ports.git.show(this.o.paths.repo, ref, CHECKS)
+    const script = await this.o.ports.git.show(this.o.paths.repo, `refs/remotes/origin/${baseBranch}`, CHECKS)
     if (script === null) {
-      return { code: 127, output: `${CHECKS} isn't committed on ${ref}: commit and push it first.\n`, seconds: 0 }
+      return { code: 127, output: `${CHECKS} isn't committed on origin/${baseBranch}: commit and push it first.\n`, seconds: 0 }
     }
     const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
     try {

@@ -76,13 +76,16 @@ const LINK = '\0link:'
  */
 async function snapshot(dir: string): Promise<Map<string, string>> {
   const files = new Map<string, string>()
-  if (!existsSync(dir)) return files
-  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
-    if (entry.isDirectory() || entry.name.endsWith('.tmp')) continue
-    const rel = relative(dir, join(entry.parentPath, entry.name))
-    if (rel === 'job.json') continue
-    files.set(rel, entry.isFile() ? await readFile(join(dir, rel), 'utf8') : `${LINK}${await readlink(join(dir, rel)).catch(() => '')}`)
+  // walked by hand: a recursive readdir follows a planted directory link out of the folder
+  const walk = async (sub: string) => {
+    for (const entry of await readdir(join(dir, sub), { withFileTypes: true })) {
+      const rel = sub ? `${sub}/${entry.name}` : entry.name
+      if (entry.isDirectory()) await walk(rel)
+      else if (entry.isSymbolicLink()) files.set(rel, `${LINK}${await readlink(join(dir, rel)).catch(() => '')}`)
+      else if (entry.isFile() && rel !== 'job.json' && !entry.name.endsWith('.tmp')) files.set(rel, await readFile(join(dir, rel), 'utf8'))
+    }
   }
+  if (existsSync(dir)) await walk('')
   return files
 }
 
@@ -455,7 +458,7 @@ export class Orchestrator extends EventEmitter {
     const { paths, ports, config } = this.o
     // an agent can move the local origin/<base>; fetching first puts it back
     await ports.git.fetch(paths.repo, config.baseBranch)
-    const override = await ports.git.show(paths.repo, `origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
+    const override = await ports.git.show(paths.repo, `refs/remotes/origin/${config.baseBranch}`, `.factory/agents/${agent}.md`)
     return override ?? PROMPTS[agent]
   }
 

@@ -68,21 +68,76 @@ function toolTarget(input: unknown): string | null {
 // not a sandbox (a determined shell can still spell a command it can't read):
 // the orchestrator also checks what each agent changed after it runs.
 
-/** Commands of a shell line, as word lists. Quotes and backslashes are dropped so `g''it` and `bash -c "…"` read as written to run. */
-function commandWords(command: string): string[][] {
-  return command.replace(/["'\\]/g, '')
-    .split(/&&|\|\||[;|&\n`()]|\$\(/)
-    .map(part => part.trim().split(/\s+/).filter(Boolean))
-    .filter(words => words.length)
+/** Words of each command in a shell line, split the way the shell splits them: quotes join, backslashes escape, separators outside quotes end a command. */
+function shellCommands(line: string): string[][] {
+  const s = line.replace(/\\\n/g, '')
+  const out: string[][] = []
+  let words: string[] = []
+  let word = ''
+  let quoted = false
+  let quote: string | null = null
+  const endWord = () => {
+    if (word || quoted) words.push(word)
+    word = ''
+    quoted = false
+  }
+  const endCommand = () => {
+    endWord()
+    if (words.length) out.push(words)
+    words = []
+  }
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!
+    if (quote) {
+      if (c === quote) quote = null
+      else if (c === '\\' && quote === '"' && i + 1 < s.length) word += s[++i]
+      else word += c
+    } else if (c === '"' || c === '\'') {
+      quote = c
+      quoted = true
+    } else if (c === '\\') {
+      if (i + 1 < s.length) word += s[++i]
+    } else if (c === '$' && s[i + 1] === '(') {
+      endCommand()
+      i++
+    } else if (';|&\n`()'.includes(c)) {
+      endCommand()
+    } else if (/\s/.test(c)) {
+      endWord()
+    } else {
+      word += c
+    }
+  }
+  endCommand()
+  return out
 }
 
-/** A command whose name comes from a variable, `eval` or a substitution can't be read before it runs. */
-function opaqueCommand(command: string): boolean {
-  if (/(^|[;&|\n(]\s*)(\$\(|`)/.test(command)) return true
-  return commandWords(command).some((words) => {
-    const name = words.find(w => !/^\w+=/.test(w))
-    return !!name && (name.startsWith('$') || name === 'eval')
-  })
+/** Every command in the line, and in any quoted string that could itself be run (`bash -c "…"`), a few levels deep. */
+function commandWords(command: string, depth = 0): string[][] {
+  const commands = shellCommands(command)
+  if (depth >= 3) return commands
+  return [...commands, ...commands.flat().filter(w => /[\s;&|`]|\$\(/.test(w)).flatMap(w => commandWords(w, depth + 1))]
+}
+
+/** words that run the next word as a command */
+const WRAPPERS = new Set(['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'nice', 'xargs', 'builtin', 'timeout'])
+
+/**
+ * A command whose name comes from a variable, `eval`, a substitution, a glob
+ * or brace expansion can't be read before it runs, and git config passed
+ * through the environment rewires what git does.
+ */
+function opaqueCommand(command: string): string | null {
+  if (/(^|[;&|\n(]\s*)(\$\(|`)/.test(command)) return 'a command named by a substitution'
+  for (const words of commandWords(command)) {
+    if (words.some(w => /^(export\s+)?GIT_(CONFIG\w*|EXEC_PATH|SSH\w*|ASKPASS)=/.test(w))) return 'git configuration through the environment'
+    if (words.some(w => /\$\{?IFS/.test(w))) return 'a command split with IFS'
+    let k = 0
+    while (k < words.length && (/^\w+=/.test(words[k]!) || WRAPPERS.has(words[k]!) || (k > 0 && WRAPPERS.has(words[k - 1]!) && words[k]!.startsWith('-')))) k++
+    const name = words[k]
+    if (name && (name.startsWith('$') || name === 'eval' || /[{}*?[\]]/.test(name))) return `a command named '${name}'`
+  }
+  return null
 }
 
 const GIT_CONFIG_READS = new Set(['--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin'])
@@ -93,7 +148,11 @@ const GIT_READS = new Set([
   'diff-tree', 'var', 'help', 'version', 'branch', 'config', 'remote', 'fetch', 'worktree'
 ])
 /** plumbing the builder never needs and that rewrites refs or remotes behind the gate's back */
-const GIT_BUILDER_REFUSED = new Set(['update-ref', 'symbolic-ref', 'replace', 'notes', 'filter-branch', 'filter-repo', 'reflog'])
+const GIT_BUILDER_REFUSED = new Set([
+  'update-ref', 'symbolic-ref', 'replace', 'notes', 'filter-branch', 'filter-repo', 'reflog',
+  // pushes that skip `git push` and its checks
+  'send-pack', 'subtree', 'http-push', 'push-to-checkout'
+])
 const PUSH_FLAGS_REFUSED = /^(--force.*|--delete|--mirror|--all|--tags|--prune)$|^-[a-zA-Z]*[fd][a-zA-Z]*$/
 const GH_READS = new Set(['view', 'list', 'status', 'diff', 'checks', 'watch'])
 const GH_FREE = new Set(['search', 'help', 'version', '--version', 'browse'])
@@ -147,12 +206,13 @@ function ghRefusal(args: string[], agent: string): string | null {
   const [group = '', sub = ''] = words
   if (GH_FREE.has(group)) return null
   if (group === 'api') {
+    // short flags bundle (-iXPUT, -iflabels=x), so -X and -f/-F count anywhere in a cluster
     const methods = args.flatMap((a, k) => {
-      if (/^(-X|--method)$/.test(args[k - 1] ?? '')) return [a]
-      const attached = /^(?:-X|--method=)(.+)$/.exec(a)
+      if (/^(-[a-zA-Z]*X|--method)$/.test(args[k - 1] ?? '')) return [a]
+      const attached = /^(?:-[a-zA-Z]*X|--method=)(.+)$/.exec(a)
       return attached ? [attached[1]!] : []
     })
-    const fields = args.some(a => /^(-f|-F|--field|--raw-field|--input)(=|$)|^-[fF]./.test(a))
+    const fields = args.some(a => /^(--field|--raw-field|--input)(=|$)|^-[a-zA-Z]*[fF]/.test(a))
     const writes = methods.some(m => m.toUpperCase() !== 'GET') || fields
     return writes ? `${agent} may only read through gh api (GET without fields)` : null
   }
@@ -164,9 +224,8 @@ function ghRefusal(args: string[], agent: string): string | null {
 
 /** Why a shell command is refused for this agent, or null to let it run. */
 export function bashRefusal(command: string, agent: AgentName, branch?: string): string | null {
-  if (opaqueCommand(command)) {
-    return `${agent} may not run a command named by a variable, eval or substitution: the factory can't check it; write the command out`
-  }
+  const opaque = opaqueCommand(command)
+  if (opaque) return `${agent} may not run ${opaque}: the factory can't check it; write the command out`
   for (const words of commandWords(command)) {
     for (let k = 0; k < words.length; k++) {
       const tool = basename(words[k]!)
