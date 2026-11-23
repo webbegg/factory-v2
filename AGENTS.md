@@ -7,7 +7,9 @@ view; this file is for whoever changes the code.
 ## Layout
 
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
-  `machine.ts` (stage transitions, each justified by files on disk),
+  `machine.ts` (stage transitions, each justified by files on disk; it
+  re-exports `TERMINAL` and `WAITING`, which live in `types.ts` so the board
+  can import them),
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
   job's `events.jsonl` and never throws; `list()` skips `<id>.rejected-<n>`
   folders, which `archiveJob` makes, while `Queue.create` numbers new ids
@@ -28,7 +30,7 @@ view; this file is for whoever changes the code.
   `runChecksScript`, and `doctor(repo, { baseChecks: true })`, used only by the
   CLI, includes it), `service.ts` (what the server and CLI share;
   `jobFiles` lists a job's `.md` files and each round's `.log` files, which
-  `JobDetail` shows as plain text),
+  `JobFiles` shows as plain text),
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
   the board imports it too).
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
@@ -73,15 +75,24 @@ view; this file is for whoever changes the code.
   frames that aren't JSON with a `console.warn`. While the stream is down the
   shell shows a "Reconnecting…" banner under the header. The UI imports engine types from
   `~~/server/factory/types`. `COLUMNS` and the board's selection helpers
-  (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`) are in
-  `app/utils/board.ts`. A card's round chips come from `roundChips` in
-  `app/utils/chips.ts`, pulse only while the job is in `state.running`, and use
+  (`columnIndex`, `selectedJobId`, `escapeAction`, `fileWriter`, `toneColor`)
+  are in `app/utils/board.ts`, with `LIVE_STAGES`, built from `STAGES` minus
+  `TERMINAL` and `WAITING`. A card's round chips come from `roundChips` in
+  `app/utils/chips.ts`, pulse only while the job is in `state.running` (in a
+  review only the first routed reviewer without a verdict runs), and use
   the `ring-pulse` animation defined in `app/assets/css/main.css`. Job details render in `app/components/JobDetail.vue`
   inside the board's panel at `/?job=<id>`; `/jobs/:id` only redirects there.
+  `JobDetail` is the shell: it fetches the detail, holds the live flags, the
+  Stalled/Paused alerts and the panel grid, and composes `JobHeader` (meta,
+  links, the run actions and their modals), `JobDecision` (the needs-human /
+  needs-info form, shown for `WAITING` stages), `JobFiles` (the file list and
+  viewer, loading through `useJobFile` in `app/composables/useJobFile.ts`,
+  which drops responses for a file or job the user has left) and
+  `JobActivity` (the job's Live activity lines).
   Layout: the shell (`app/app.vue`) gives pages a viewport-tall scroll
   region under the header, and pages that want fixed headers with scrolling
   panels fill it with `h-full` / `min-h-0` and scroll their own panels;
-  in a wide panel JobDetail shows Live activity as a right-hand column that
+  in a wide panel JobDetail's grid shows Live activity as a right-hand column that
   scrolls its own lines, and stacks it below the document when narrower.
   Board columns fit their content between a 100px minimum and the board
   height (`100cqh` of the strip's viewport), and scroll their own cards past that.
