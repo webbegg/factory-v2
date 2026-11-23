@@ -25,7 +25,7 @@ const chips = computed(() => roundChips(props.job, props.running ?? false))
       :ui="{ body: 'p-3 sm:p-3 space-y-2' }"
       :class="[selected ? 'ring-2 ring-primary' : job.stage === 'needs-human' ? 'ring-2 ring-warning' : '', job.stage === 'merged' || job.stage === 'rejected' ? 'opacity-70' : '']"
     >
-      <div class="flex items-center gap-2 text-xs text-muted">
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
         <span
           v-if="running"
           class="size-2 animate-pulse rounded-full bg-primary"
@@ -33,7 +33,10 @@ const chips = computed(() => roundChips(props.job, props.running ?? false))
         />
         <span class="font-mono">{{ num }}</span>
         <span>#{{ job.issue }}</span>
-        <span v-if="job.pr">· PR #{{ job.pr }}</span>
+        <span
+          v-if="job.pr"
+          class="whitespace-nowrap"
+        >· PR #{{ job.pr }}</span>
         <UBadge
           v-if="flag"
           :label="flag.label"
