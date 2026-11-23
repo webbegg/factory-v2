@@ -127,6 +127,7 @@ export async function fixtureState(board: FixtureBoard) {
     running: board.fixtures.running,
     queued: [] as number[],
     errors: board.fixtures.errors,
+    paused: [] as string[],
     jobs: await board.store.list()
   }
 }

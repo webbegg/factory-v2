@@ -33,6 +33,7 @@ export type FactoryEvent
   = | { type: 'job', job: Job }
     | { type: 'agent', jobId: string, agent: AgentName, event: AgentEvent }
     | { type: 'error', jobId: string, message: string }
+    | { type: 'paused', jobId: string }
     | { type: 'log', message: string }
     | { type: 'queued', issues: number[] }
     | { type: 'idle' }
@@ -126,6 +127,10 @@ export class Orchestrator extends EventEmitter {
   private ticking: Promise<void> = Promise.resolve()
   /** last failure per job, also kept in job.json (see `loadErrors`); the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
+  /** jobs stopped by `cancel`; the drain leaves them alone until `start`, and like `errors` they are gone on restart */
+  readonly paused = new Set<string>()
+  /** running jobs `cancel` aborted, so their driver's end is a pause, not a failure */
+  private cancelling = new Set<string>()
   /** issues run while every slot was busy, oldest first; like `errors`, gone on restart */
   private pending: number[] = []
   /** set by shutdown: nothing new starts, queued issues included */
@@ -247,8 +252,12 @@ export class Orchestrator extends EventEmitter {
     this.start(id)
   }
 
+  /** Stops a running job and pauses it where it is, until it is started again. */
   cancel(id: string) {
-    this.active.get(id)?.controller.abort()
+    const a = this.active.get(id)
+    if (!a) return
+    this.cancelling.add(id)
+    a.controller.abort()
   }
 
   /** Stops draining, aborts every running agent and gate, and waits for their drivers to stop. */
@@ -284,7 +293,7 @@ export class Orchestrator extends EventEmitter {
       if (row.action === 'new') {
         const job = await this.o.queue.create(row.issue)
         this.start(job.id)
-      } else if (row.action === 'resume' && row.job && !this.active.has(row.job) && !this.errors.has(row.job)) {
+      } else if (row.action === 'resume' && row.job && !this.active.has(row.job) && !this.errors.has(row.job) && !this.paused.has(row.job)) {
         if (row.stage === 'needs-info') await this.o.machine.advance(row.job, 'intake')
         this.start(row.job)
       }
@@ -327,8 +336,20 @@ export class Orchestrator extends EventEmitter {
     if (this.active.has(id) || this.stopped) return
     const controller = new AbortController()
     this.errors.delete(id)
+    this.paused.delete(id)
+    // a cancelled driver may end by returning or by any error its abort surfaced as
+    const pauseIfCancelled = () => {
+      if (!this.cancelling.has(id)) return false
+      this.paused.add(id)
+      this.send({ type: 'paused', jobId: id })
+      return true
+    }
     const done = this.drive(id, controller.signal)
+      .then(() => {
+        pauseIfCancelled()
+      })
       .catch(async (err: Error) => {
+        if (pauseIfCancelled()) return
         const message = redact(err.message)
         this.errors.set(id, message)
         this.send({ type: 'error', jobId: id, message })
@@ -338,6 +359,7 @@ export class Orchestrator extends EventEmitter {
           .catch((e: Error) => this.send({ type: 'log', message: `${id}: couldn't save its error: ${e.message}` }))
       })
       .finally(async () => {
+        this.cancelling.delete(id)
         this.active.delete(id)
         // a job whose driver stopped has left build/gate as far as this record goes
         this.stopChecks.delete(id)

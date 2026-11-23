@@ -12,6 +12,7 @@ export default defineEventHandler(async () => {
     running: f.orchestrator.runningJobs(),
     queued: f.orchestrator.queuedIssues(),
     errors: Object.fromEntries(f.orchestrator.errors),
+    paused: [...f.orchestrator.paused],
     jobs: await f.store.list()
   }
 })
