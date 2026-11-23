@@ -50,7 +50,7 @@ export class JobStore {
     }
   }
 
-  async write(id: string, rel: string, text: string): Promise<void> {
+  async write(id: string, rel: string, text: string | Uint8Array): Promise<void> {
     const target = this.path(id, rel)
     await mkdir(dirname(target), { recursive: true })
     const tmp = `${target}.${process.pid}.tmp`

@@ -8,8 +8,10 @@ import { doctor } from '../../factory/setup'
 export default defineEventHandler(() => guarded(async () => {
   const repo = projectDir()
   const script = join(factoryPaths(repo).factory, 'checks.sh')
+  const fixtures = useFixtures()
   return {
-    checks: await doctor(repo),
+    // the fixture board runs no git, gh or claude, so its checks are canned
+    checks: fixtures ? (await fixtures).fixtures.checks : await doctor(repo),
     checksScript: existsSync(script) ? await readFile(script, 'utf8') : null
   }
 }))

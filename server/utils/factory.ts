@@ -1,17 +1,31 @@
 import { resolve } from 'node:path'
 import type { H3Event } from 'h3'
-import { acquireLock, createFactory } from '../factory/service'
-import type { Factory } from '../factory/service'
+import { acquireLock, createFactory, FIXTURE_READ_ONLY, fixtureDir, fixtureMode, openFixtures } from '../factory/service'
+import type { Factory, FixtureBoard } from '../factory/service'
 
 let instance: Promise<Factory> | null = null
+let fixtures: Promise<FixtureBoard> | null = null
 
 /** The project the server runs on; usable before `.factory/` exists. */
 export function projectDir(): string {
+  if (fixtureMode()) return fixtureDir()
   return resolve(process.env.FACTORY_PROJECT || process.cwd())
+}
+
+/** The sample board under `FACTORY_FIXTURES=1`, or null; read routes answer from it. */
+export function useFixtures(): Promise<FixtureBoard> | null {
+  if (!fixtureMode()) return null
+  fixtures ??= openFixtures(projectDir()).catch((err: unknown) => {
+    fixtures = null
+    throw err
+  })
+  return fixtures
 }
 
 /** The project's factory, created once per server process with its orchestrator lock. */
 export function useFactory(): Promise<Factory> {
+  // the fixture board never takes a lock or drives jobs, whatever route asks
+  if (fixtureMode()) throw createError({ statusCode: 403, statusMessage: FIXTURE_READ_ONLY })
   instance ??= (async () => {
     const factory = await createFactory(projectDir())
     const release = await acquireLock(factory.paths)

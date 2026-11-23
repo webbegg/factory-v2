@@ -12,8 +12,10 @@ import { Machine } from './machine'
 import { firstLine } from './markdown'
 import { Merger } from './merge'
 import { Orchestrator } from './orchestrator'
+import type { FactoryEvent } from './orchestrator'
 import type { Ports } from './ports'
 import { Queue } from './queue'
+import type { DoctorCheck } from './setup'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths } from './types'
 
@@ -79,6 +81,64 @@ export async function acquireLock(paths: FactoryPaths): Promise<() => Promise<vo
   }
 }
 
+// ---- Fixture mode -----------------------------------------------------------
+
+/** What a fixture board can't keep on disk: process memory and doctor's shell checks. */
+export interface Fixtures {
+  running: string[]
+  errors: Record<string, string>
+  events: FactoryEvent[]
+  checks: DoctorCheck[]
+}
+
+/** A sample project the board reads: no orchestrator, no lock, no gh, git or claude. */
+export interface FixtureBoard {
+  paths: FactoryPaths
+  config: FactoryConfig
+  store: JobStore
+  fixtures: Fixtures
+}
+
+/** `FACTORY_FIXTURES=1` serves the committed sample jobs instead of a project. */
+export function fixtureMode(env: Record<string, string | undefined> = process.env): boolean {
+  return env.FACTORY_FIXTURES === '1'
+}
+
+/** Fixed, so no request or variable can point the fixture board at other data. */
+export function fixtureDir(cwd = process.cwd()): string {
+  return resolve(cwd, 'fixtures', 'board')
+}
+
+/** Opens a fixture project for reading only; nothing here writes or takes the lock. */
+export async function openFixtures(dir: string): Promise<FixtureBoard> {
+  const paths = factoryPaths(resolve(dir))
+  const config = await loadConfig(paths)
+  const raw = JSON.parse(await readFile(join(paths.repo, 'fixture.json'), 'utf8')) as Partial<Fixtures>
+  const fixtures: Fixtures = { running: raw.running ?? [], errors: raw.errors ?? {}, events: raw.events ?? [], checks: raw.checks ?? [] }
+  return { paths, config, store: new JobStore(paths), fixtures }
+}
+
+/** `/api/state` for a fixture board. */
+export async function fixtureState(board: FixtureBoard) {
+  return {
+    project: board.paths.repo,
+    config: board.config,
+    draining: false,
+    running: board.fixtures.running,
+    queued: [] as number[],
+    errors: board.fixtures.errors,
+    jobs: await board.store.list()
+  }
+}
+
+export const FIXTURE_READ_ONLY = 'fixture mode is read-only'
+
+/** In fixture mode every API write is refused, setup's init included. */
+export function fixtureRefusal(r: Pick<RequestFacts, 'method' | 'path'>): { status: number, message: string } | null {
+  if (!r.path.startsWith('/api/') || r.method === 'GET' || r.method === 'HEAD') return null
+  return { status: 403, message: FIXTURE_READ_ONLY }
+}
+
 // ---- Job files for the UI ---------------------------------------------------
 
 export type Tone = 'good' | 'warn' | 'stop' | null
@@ -121,7 +181,10 @@ export async function jobFiles(store: JobStore, id: string): Promise<JobFile[]> 
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith('.md')) paths.push(entry.name)
     if (entry.isDirectory() && /^round-\d+$/.test(entry.name)) {
-      for (const f of await readdir(join(dir, entry.name))) if (f.endsWith('.md')) paths.push(`${entry.name}/${f}`)
+      // files only: a reviewer's screenshot folder is never a report
+      for (const f of await readdir(join(dir, entry.name), { withFileTypes: true })) {
+        if (f.isFile() && f.name.endsWith('.md')) paths.push(`${entry.name}/${f.name}`)
+      }
     }
   }
   paths.sort((a, b) => {

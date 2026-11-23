@@ -18,6 +18,10 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
                                 └ ESCALATE → PR ready, you decide (merge, feedback, reject)
 ```
 
+On the board, an escalated job's **Merge** button approves it: the factory
+syncs with the base, gates again, and merges through `gh pr merge`, as after an
+APPROVE. A PR you merge by hand on GitHub moves its job to merged.
+
 The orchestrator is deterministic TypeScript; only the judgment steps are
 agents (Claude Agent SDK). Every step writes one markdown file in
 `.factory/jobs/<job>/`, so a stopped factory resumes where it was.

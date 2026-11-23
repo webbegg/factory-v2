@@ -18,7 +18,7 @@ view; this file is for whoever changes the code.
   `attachments.ts` (image upload limits and `validateUpload`; no Node imports,
   the board imports it too).
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
-  reject, after job.json is saved) and agent, gate and merge lines from
+  approve, reject, after job.json is saved) and agent, gate and merge lines from
   `orchestrator.ts`, which writes `agent-start` before an agent's watch is
   taken and `agent-end` after its check so its own lines are never undone.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
@@ -33,9 +33,17 @@ view; this file is for whoever changes the code.
   `Sec-Fetch-Site` other than same-origin/none, and non-JSON writes are
   refused: keep every new write route a JSON POST, and keep GET routes
   read-only (the merged sweep runs in the orchestrator's tick, not in
-  `/api/queue`). `server/api/uploads.post.ts`
+  `/api/queue`; while paused, the board's `/api/merged` POST is the check
+  for needs-human jobs merged by hand, on load and when a job panel opens).
+  `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
+  merge (the board's Merge on an escalated job: `Orchestrator.approve`),
+  retry and cancel. `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
   to the text it then sends to the existing routes.
+  `server/middleware/fixtures.ts` applies `fixtureRefusal` (`service.ts`): under
+  `FACTORY_FIXTURES=1` every API write is a 403, and read routes branch on `useFixtures()`.
+- `fixtures/board/` — the sample project fixture mode serves: a nested
+  `.factory/` (config, jobs) plus `fixture.json` (running, errors, events, checks).
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
   `useBoard()` in `app/composables/useBoard.ts` (state + SSE + `act()` for
   POSTs that toast refusals); `state.queued` comes from `/api/state` and the
@@ -65,6 +73,25 @@ view; this file is for whoever changes the code.
   applied to all of them by `ui.scrollArea` in `app/app.config.ts` (and to
   `.md pre`); `app/plugins/scrollbars.client.ts` sets `data-scrolling` while a
   region scrolls.
+
+## Dev server on a given port
+
+Run `bun install` first in a fresh checkout. Then, from the repo root:
+
+```sh
+FACTORY_FIXTURES=1 bun run dev --port <n>
+```
+
+`FACTORY_FIXTURES=1` serves the sample jobs in `fixtures/board/` (several
+columns, a running job, one waiting on you, a two-round review, a merged job,
+activity events). It takes no `orchestrator.lock`, starts no jobs, runs no
+`gh`, `git` or `claude`, writes nothing, and answers every API write with a
+403. `FACTORY_PROJECT` is ignored in this mode. Stop only the server on your
+port when done (`lsof -tiTCP:<n> -sTCP:LISTEN`).
+
+Never point a second board at a live project (`FACTORY_PROJECT=…` or the
+project's own checkout): `orchestrator.lock` refuses it while the factory
+runs, and if it started it could act on real jobs.
 
 ## Rules
 

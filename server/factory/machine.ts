@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import { body, firstLine, header, section } from './markdown'
 import type { Ports } from './ports'
 import type { JobStore } from './store'
@@ -18,7 +18,7 @@ export const TRANSITIONS: Partial<Record<Stage, readonly Stage[]>> = {
   'review': ['approve', 'build', 'needs-human'],
   'approve': ['merging', 'needs-human'],
   'merging': ['build', 'needs-human'],
-  'needs-human': ['build', 'rejected']
+  'needs-human': ['build', 'merging', 'rejected']
 }
 
 export const TERMINAL: ReadonlySet<Stage> = new Set(['merged', 'rejected'])
@@ -38,7 +38,7 @@ export function holdsSlot(job: Job): boolean {
   return !TERMINAL.has(job.stage) && !WAITING.has(job.stage)
 }
 
-type Via = 'advance' | 'feedback' | 'reject'
+type Via = 'advance' | 'feedback' | 'reject' | 'approve'
 
 export interface MachineOptions {
   paths: FactoryPaths
@@ -132,6 +132,25 @@ export class Machine {
     })
     await this.logMove(job, 'needs-human')
     return { job, file }
+  }
+
+  /** needs-human → merging on the operator's word, recorded as an APPROVE decision.md. */
+  async approve(id: string, operator: string): Promise<Job> {
+    const job = await this.store.update(id, async (raw) => {
+      require(raw.stage === 'needs-human', `${id} is in ${raw.stage}, not needs-human`)
+      require(raw.pr, `${id} has no PR to merge`)
+      await this.store.archive(id, 'decision.md')
+      await this.store.write(id, 'decision.md', `APPROVE\n\n@${operator} approved the merge from needs-human.\n`)
+      // the merge runs in this round: a conflict left by an earlier attempt must not count as this one's
+      const rd = this.roundRel(raw)
+      if (await this.store.read(id, `${rd}/sync.md`) !== null) {
+        const k = (await readdir(this.store.path(id, rd))).filter(f => /^sync-\d+\.md$/.test(f)).length + 1
+        await this.store.move(id, `${rd}/sync.md`, `${rd}/sync-${k}.md`)
+      }
+      return this.transition(await this.sync(raw), 'merging', 'approve')
+    })
+    await this.logMove(job, 'needs-human')
+    return job
   }
 
   /** needs-info or needs-human → rejected with the user's reason as rejection.md. */
@@ -284,6 +303,11 @@ export class Machine {
         // other merge failures (gate after the sync, gh pr merge) escalate on any round
         this.lastRoundCheck(job, stage)
       }
+    } else if (old === 'needs-human' && stage === 'merging') {
+      require(via === 'approve', 'use approve to merge an escalated job')
+      // a fresh budget, so a conflict at the merge can still go back to build
+      job.roundLimit = job.round + this.config.maxRounds
+      await github.editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (old === 'needs-human') { // → build
       require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
       job.roundLimit = job.round + this.config.maxRounds

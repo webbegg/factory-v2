@@ -1,4 +1,4 @@
-// Human actions on one job: feedback, reject, answer (need { text }), retry, cancel.
+// Human actions on one job: feedback, reject, answer (need { text }), merge, retry, cancel.
 export default defineEventHandler(async (event) => {
   const f = await useFactory()
   const id = getRouterParam(event, 'id')!
@@ -17,6 +17,8 @@ export default defineEventHandler(async (event) => {
       const text = await readText(event)
       return guarded(async () => ({ job: await o.answer(id, text, (n, body) => f.github.reply(n, body)) }))
     }
+    case 'merge':
+      return guarded(async () => ({ job: await o.approve(id) }))
     case 'retry':
       await guarded(() => f.store.load(id))
       o.retry(id)

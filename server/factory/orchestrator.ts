@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { PROMPTS } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -66,23 +66,29 @@ const REPORT_HEAD: Partial<Record<AgentName, RegExp>> = {
   'reviewer-ui': /^VERDICT: (PASS|CHANGES)$/
 }
 
-/** Every file under a job folder but job.json (the factory's own) and in-flight temp files, by relative path. */
-const LINK = '\0link:'
+/** A file's bytes (screenshots are binary) or a link's target, kept apart so no file can pass for a link. */
+type Entry = { file: Buffer } | { link: string }
+
+function same(a: Entry, b: Entry | undefined): boolean {
+  if (!b) return false
+  if ('link' in a) return 'link' in b && a.link === b.link
+  return 'file' in b && a.file.equals(b.file)
+}
 
 /**
  * Every file and link under a job folder but job.json (guarded by field, see
  * TRUSTED) and in-flight temp files, by relative path. A link is recorded as
  * itself, never followed, so a planted link to a forged verdict shows up.
  */
-async function snapshot(dir: string): Promise<Map<string, string>> {
-  const files = new Map<string, string>()
+async function snapshot(dir: string): Promise<Map<string, Entry>> {
+  const files = new Map<string, Entry>()
   // walked by hand: a recursive readdir follows a planted directory link out of the folder
   const walk = async (sub: string) => {
     for (const entry of await readdir(join(dir, sub), { withFileTypes: true })) {
       const rel = sub ? `${sub}/${entry.name}` : entry.name
       if (entry.isDirectory()) await walk(rel)
-      else if (entry.isSymbolicLink()) files.set(rel, `${LINK}${await readlink(join(dir, rel)).catch(() => '')}`)
-      else if (entry.isFile() && rel !== 'job.json' && !entry.name.endsWith('.tmp')) files.set(rel, await readFile(join(dir, rel), 'utf8'))
+      else if (entry.isSymbolicLink()) files.set(rel, { link: await readlink(join(dir, rel)).catch(() => '') })
+      else if (entry.isFile() && rel !== 'job.json' && !entry.name.endsWith('.tmp')) files.set(rel, { file: await readFile(join(dir, rel)) })
     }
   }
   if (existsSync(dir)) await walk('')
@@ -187,6 +193,31 @@ export class Orchestrator extends EventEmitter {
     const { job } = await this.o.machine.feedback(id, text, await this.o.ports.github.operator())
     this.start(id)
     return job
+  }
+
+  /** The operator's Merge on an escalated job: the merging step syncs, gates and merges it. */
+  async approve(id: string): Promise<Job> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    // merged by hand already: nothing was approved through the factory, so no APPROVE is written
+    if (current.stage === 'needs-human' && current.pr && await ports.github.prState(current.pr) === 'MERGED') {
+      const job = await machine.advance(id, 'merged')
+      this.send({ type: 'job', job })
+      return job
+    }
+    const job = await machine.approve(id, await ports.github.operator())
+    this.start(id)
+    return job
+  }
+
+  /** Paused or not, needs-human jobs whose PR someone merged on GitHub move to merged. */
+  checkMerged(): Promise<void> {
+    // on the tick's chain so it never overlaps a fill; the caller still sees a failure
+    const run = this.ticking.then(() => this.o.queue.sweepMerged(id => this.active.has(id), 'needs-human'))
+    this.ticking = run.catch((err) => {
+      this.send({ type: 'log', message: `queue: ${(err as Error).message}` })
+    })
+    return run
   }
 
   async reject(id: string, text: string): Promise<Job> {
@@ -507,9 +538,17 @@ export class Orchestrator extends EventEmitter {
     return join(this.o.paths.jobs, job.id, file)
   }
 
+  /** The folder the UX and UI reviewers keep this round's screenshots in; no other agent has one. */
+  private screenshots(job: Job, agent: AgentName): string | null {
+    if (agent !== 'reviewer-ux' && agent !== 'reviewer-ui') return null
+    return join(this.o.paths.jobs, job.id, `round-${job.round}`, `screenshots-${agent.slice('reviewer-'.length)}`)
+  }
+
   private writable(job: Job, agent: AgentName): string[] {
     const report = this.report(job, agent)
-    return agent === 'builder' ? [`${job.worktree}/`, report] : [report]
+    const shots = this.screenshots(job, agent)
+    if (agent === 'builder') return [`${job.worktree}/`, report]
+    return shots ? [report, `${shots}/`] : [report]
   }
 
   /**
@@ -551,7 +590,10 @@ export class Orchestrator extends EventEmitter {
     const { git } = this.o.ports
     const dir = this.o.store.dir(job.id)
     const own = relative(dir, this.report(job, agent))
-    const allowed = (rel: string) => rel === own
+    const shots = this.screenshots(job, agent)
+    // strictly inside: the folder itself replaced by a link is refused like any other added path
+    const inside = shots ? `${relative(dir, shots)}/` : null
+    const allowed = (rel: string) => rel === own || (inside !== null && rel.startsWith(inside))
     const readsBranch = agent !== 'builder' && agent !== 'intake' && existsSync(job.worktree)
     const files = await snapshot(dir)
     const fields = await this.o.store.load(job.id)
@@ -560,13 +602,18 @@ export class Orchestrator extends EventEmitter {
       check: async () => {
         const now = await snapshot(dir)
         const changes: string[] = []
-        for (const [rel, text] of files) {
-          if (allowed(rel) || now.get(rel) === text) continue
+        for (const [rel, entry] of files) {
+          if (allowed(rel) || same(entry, now.get(rel))) continue
           changes.push(`${rel} (${now.has(rel) ? 'changed' : 'deleted'})`)
-          await this.o.store.write(job.id, rel, text)
+          if ('file' in entry) {
+            await this.o.store.write(job.id, rel, entry.file)
+          } else {
+            await rm(join(dir, rel), { recursive: true, force: true })
+            await symlink(entry.link, join(dir, rel))
+          }
         }
-        for (const [rel, text] of now) {
-          if (allowed(rel) ? !text.startsWith(LINK) : files.has(rel)) continue
+        for (const [rel, entry] of now) {
+          if (allowed(rel) ? !('link' in entry) : files.has(rel)) continue
           changes.push(`${rel} (added)`)
           await rm(join(dir, rel), { force: true })
         }
@@ -591,8 +638,11 @@ export class Orchestrator extends EventEmitter {
     const { store, paths, ports } = this.o
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
+    const shots = this.screenshots(job, agent)
+    // made up front: screenshot tools run through Bash rarely create the folder
+    if (shots) await mkdir(shots, { recursive: true })
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
-      `Write your report to ${this.report(job, agent)}.`].filter(Boolean).join(' ')
+      `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : ''].filter(Boolean).join(' ')
     const resume = agent === 'builder' ? job.sessions.builder : undefined
     const task: AgentTask = {
       agent,
