@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isWritable } from './agents/runner'
@@ -1056,6 +1056,46 @@ describe('orchestrator', () => {
     expect(jobs.map(j => j.issue)).toEqual([1, 3, 2])
     const intakes = runner.tasks.filter(t => t.agent === 'intake').map(t => t.jobId)
     expect(intakes).toEqual(jobs.map(j => j.id))
+  })
+
+  test('runAgain archives a rejected job and reports whether its issue is still labeled', async () => {
+    const { env, orch, runner } = await factory({})
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2, labels: [] })
+    await seed(env, { id: '001-a', issue: 1, stage: 'rejected' })
+    await seed(env, { id: '002-b', issue: 2, stage: 'rejected' })
+    orch.errors.set('001-a', 'boom')
+    orch.paused.add('001-a')
+    const events: FactoryEvent[] = []
+    orch.on('event', (e: FactoryEvent) => events.push(e))
+    expect(await orch.runAgain('001-a')).toEqual({ archived: '001-a.rejected-1', labeled: true })
+    expect(await orch.runAgain('002-b')).toEqual({ archived: '002-b.rejected-1', labeled: false })
+    expect(orch.errors.has('001-a')).toBe(false)
+    expect(orch.paused.has('001-a')).toBe(false)
+    expect(events).toEqual([
+      { type: 'archived', jobId: '001-a', archived: '001-a.rejected-1' },
+      { type: 'archived', jobId: '002-b', archived: '002-b.rejected-1' }
+    ])
+    // nothing is relabeled, created or started
+    await orch.idle()
+    expect(await env.store.list()).toEqual([])
+    expect(env.github.calls).toEqual([])
+    expect(runner.tasks).toEqual([])
+  })
+
+  test('runAgain refuses non-rejected jobs, unknown ids and ids with path parts, touching nothing', async () => {
+    const { env, orch } = await factory({})
+    env.github.addIssue({ number: 1 })
+    await seed(env, { id: '001-a', issue: 1, stage: 'needs-human' })
+    await seed(env, { id: '002-b', issue: 2, stage: 'rejected' })
+    await env.store.archiveJob('002-b')
+    await seed(env, { id: '002-b', issue: 2, stage: 'rejected' })
+    const before = (await readdir(env.paths.jobs)).sort()
+    for (const id of ['001-a', '999-nope', '../x', '002-b/..', '002-b.rejected-1', '..', '.', 'a/b', 'a\\b', '002-B', '']) {
+      await expect(orch.runAgain(id)).rejects.toBeInstanceOf(Refused)
+    }
+    expect((await readdir(env.paths.jobs)).sort()).toEqual(before)
+    expect((await env.store.list()).map(j => j.id)).toEqual(['001-a', '002-b'])
   })
 
   test('closed, unlabeled and already-running issues are refused at once and not queued', async () => {

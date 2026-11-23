@@ -9,6 +9,7 @@ const props = defineProps<{ jobId: string }>()
 const emit = defineEmits<{ close: [] }>()
 const { state, activity, drafts, act } = useBoard()
 const { withImages } = useAttachments()
+const toast = useToast()
 
 // Not awaited: opening the panel must never hold up the board.
 const { data, error, refresh } = useFetch<Detail>(() => `/api/jobs/${props.jobId}`)
@@ -79,10 +80,26 @@ const empty = computed(() => {
 })
 
 const lines = computed(() => activity.value[props.jobId] ?? [])
-const sending = ref<'feedback' | 'reject' | 'answer' | 'merge' | null>(null)
+const sending = ref<'feedback' | 'reject' | 'answer' | 'merge' | 'rerun' | null>(null)
 const confirmingMerge = ref(false)
 const confirmingCancel = ref(false)
 const confirmingReject = ref(false)
+const confirmingRerun = ref(false)
+async function rerun() {
+  if (sending.value) return
+  confirmingRerun.value = false
+  sending.value = 'rerun'
+  const id = props.jobId
+  const res = await act<{ archived: string, labeled: boolean }>(`/api/jobs/${id}/rerun`)
+  sending.value = null
+  if (!res) return
+  const label = state.value?.config.labels.queue ?? 'factory'
+  toast.add(res.labeled
+    ? { title: `${id} archived as ${res.archived}`, description: 'The issue gets a new job on the next drain, or now with Run issue.', color: 'success' }
+    : { title: `${id} archived as ${res.archived}`, description: `The issue needs the ${label} label to run again.`, color: 'warning' })
+  // the archived job is no longer on the board
+  emit('close')
+}
 async function cancel() {
   confirmingCancel.value = false
   await act(`/api/jobs/${props.jobId}/cancel`)
@@ -179,6 +196,13 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
             @click="confirmingCancel = true"
           />
           <UButton
+            v-if="job.stage === 'rejected'"
+            label="Run again"
+            icon="i-lucide-redo-2"
+            :loading="sending === 'rerun'"
+            @click="confirmingRerun = true"
+          />
+          <UButton
             icon="i-lucide-x"
             color="neutral"
             variant="ghost"
@@ -205,6 +229,27 @@ async function send(action: 'feedback' | 'reject' | 'answer') {
               label="Cancel job"
               color="error"
               @click="cancel"
+            />
+          </div>
+        </template>
+      </UModal>
+
+      <UModal
+        v-model:open="confirmingRerun"
+        :title="`Run ${job.id} again?`"
+        description="The job folder is kept as an archive, and the issue can get a fresh job on the next drain or with Run issue."
+      >
+        <template #footer="{ close }">
+          <div class="flex w-full justify-end gap-2">
+            <UButton
+              label="Keep rejected"
+              color="neutral"
+              variant="ghost"
+              @click="close"
+            />
+            <UButton
+              label="Run again"
+              @click="rerun"
             />
           </div>
         </template>

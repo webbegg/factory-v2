@@ -3,6 +3,8 @@ import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs
 import { dirname, join } from 'node:path'
 import type { FactoryPaths, Job, JobEvent } from './types'
 
+const ARCHIVED = /\.rejected-\d+$/
+
 /**
  * Job state on disk: <repo>/.factory/jobs/<id>/job.json plus the agents' files.
  * Writes are atomic (temp file + rename). `update` serializes writers per job
@@ -31,14 +33,32 @@ export class JobStore {
     await this.write(job.id, 'job.json', JSON.stringify(job, null, 2) + '\n')
   }
 
+  /** Live jobs only: a folder archived by `archiveJob` keeps its job.json but is history, not a job. */
   async list(): Promise<Job[]> {
-    if (!existsSync(this.paths.jobs)) return []
-    const ids = (await readdir(this.paths.jobs)).sort()
     const jobs: Job[] = []
-    for (const id of ids) {
-      if (existsSync(this.path(id, 'job.json'))) jobs.push(await this.load(id))
+    for (const id of await this.entries()) {
+      if (!ARCHIVED.test(id) && existsSync(this.path(id, 'job.json'))) jobs.push(await this.load(id))
     }
     return jobs
+  }
+
+  /** Every name in the jobs folder, archives included, sorted. */
+  async entries(): Promise<string[]> {
+    if (!existsSync(this.paths.jobs)) return []
+    return (await readdir(this.paths.jobs)).sort()
+  }
+
+  /** Renames a job's folder to `<id>.rejected-<n>`, the next free n, so the issue can get a fresh job. */
+  async archiveJob(id: string): Promise<string> {
+    const prefix = `${id}.rejected-`
+    const taken = (await this.entries())
+      .filter(name => name.startsWith(prefix))
+      .map(name => name.slice(prefix.length))
+      .filter(n => /^\d+$/.test(n))
+      .map(Number)
+    const to = `${prefix}${Math.max(0, ...taken) + 1}`
+    await rename(this.dir(id), join(this.paths.jobs, to))
+    return to
   }
 
   async read(id: string, rel: string): Promise<string | null> {

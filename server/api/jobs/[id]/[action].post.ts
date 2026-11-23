@@ -1,4 +1,5 @@
-// Human actions on one job: feedback, reject, answer (need { text }), merge, retry, cancel.
+// Human actions on one job: feedback, reject, answer (need { text }), merge, retry, cancel,
+// rerun (Run again: archives a rejected job's folder so its issue can get a fresh job).
 export default defineEventHandler(async (event) => {
   const f = await useFactory()
   const id = getRouterParam(event, 'id')!
@@ -23,6 +24,8 @@ export default defineEventHandler(async (event) => {
       await guarded(() => f.store.load(id))
       o.retry(id)
       return { ok: true }
+    case 'rerun':
+      return guarded(() => o.runAgain(id))
     case 'cancel':
       o.cancel(id)
       return { ok: true }

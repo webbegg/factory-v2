@@ -95,6 +95,12 @@ is not marked as failed and resumes on the next start. Cancel on the board
 pauses a job instead of stalling it: it stays paused until you click Resume,
 and after a restart it simply shows Resume.
 
+A rejected job can be run again from its panel on the board (**Run again**).
+Its folder is kept as `.factory/jobs/<id>.rejected-<n>` and no longer counts as
+a job, so the issue gets a fresh job, with a new number, on the next drain or
+Run issue. Run again doesn't touch labels: the issue needs the `factory` label
+to get that new job.
+
 Each job folder has an `events.jsonl`: one JSON line per stage change, agent
 run (start and end, with model, round, seconds, cost and any error), gate and
 merge attempt. Only the factory writes it.
