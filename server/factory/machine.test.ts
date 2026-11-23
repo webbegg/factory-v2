@@ -22,7 +22,7 @@ describe('transitions table', () => {
 
   test('an illegal move is refused and nothing is saved', async () => {
     const env = await makeEnv()
-    await seed(env, { stage: 'spec' }, { 'spec.md': '# s' })
+    await seed(env, { stage: 'spec' }, { 'spec.md': '# s\n\n## Acceptance criteria\n' })
     await expect(env.machine.advance(ID, 'review')).rejects.toThrow(Refused)
     expect((await env.store.load(ID)).stage).toBe('spec')
   })
@@ -134,11 +134,20 @@ describe('spec → build', () => {
     const env = await makeEnv()
     await seed(env, { stage: 'spec' })
     await expect(env.machine.advance(ID, 'build')).rejects.toThrow('spec.md doesn\'t exist')
-    await env.store.write(ID, 'spec.md', '# spec')
+    await env.store.write(ID, 'spec.md', '# spec\n\n## Acceptance criteria \n1. It works.\n')
     const job = await env.machine.advance(ID, 'build')
     expect(job.round).toBe(1)
     expect(job.roundReason).toBe('spec')
     expect(existsSync(join(env.store.dir(ID), 'round-1'))).toBe(true)
+  })
+
+  test('needs a ## Acceptance criteria heading in spec.md', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'spec' }, { 'spec.md': '# spec\n\nAcceptance criteria: it works.\n' })
+    const err = await env.machine.advance(ID, 'build').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Refused)
+    expect((err as Refused).message).toContain('## Acceptance criteria')
+    expect((await env.store.load(ID)).stage).toBe('spec')
   })
 })
 
