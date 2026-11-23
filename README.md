@@ -73,7 +73,9 @@ default 30; it and everything it started are killed) and each agent run
 stalls with the reason, like any other failure. A stalled job's error is kept
 in its `job.json`, so it stays stalled across a restart until you retry it.
 Stopping the factory aborts running agents and checks; a job stopped that way
-is not marked as failed and resumes on the next start.
+is not marked as failed and resumes on the next start. Cancel on the board
+pauses a job instead of stalling it: it stays paused until you click Resume,
+and after a restart it simply shows Resume.
 
 Each job folder has an `events.jsonl`: one JSON line per stage change, agent
 run (start and end, with model, round, seconds, cost and any error), gate and
