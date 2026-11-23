@@ -6,7 +6,7 @@ useHead({
   title: 'Factory'
 })
 
-const { state, connected, connect, refresh, act } = useBoard()
+const { state, connected, reconnecting, connect, refresh, act } = useBoard()
 const { checks, recheck } = useSetup()
 onMounted(() => {
   connect()
@@ -43,7 +43,9 @@ const links = computed(() => [
             :color="connected ? 'success' : 'error'"
             standalone
             inset
-          />
+          >
+            <span class="sr-only">{{ connected ? 'Live' : 'Disconnected' }}</span>
+          </UChip>
         </UTooltip>
         <UButton
           v-if="!state?.draining"
@@ -63,9 +65,20 @@ const links = computed(() => [
       </template>
     </UHeader>
 
-    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0">
+    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0 flex flex-col">
+      <UAlert
+        v-if="reconnecting"
+        role="status"
+        aria-live="polite"
+        title="Reconnecting…"
+        icon="i-lucide-wifi-off"
+        color="warning"
+        variant="subtle"
+        class="shrink-0 rounded-none"
+        :ui="{ title: 'text-amber-800 dark:text-amber-300' }"
+      />
       <UScrollArea
-        class="h-full"
+        class="flex-1 min-h-0"
         :ui="{ viewport: 'h-full' }"
       >
         <NuxtPage />
