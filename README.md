@@ -71,9 +71,13 @@ They are uploaded when you send and appended to the text as markdown images.
 
 Start with `"concurrency": 1` in `.factory/config.json` and read every PR until
 you trust it. Commit and push `.factory/config.json`, `.factory/checks.sh` and any
-`.factory/agents/<agent>.md` prompt overrides: the gate and the agents use the
-copies on `origin/<base>`, never the working copy; job state and worktrees are
-gitignored. The board's Settings page edits `.factory/config.json` and applies
+`.factory/agents/<agent>.md` prompt overrides and `.factory/agents/<agent>.append.md`
+addenda: the gate and the agents use the copies on `origin/<base>`, never the
+working copy; job state and worktrees are gitignored. An override replaces the
+built-in prompt; an addendum is added after it under a `## This project` heading,
+so the factory's own rules stay. The override wins if both exist, an addendum
+that is only HTML comments is ignored, and `factory init` scaffolds commented
+addenda for intake, approver and the security, ui and ux reviewers. The board's Settings page edits `.factory/config.json` and applies
 it to the running factory without a restart; the change still needs committing.
 
 `limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
