@@ -90,6 +90,32 @@ const LABELS = [
   { name: 'factory:needs-human', color: 'D93F0B', description: 'The factory needs a human decision on the PR' }
 ]
 
+const ADDENDA: Record<string, string> = {
+  'intake': 'one line on what the project is for',
+  'approver': 'extra items to always escalate',
+  'reviewer-security': 'the project\'s hot spots: auth, data rules, payments, webhooks',
+  'reviewer-ui': 'where the design tokens and shared components live',
+  'reviewer-ux': 'the kinds of users'
+}
+
+/**
+ * Writes the commented prompt addenda into `<factoryDir>/agents/`, never
+ * overwriting. Being only comments, they change no prompt until filled in.
+ */
+export async function scaffoldAddenda(factoryDir: string): Promise<string[]> {
+  const done: string[] = []
+  await mkdir(join(factoryDir, 'agents'), { recursive: true })
+  for (const [agent, what] of Object.entries(ADDENDA)) {
+    const file = join(factoryDir, 'agents', `${agent}.append.md`)
+    if (existsSync(file)) continue
+    const text = `<!--\n  Added to the built-in ${agent} prompt under "## This project" once this\n`
+      + `  file is committed and pushed to the base. Write ${what}.\n-->\n`
+    await writeFile(file, text)
+    done.push(`wrote .factory/agents/${agent}.append.md`)
+  }
+  return done
+}
+
 /**
  * Scaffolds .factory/ (never overwriting), the .gitignore lines and the GitHub
  * labels. Returns what it did, one line each.
@@ -115,6 +141,7 @@ export async function init(repoDir: string): Promise<string[]> {
       ? `wrote .factory/checks.sh: ${commands.join(' && ')} (review it)`
       : 'wrote a placeholder .factory/checks.sh: add your checks')
   }
+  done.push(...await scaffoldAddenda(paths.factory))
   const ignored = await ensureGitignore(repoDir)
   if (ignored.length) done.push(`.gitignore += ${ignored.join(' ')}`)
   for (const l of LABELS) {
