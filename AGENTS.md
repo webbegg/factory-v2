@@ -25,7 +25,11 @@ view; this file is for whoever changes the code.
   `Sec-Fetch-Site` other than same-origin/none, and non-JSON writes are
   refused: keep every new write route a JSON POST, and keep GET routes
   read-only (the merged sweep runs in the orchestrator's tick, not in
-  `/api/queue`). `server/api/uploads.post.ts`
+  `/api/queue`; while paused, the board's `/api/merged` POST is the check
+  for needs-human jobs merged by hand, on load and when a job panel opens).
+  `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
+  merge (the board's Merge on an escalated job: `Orchestrator.approve`),
+  retry and cancel. `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
   to the text it then sends to the existing routes.
 - `app/` — the board (Nuxt UI v4, SPA: `ssr: false`). Shared live state is
