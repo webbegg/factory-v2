@@ -677,31 +677,67 @@ describe('orchestrator', () => {
     expect(job.error?.message).toContain('changed job.json fields it may not: error')
   })
 
-  test('a shutdown abort is not kept as an error, a cancel is', async () => {
+  describe('shutdown and cancel', () => {
     const held = {
       ...happy,
-      // the runner records the task before the script runs, so the abort may already be in
-      'spec-writer': (t: AgentTask) => new Promise<string>((resolve) => {
-        if (t.signal!.aborted) resolve('aborted')
-        t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
-      })
+      // the first spec run waits for its abort; the runner records the task before the script runs, so the abort may already be in
+      'spec-writer': (t: AgentTask, n: number) => n > 1
+        ? write(t, 'spec.md', '# Spec\n')
+        : new Promise<string>((resolve) => {
+            if (t.signal!.aborted) resolve('aborted')
+            t.signal!.addEventListener('abort', () => resolve('aborted'), { once: true })
+          })
     }
-    const running = async (scripts: Partial<Record<AgentName, Script>>) => {
-      const f = await factory(scripts)
+    const running = async () => {
+      const f = await factory({ ...held })
+      const events: FactoryEvent[] = []
+      f.orch.on('event', (e: FactoryEvent) => events.push(e))
       f.env.github.addIssue({ number: 1 })
       await f.orch.drain()
       while (!f.runner.tasks.some(t => t.agent === 'spec-writer')) await Bun.sleep(5)
+      return { ...f, events }
+    }
+    const cancelled = async () => {
+      const f = await running()
+      f.orch.cancel('001-issue-1')
+      await f.orch.idle()
       return f
     }
-    const stopped = await running({ ...held })
-    await stopped.orch.shutdown()
-    expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
 
-    const cancelled = await running({ ...held })
-    cancelled.orch.cancel('001-issue-1')
-    await cancelled.orch.idle()
-    expect((await cancelled.env.store.load('001-issue-1')).error?.message).toContain('spec-writer cancelled')
-  }, 20_000)
+    test('a shutdown abort is not kept as an error', async () => {
+      const stopped = await running()
+      await stopped.orch.shutdown()
+      expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
+    }, 20_000)
+
+    test('a cancel pauses the job instead of stalling it', async () => {
+      const { env, orch, events } = await cancelled()
+      expect((await env.store.load('001-issue-1')).error).toBeNull()
+      expect(orch.errors.has('001-issue-1')).toBe(false)
+      expect([...orch.paused]).toEqual(['001-issue-1'])
+      expect(events).toContainEqual({ type: 'paused', jobId: '001-issue-1' })
+      expect(events.some(e => e.type === 'error')).toBe(false)
+    }, 20_000)
+
+    test('the drain leaves a paused job where it stopped', async () => {
+      const { env, orch, runner } = await cancelled()
+      const before = runner.tasks.length
+      await orch.drain()
+      await orch.idle()
+      expect(runner.tasks.length).toBe(before)
+      expect((await env.store.load('001-issue-1')).stage).toBe('spec')
+      expect(orch.paused.has('001-issue-1')).toBe(true)
+    }, 20_000)
+
+    test('retry resumes a paused job and clears paused', async () => {
+      const { env, orch } = await cancelled()
+      orch.retry('001-issue-1')
+      expect(orch.paused.has('001-issue-1')).toBe(false)
+      await orch.idle()
+      expect((await env.store.load('001-issue-1')).stage).toBe('merged')
+      expect(orch.paused.size).toBe(0)
+    }, 20_000)
+  })
 
   describe('merge from needs-human', () => {
     async function escalated(overrides = {}) {
