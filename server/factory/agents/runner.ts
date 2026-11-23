@@ -263,13 +263,19 @@ const GITHUB_HOSTS = ['github.com', 'api.github.com', '*.githubusercontent.com']
 const REGISTRY_HOSTS = ['registry.npmjs.org']
 /** agents that start a dev server and look at it */
 const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
-export const viewsPages = (agent: AgentName) => SERVES.has(agent)
 /**
  * Chrome can't start in the sandbox (its singleton socket and crash reporter
  * need the shared user temp folder and Mach services), so with the sandbox on
  * the agents that look at pages are told there is no browser.
  */
 export const NO_BROWSER = 'The sandbox is on, so there is no browser: agent-browser won\'t start. Check pages by reading the code and fetching your dev server with curl.'
+/** .git/config is read-only in the sandbox, so `git push -u` can't record the upstream; the push itself succeeds */
+export const SANDBOX_PUSH = 'The sandbox keeps .git/config read-only, so `git push -u` reports it could not set the upstream: the push itself went through; leave it.'
+
+/** what an agent is told about the sandbox it runs in */
+export function sandboxNote(agent: AgentName): string {
+  return [agent === 'builder' ? SANDBOX_PUSH : '', SERVES.has(agent) ? NO_BROWSER : ''].filter(Boolean).join(' ')
+}
 /** the claude process keeps these; no shell needs them */
 const MODEL_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']
 /** only the builder pushes and opens its PR */

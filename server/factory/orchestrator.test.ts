@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isWritable, NO_BROWSER } from './agents/runner'
+import { isWritable, NO_BROWSER, SANDBOX_PUSH } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -135,6 +135,8 @@ describe('orchestrator', () => {
     const looks = new Set(['builder', 'reviewer-ux', 'reviewer-ui'])
     expect(on.runner.tasks.some(t => looks.has(t.agent))).toBe(true)
     for (const t of on.runner.tasks) expect(t.message.includes(NO_BROWSER)).toBe(looks.has(t.agent))
+    // git can't record the upstream in the read-only .git/config: the builder is told the push still went through
+    for (const t of on.runner.tasks) expect(t.message.includes(SANDBOX_PUSH)).toBe(t.agent === 'builder')
 
     const off = await factory({ ...happy })
     off.env.github.addIssue({ number: 1, title: 'Add subtract' })
@@ -142,6 +144,7 @@ describe('orchestrator', () => {
     await off.orch.idle()
     for (const t of off.runner.tasks) expect(t.sandbox).toBeUndefined()
     for (const t of off.runner.tasks) expect(t.message).not.toContain(NO_BROWSER)
+    for (const t of off.runner.tasks) expect(t.message).not.toContain(SANDBOX_PUSH)
   })
 
   test('a report answered as the final reply instead of written is saved for the agent', async () => {

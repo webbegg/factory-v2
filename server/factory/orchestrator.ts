@@ -4,7 +4,7 @@ import { lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile
 import { dirname, join, relative } from 'node:path'
 import { addendumBody, PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
-import { NO_BROWSER, viewsPages } from './agents/runner'
+import { sandboxNote } from './agents/runner'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
@@ -779,7 +779,7 @@ export class Orchestrator extends EventEmitter {
     const shots = this.screenshots(job, agent)
     // made up front: screenshot tools run through Bash rarely create the folder
     if (shots) await mkdir(shots, { recursive: true })
-    const noBrowser = this.o.config.sandbox.enabled && viewsPages(agent) ? NO_BROWSER : ''
+    const noBrowser = this.o.config.sandbox.enabled ? sandboxNote(agent) : ''
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
       `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : '', noBrowser].filter(Boolean).join(' ')
     const resume = opts.resume ?? (agent === 'builder' ? job.sessions.builder : undefined)
