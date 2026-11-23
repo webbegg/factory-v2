@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { MARKER } from './issue'
 import { makeEnv, seed } from './testing'
 
@@ -46,9 +48,24 @@ describe('queue', () => {
     const r = await env.queue.rows()
     expect(r.map(x => [x.action, x.issue, x.note])).toEqual([
       ['wait', 1, 'merge PR #5, or give feedback'],
-      ['skip', 2, 'rejected; delete .factory/jobs/002-b to retry'],
+      ['skip', 2, 're-labeled after rejection: Run again on the board'],
       ['skip', 3, 'issue is closed or no longer labeled factory']
     ])
+  })
+
+  test('after Run again archives a rejected job, its labeled issue is new and gets a job numbered above the archive', async () => {
+    const env = await makeEnv()
+    env.github.addIssue({ number: 26, title: 'Add a thing' })
+    await seed(env, { id: '001-a', issue: 1, stage: 'merged' })
+    const rejected = await seed(env, { id: '012-add-a-thing', issue: 26, stage: 'rejected' })
+    await env.store.archiveJob(rejected.id)
+    expect(await env.queue.rows()).toEqual([{ action: 'new', issue: 26, job: null, stage: null, note: 'Add a thing' }])
+    const job = await env.queue.create(26)
+    expect(job.id).toBe('013-add-a-thing')
+    expect(job.branch).not.toBe(rejected.branch)
+    expect(job.worktree).not.toBe(rejected.worktree)
+    expect(env.store.dir(job.id)).not.toBe(join(env.paths.jobs, '012-add-a-thing.rejected-1'))
+    expect(existsSync(join(env.paths.jobs, '012-add-a-thing.rejected-1', 'job.json'))).toBe(true)
   })
 
   test('a job whose PR was merged by hand moves to merged', async () => {

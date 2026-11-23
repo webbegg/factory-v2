@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { readdir } from 'node:fs/promises'
-import { makeEnv, newJob } from './testing'
+import { existsSync } from 'node:fs'
+import { readdir, readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { makeEnv, newJob, seed } from './testing'
 
 describe('JobStore', () => {
   test('save then load round-trips a job and leaves no temp file', async () => {
@@ -22,6 +24,25 @@ describe('JobStore', () => {
     await env.store.save(newJob(env, { id: '001-a', issue: 1 }))
     await env.store.write('003-c', 'issue.md', 'x')
     expect((await env.store.list()).map(j => j.id)).toEqual(['001-a', '002-b'])
+  })
+
+  test('archiveJob renames the folder to <id>.rejected-<n> with its files intact, and list skips it', async () => {
+    const env = await makeEnv()
+    const job = await seed(env, { id: '012-x', issue: 12, stage: 'rejected' }, { 'intake.md': 'DECISION: REJECT\n' })
+    const json = await readFile(env.store.path('012-x', 'job.json'), 'utf8')
+    expect(await env.store.archiveJob('012-x')).toBe('012-x.rejected-1')
+    expect(existsSync(env.store.dir('012-x'))).toBe(false)
+    const archive = join(env.paths.jobs, '012-x.rejected-1')
+    expect((await readdir(archive)).sort()).toEqual(['intake.md', 'job.json'])
+    expect(await readFile(join(archive, 'job.json'), 'utf8')).toBe(json)
+    expect(await readFile(join(archive, 'intake.md'), 'utf8')).toBe('DECISION: REJECT\n')
+    expect(await env.store.list()).toEqual([])
+
+    await env.store.save(job)
+    expect(await env.store.archiveJob('012-x')).toBe('012-x.rejected-2')
+    expect((await readdir(env.paths.jobs)).sort()).toEqual(['012-x.rejected-1', '012-x.rejected-2'])
+    expect(await readFile(join(archive, 'job.json'), 'utf8')).toBe(json)
+    expect(await env.store.list()).toEqual([])
   })
 
   test('read returns null for missing files; write creates folders', async () => {
