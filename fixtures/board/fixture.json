@@ -5,6 +5,9 @@
   "errors": {
     "006-keyboard-shortcuts": "spec-writer failed: rate limited"
   },
+  "prHeads": {
+    "003-shared-notebooks": "9b2d4c6e8a0f1b3d5c7e9a1b3d5f7a9c1e3b5d7f"
+  },
   "events": [
     {
       "type": "log",

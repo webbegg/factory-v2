@@ -11,6 +11,7 @@ const flag = computed(() => {
   if (props.job.stage === 'needs-human') return { label: 'your call', color: 'warning' as const }
   if (props.job.stage === 'needs-info') return { label: 'asked author', color: 'info' as const }
   if (props.job.stage === 'rejected') return { label: 'rejected', color: 'neutral' as const }
+  if (props.job.stage === 'merged' && props.job.override) return { label: 'merged by override', color: 'neutral' as const }
   return null
 })
 const chips = computed(() => roundChips(props.job, props.running ?? false))
