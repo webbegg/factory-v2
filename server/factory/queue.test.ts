@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { MARKER } from './issue'
-import { makeEnv, seed } from './testing'
+import { FAKE_BUILD, makeEnv, seed } from './testing'
 
 const rows = (r: Array<{ action: string, issue: number }>) => r.map(x => `${x.action} #${x.issue}`)
 
@@ -117,6 +119,43 @@ describe('create', () => {
     })
     expect(job.worktree).toBe(`${env.paths.worktrees}/005-add-dark-mode-toggle`)
     expect(await env.store.read(job.id, 'issue.md')).toContain('# Issue #12: Add Dark-mode toggle to the settings page!')
+  })
+
+  test('records provenance from the build and origin/<base>, never the working copy', async () => {
+    const env = await makeEnv({ sandbox: { enabled: true, domains: [] } })
+    env.git.remoteHeads.set('main', 'b'.repeat(40))
+    env.git.committed.set('.factory/config.json', '{"concurrency":2}\n')
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'checks.sh'), 'bun test\n')
+    env.github.addIssue({ number: 1 })
+    const job = await env.queue.create(1)
+    const sha256 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12)
+    const provenance = {
+      factoryVersion: '0.0.0-test',
+      factorySha: 'f'.repeat(40),
+      claudeVersion: '2.1.300 (Claude Code)',
+      baseSha: 'b'.repeat(40),
+      configSha: sha256('{"concurrency":2}\n'),
+      checksSha: null,
+      sandbox: true
+    }
+    expect((await env.store.load(job.id)).provenance).toEqual(provenance)
+    expect(env.git.calls).toContainEqual(['fetch', env.paths.repo, 'main'])
+    expect(env.git.calls).toContainEqual(['show', env.paths.repo, 'refs/remotes/origin/main', '.factory/checks.sh'])
+
+    env.git.committed.set('.factory/checks.sh', 'bun test\n')
+    env.github.addIssue({ number: 2 })
+    const next = await env.queue.create(2)
+    expect((await env.store.load(next.id)).provenance?.checksSha).toBe(sha256('bun test\n'))
+  })
+
+  test('a missing claude or unreadable base still creates the job, with those fields null', async () => {
+    const env = await makeEnv({}, { ...FAKE_BUILD, claudeVersion: null })
+    env.git.fetch = () => Promise.reject(new Error('offline'))
+    env.git.remoteHead = () => Promise.reject(new Error('no ref'))
+    env.github.addIssue({ number: 1 })
+    const job = await env.queue.create(1)
+    expect((await env.store.load(job.id)).provenance).toMatchObject({ claudeVersion: null, baseSha: null, configSha: null, sandbox: false })
   })
 
   test('refuses duplicates, closed or unlabeled issues, and a full factory', async () => {

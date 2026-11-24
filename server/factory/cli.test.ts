@@ -3,17 +3,18 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { main, snapshotBuild, table } from './cli'
-import { makeEnv, newJob } from './testing'
+import { FAKE_BUILD, makeEnv, newJob } from './testing'
 
 describe('status table', () => {
-  test('one aligned row per job and an estimated total', async () => {
+  test('one aligned row per job, its factory version (- before provenance) and an estimated total', async () => {
     const env = await makeEnv()
-    const a = newJob(env, { id: '001-a', issue: 1, stage: 'merged', round: 1, pr: 7, costUsd: 0.5, ended: '2026-11-20T11:04:00Z' })
+    const provenance = { ...FAKE_BUILD, baseSha: null, configSha: null, checksSha: null, sandbox: false }
+    const a = newJob(env, { id: '001-a', issue: 1, stage: 'merged', round: 1, pr: 7, costUsd: 0.5, ended: '2026-11-20T11:04:00Z', provenance })
     const b = newJob(env, { id: '002-longer', issue: 12, stage: 'needs-human', round: 3, costUsd: 1.25, ended: '2026-11-20T12:30:00Z' })
     expect(table([a, b])).toBe([
-      'job         issue  stage        round  pr  cost   time',
-      '001-a       #1     merged       1      #7  $0.50  4m',
-      '002-longer  #12    needs-human  3      -   $1.25  1h30m',
+      'job         issue  stage        round  pr  cost   factory     time',
+      '001-a       #1     merged       1      #7  $0.50  0.0.0-test  4m',
+      '002-longer  #12    needs-human  3      -   $1.25  -           1h30m',
       'total $1.75 (API-equivalent estimate, factory agents only)'
     ].join('\n'))
   })
