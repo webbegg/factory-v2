@@ -681,8 +681,10 @@ export class Orchestrator extends EventEmitter {
     const { git } = this.o.ports
     const { paths, config } = this.o
     const commit = await git.head(job.worktree)
-    await git.fetch(paths.repo, config.baseBranch)
-    const base = await git.remoteHead(paths.repo, config.baseBranch).catch(() => null)
+    // the base is only shown, so a failed read must not keep the agent from running
+    const base = await git.fetch(paths.repo, config.baseBranch)
+      .then(() => git.remoteHead(paths.repo, config.baseBranch))
+      .catch(() => null)
     return { commit, base }
   }
 

@@ -1037,6 +1037,29 @@ describe('orchestrator', () => {
       expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
     })
 
+    test('a failed fetch of the base still runs the reviewer and records base as null', async () => {
+      const { env, runner, orch } = await factory({ ...happy })
+      const fetch = env.git.fetch.bind(env.git)
+      let failed = false
+      // the first base fetch in review is the one made right before the reviewer runs
+      env.git.fetch = async (cwd: string, ref: string) => {
+        if (!failed && cwd === env.paths.repo && (await env.store.list())[0]?.stage === 'review') {
+          failed = true
+          throw new Error('could not resolve host')
+        }
+        return fetch(cwd, ref)
+      }
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(failed).toBe(true)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(runner.agents()).toContain('reviewer-code')
+      expect(job.judged!.code).toEqual({ verdict: 'PASS', commit: HEAD, base: null, round: 1 })
+      expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
+    })
+
     test('a reviewer that writes judged in job.json is refused and the field restored', async () => {
       const { orch, job } = await drained({
         ...happy,
