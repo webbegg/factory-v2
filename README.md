@@ -98,7 +98,7 @@ They are uploaded when you send and appended to the text as markdown images.
 |---|---|
 | `factory [ui] [--port n] [--no-open]` | the board: run the queue, follow jobs, answer what waits on you |
 | `factory run [issue]` | headless: drain the queue (or one issue) and exit |
-| `factory status` | jobs, stages, PRs, cost |
+| `factory status` | jobs, stages, PRs, cost, factory version |
 | `factory init` / `factory doctor` | set up / check a project (also on the board's Setup page) |
 | `factory --version` / `-v` | print the factory version |
 
@@ -150,7 +150,20 @@ to get that new job.
 
 Each job folder has an `events.jsonl`: one JSON line per stage change, agent
 run (start and end, with model, round, seconds, cost and any error), gate and
-merge attempt. Only the factory writes it.
+merge attempt. Only the factory writes it. An `agent-start` line also has the
+`sessionId` it resumes (null for a new session), the `attempt` (2 for a second
+run in the same session), the worktree `head` (null at intake), the `base` sha,
+and the system `prompt`'s `source` (`builtin`, `override` or `addendum`) and
+`sha`. `gate` lines have the `commit` and `base` they checked; `merge` lines
+have the `commit` and `base` that attempt's gate ran on, both null when it ran
+no gate.
+
+Each job's `job.json` has a `provenance` block, written once when the job is
+created: the factory version and git sha (for the board, the sha when it
+started), `claude --version`, the `origin/<base>` sha, sha256 prefixes of
+`.factory/config.json` and `.factory/checks.sh` on that base, and whether the
+sandbox was on. Jobs from before it have none. `factory status` shows the
+version in its `factory` column (`-` for those jobs).
 
 Running one issue (**Run issue** on the board, or **Run it now** on New request)
 while every slot is busy queues it: the board shows it as queued, and it starts on
@@ -171,7 +184,7 @@ in the running factory and is not kept across a restart.
   command it can't read still runs as you (unless the sandbox below is on), so
   protect the base branch on GitHub. After every agent the factory also checks what it changed: any job
   file other than its report (links included, `events.jsonl` too), the job's
-  routing, stage and error in `job.json`, or a report whose verdict differs
+  routing, stage, error and provenance in `job.json`, or a report whose verdict differs
   from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.

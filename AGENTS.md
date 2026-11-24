@@ -53,6 +53,19 @@ view; this file is for whoever changes the code.
   and `pr` lines (the PR's state on GitHub and a note) from `orchestrator.ts`
   and `merge.ts` whenever they act on a PR merged or closed outside the
   factory, or on a merge whose `gh pr merge` response was lost.
+  `agent-start` also records `sessionId` (the session resumed, null when new),
+  `attempt` (2 for an `again` run), `head` (the worktree's, null at intake),
+  `base` and `prompt` (`source` builtin/override/addendum and the `hash` of the
+  exact `systemPrompt`, all from `prompt()`); `agent-end` keeps only agent,
+  model and round. `gate` lines carry `GateResult.base`; `merge` lines carry
+  the `commit` and `base` of that attempt's merge gate from `Merger.gated`,
+  cleared at each attempt's start, so both are null when no gate ran.
+  `job.json` `provenance` is written once by `Queue.create` (best effort: a
+  failed read nulls only its field), is in `TRUSTED`, and is absent in older
+  jobs. Its build info comes from `buildInfo()` in `provenance.ts`, read once
+  per process and injected into `createFactory` (`makeEnv()` passes
+  `FAKE_BUILD`); `ui()` reads the package's git sha when it takes the board's
+  snapshot and passes it in `FACTORY_BUILD_SHA`, so a later commit can't change it.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.

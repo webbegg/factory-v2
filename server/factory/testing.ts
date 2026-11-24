@@ -9,6 +9,7 @@ import { Machine } from './machine'
 import { Merger } from './merge'
 import { GitHubIssues } from './issue'
 import type { CommitCheck, GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
+import type { BuildInfo } from './provenance'
 import { Queue } from './queue'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, Job } from './types'
@@ -245,7 +246,10 @@ export interface TestEnv {
   clock: { ms: number }
 }
 
-export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
+/** Fixed, so no test runs git or claude to find out what the factory is. */
+export const FAKE_BUILD: BuildInfo = { factoryVersion: '0.0.0-test', factorySha: 'f'.repeat(40), claudeVersion: '2.1.300 (Claude Code)' }
+
+export async function makeEnv(overrides: Partial<FactoryConfig> = {}, build: BuildInfo = FAKE_BUILD): Promise<TestEnv> {
   const repo = await mkdtemp(join(tmpdir(), 'factory-test-'))
   const paths: FactoryPaths = {
     repo,
@@ -260,7 +264,7 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<T
   const issues = new GitHubIssues(github, store)
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
-  const queue = new Queue({ paths, config, store, ports, machine })
+  const queue = new Queue({ paths, config, store, ports, machine, build })
   const gate = new Gate({ paths, config, store, ports })
   const clock = { ms: 0 }
   const merger = new Merger({
