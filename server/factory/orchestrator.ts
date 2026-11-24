@@ -12,11 +12,12 @@ import { firstLine, section } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
 import type { Merger } from './merge'
-import type { Ports } from './ports'
+import type { Ports, PrState } from './ports'
 import type { Queue } from './queue'
 import { route } from './route'
 import type { JobStore } from './store'
-import type { FactoryConfig, FactoryPaths, Job } from './types'
+import { WAITING } from './types'
+import type { FactoryConfig, FactoryPaths, Job, Stage } from './types'
 
 export interface OrchestratorOptions {
   paths: FactoryPaths
@@ -166,6 +167,7 @@ export class Orchestrator extends EventEmitter {
   constructor(private o: OrchestratorOptions) {
     super()
     o.merger.onCiWait = (jobId, waiting) => this.send({ type: 'ci', jobId, waiting })
+    o.merger.onLog = message => this.send({ type: 'log', message })
   }
 
   get isDraining() {
@@ -222,7 +224,38 @@ export class Orchestrator extends EventEmitter {
     return { job, queued: !job }
   }
 
+  /** Records why the factory acted on a PR's state on GitHub, in events.jsonl and the activity feed. */
+  private async recordPr(id: string, pr: number, state: PrState, note: string) {
+    await this.o.store.appendEvent(id, { at: this.o.ports.now(), type: 'pr', pr, state, note })
+    this.send({ type: 'log', message: `${id}: PR #${pr} ${note}` })
+  }
+
+  /**
+   * A waiting job's PR as GitHub has it, before an operator's action: MERGED moves the job to merged
+   * and returns it, CLOSED refuses the action, OPEN (or no PR) returns null so the action goes ahead.
+   */
+  private async checkPr(id: string, waiting: Stage, action: string): Promise<Job | null> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (current.stage !== waiting || !current.pr) return null
+    const pr = current.pr
+    const state = await ports.github.prState(pr)
+    if (state === 'MERGED') {
+      const job = await machine.advance(id, 'merged')
+      await this.recordPr(id, pr, state, 'was already merged on GitHub; moved to merged')
+      this.send({ type: 'job', job })
+      return job
+    }
+    if (state === 'CLOSED') {
+      await this.recordPr(id, pr, state, `was closed outside the factory; ${action} refused`)
+      throw new Refused(`PR closed outside the factory: #${pr} is closed on GitHub, so ${action} can't go on; reject the job instead`)
+    }
+    return null
+  }
+
   async feedback(id: string, text: string): Promise<Job> {
+    const merged = await this.checkPr(id, 'needs-human', 'feedback')
+    if (merged) return merged
     const { job } = await this.o.machine.feedback(id, text, await this.o.ports.github.operator())
     this.start(id)
     return job
@@ -254,13 +287,29 @@ export class Orchestrator extends EventEmitter {
   }
 
   async reject(id: string, text: string): Promise<Job> {
-    const job = await this.o.machine.reject(id, text, await this.o.ports.github.operator())
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (WAITING.has(current.stage) && current.pr) {
+      const pr = current.pr
+      const state = await ports.github.prState(pr)
+      if (state === 'MERGED') {
+        const job = await machine.advance(id, 'merged')
+        await this.recordPr(id, pr, state, 'was already merged on GitHub; moved to merged instead of rejected')
+        this.send({ type: 'job', job })
+        return job
+      }
+      // the machine leaves a closed PR as it is
+      if (state === 'CLOSED') await this.recordPr(id, pr, state, 'was closed outside the factory; rejected without closing it')
+    }
+    const job = await machine.reject(id, text, await ports.github.operator())
     this.send({ type: 'job', job })
     return job
   }
 
   /** The operator answers intake's questions on the issue; the job goes back to intake. */
   async answer(id: string, text: string, reply: (issue: number, body: string) => Promise<void>): Promise<Job> {
+    const merged = await this.checkPr(id, 'needs-info', 'the answer')
+    if (merged) return merged
     const next = await this.o.machine.answer(id, text, reply)
     this.start(id)
     return next
@@ -548,6 +597,21 @@ export class Orchestrator extends EventEmitter {
 
   private async build(job: Job, signal: AbortSignal): Promise<boolean> {
     const { machine, store, gate } = this.o
+    if (job.pr) {
+      const pr = job.pr
+      const state = await this.o.ports.github.prState(pr)
+      if (state === 'MERGED') {
+        await machine.advance(job.id, 'merged')
+        await this.recordPr(job.id, pr, state, 'was already merged on GitHub; moved to merged')
+        return true
+      }
+      // no builder can push to a closed PR
+      if (state === 'CLOSED') {
+        await machine.advance(job.id, 'needs-human')
+        await this.recordPr(job.id, pr, state, 'was closed outside the factory; moved to needs-human')
+        return true
+      }
+    }
     const sandboxed = this.o.config.sandbox.enabled
     const resuming = !job.sessions.builder && (await store.read(job.id, 'build.md')) !== null
     const sync = await this.startSync(job)
