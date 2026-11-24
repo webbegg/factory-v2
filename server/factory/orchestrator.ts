@@ -606,7 +606,8 @@ export class Orchestrator extends EventEmitter {
   private async commitBuild(job: Job): Promise<string | null> {
     const build = await this.o.store.read(job.id, 'build.md') ?? ''
     const title = /^# Build:[ \t]*(\S.*)$/m.exec(build)?.[1]?.trim() ?? `Build for #${job.issue}`
-    const res = await this.o.ports.git.commitAll(job.worktree, job.round > 1 ? `${title} (round ${job.round})` : title)
+    const res = await this.o.ports.git.commitAll(job.worktree, job.round > 1 ? `${title} (round ${job.round})` : title,
+      Math.round(this.o.config.sandbox.maxFileMB * 1024 * 1024))
     return res.problem ?? null
   }
 

@@ -137,7 +137,7 @@ export class GitCli implements GitPort {
     throw new Error(`git merge ${ref} failed: ${(res.stdout + res.stderr).trim().split('\n')[0]}`)
   }
 
-  async commitAll(cwd: string, message: string): Promise<{ committed: boolean, problem?: string }> {
+  async commitAll(cwd: string, message: string, maxFileBytes?: number): Promise<{ committed: boolean, problem?: string }> {
     await this.git(cwd, 'add', '-A')
     const check = await this.tryGit(cwd, 'diff', '--cached', '--check')
     const marked = [...new Set(check.stdout.split('\n')
@@ -147,11 +147,28 @@ export class GitCli implements GitPort {
     // a nested repository becomes a gitlink, and git status then reads that repo's own config: never committed for an agent
     const raw = (await this.git(cwd, 'diff', '--cached', '--raw', '--no-renames', '-z')).split('\0')
     const links: string[] = []
-    for (let i = 0; i + 1 < raw.length; i += 2) if (raw[i]!.split(' ')[1] === '160000') links.push(raw[i + 1]!)
+    const blobs: Array<{ path: string, sha: string }> = []
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const [, mode, , sha] = raw[i]!.split(' ')
+      if (mode === '160000') links.push(raw[i + 1]!)
+      else if (sha && !/^0+$/.test(sha)) blobs.push({ path: raw[i + 1]!, sha })
+    }
     if (links.length) {
       // unstaged again: a staged gitlink makes the next add or status recurse into it and honour its config
       await this.git(cwd, 'reset', '-q', '--', ...links)
       return { committed: false, problem: `nested git repositories can't be committed: remove ${links.map(l => `${l}/.git`).join(', ')}` }
+    }
+    // a file the remote refuses (GitHub: 100 MB) would fail every later push, and the job with it
+    if (maxFileBytes !== undefined && blobs.length) {
+      const sizes = (await exec('git', [...await this.scope(cwd), 'cat-file', '--batch-check=%(objectsize)'], { cwd, input: blobs.map(b => b.sha).join('\n') + '\n' }))
+        .trim().split('\n').map(Number)
+      const big = blobs.map((b, i) => ({ ...b, size: sizes[i]! })).filter(b => b.size > maxFileBytes)
+      if (big.length) {
+        // only these paths: a reset without paths would also drop a merge under way
+        await this.git(cwd, 'reset', '-q', '--', ...big.map(b => b.path))
+        const kb = (n: number) => `${Math.ceil(n / 1024)} KB`
+        return { committed: false, problem: `files over the ${kb(maxFileBytes)} limit can't be committed: ${big.map(b => `${b.path} (${kb(b.size)})`).join(', ')}; delete them or add them to .gitignore` }
+      }
     }
     const merging = (await this.tryGit(cwd, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).code === 0
     if (!merging && (await this.tryGit(cwd, 'diff', '--cached', '--quiet')).code === 0) return { committed: false }

@@ -158,7 +158,7 @@ describe('orchestrator', () => {
   })
 
   describe('a sandboxed builder: the factory commits, pushes and opens the PR (#49)', () => {
-    const SANDBOX = { sandbox: { enabled: true, domains: [] } }
+    const SANDBOX = { sandbox: { enabled: true, domains: [], maxFileMB: 2 } }
     const BUILD = 'STATUS: READY\n\n# Build: Add subtract\n\n## Summary\n- adds subtract\n\n## Changes\nsrc/math.ts\n'
 
     test('after the builder stops, its changes are committed with the build title, pushed, and a draft PR opened', async () => {
@@ -179,7 +179,8 @@ describe('orchestrator', () => {
       expect(f.orch.errors.size).toBe(0)
       expect(job.stage).toBe('merged')
       const git = f.env.git.calls.filter(c => c[0] === 'commitAll' || c[0] === 'push').slice(0, 2)
-      expect(git).toEqual([['commitAll', job.worktree, 'Add subtract'], ['push', job.worktree, job.branch]])
+      // no file over sandbox.maxFileMB (#68)
+      expect(git).toEqual([['commitAll', job.worktree, 'Add subtract', 2 * 1024 * 1024], ['push', job.worktree, job.branch]])
       const created = f.env.github.calls.find(c => c[0] === 'prCreate')!
       expect(created[1]).toEqual({ base: 'main', head: job.branch, title: 'Add subtract', body: 'Closes #1\n\n- adds subtract' })
       expect(job.pr).toBe(f.env.github.openPrs.get(job.branch)![0]!.number)

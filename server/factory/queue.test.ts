@@ -164,7 +164,7 @@ describe('create', () => {
   })
 
   test('records provenance from the build and origin/<base>, never the working copy', async () => {
-    const env = await makeEnv({ sandbox: { enabled: true, domains: [] } })
+    const env = await makeEnv({ sandbox: { enabled: true, domains: [], maxFileMB: 10 } })
     env.git.remoteHeads.set('main', 'b'.repeat(40))
     env.git.committed.set('.factory/config.json', '{"concurrency":2}\n')
     await mkdir(env.paths.factory, { recursive: true })

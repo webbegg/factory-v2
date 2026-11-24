@@ -16,6 +16,13 @@ import type { FactoryConfig, FactoryPaths, Job } from './types'
 
 export type Call = [string, ...unknown[]]
 
+/**
+ * Tests that start the real gate sandbox: macOS ships sandbox-exec (Linux
+ * needs bubblewrap and socat, which CI doesn't install), and a sandbox can't
+ * start inside another, as when the factory gates its own repo (#68).
+ */
+export const realSandbox = process.platform === 'darwin' && process.env.SANDBOX_RUNTIME !== '1'
+
 /** the tree FakeGit reports for any ref without its own entry */
 export const FAKE_TREE = 'e'.repeat(40)
 /** the merge commit FakeGitHub's prMerge records when the test set none */
@@ -227,8 +234,8 @@ export class FakeGit implements GitPort {
 
   /** a problem `commitAll` reports instead of committing, once per entry */
   commitProblems: string[] = []
-  async commitAll(cwd: string, message: string) {
-    this.calls.push(['commitAll', cwd, message])
+  async commitAll(cwd: string, message: string, maxFileBytes?: number) {
+    this.calls.push(['commitAll', cwd, message, ...maxFileBytes === undefined ? [] : [maxFileBytes]])
     const problem = this.commitProblems.shift()
     if (problem) return { committed: false, problem }
     if (this.clean) return { committed: false }
@@ -271,7 +278,8 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}, build: Bui
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
   const queue = new Queue({ paths, config, store, ports, machine, build })
-  const gate = new Gate({ paths, config, store, ports })
+  // the real gate sandbox only where it can start; the sandbox's own tests skip elsewhere
+  const gate = new Gate({ paths, config, store, ports, sandboxChecks: realSandbox })
   const clock = { ms: 0 }
   const merger = new Merger({
     config, store, ports, machine, gate,

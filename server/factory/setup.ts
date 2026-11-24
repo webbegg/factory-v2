@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { defaultConfig, factoryPaths, loadConfig } from './config'
 import { run } from './exec'
-import { runChecksScript, TAIL } from './gate'
+import { gateSandbox, runChecksScript, TAIL } from './gate'
 import { Refused } from './machine'
 import type { FactoryConfig } from './types'
 
@@ -235,7 +235,8 @@ export async function baseChecks(repoDir: string, opts: { signal?: AbortSignal }
       if (added.code !== 0) {
         return { check: { name, ok: false, detail: `skipped: couldn't create a worktree of origin/${base}: ${added.stderr.trim().split('\n')[0]}` }, code: null, tail: '' }
       }
-      const res = await runChecksScript(script.stdout, tree, config.limits.checksMinutes, opts.signal)
+      // as the gate runs it: sandboxed when the sandbox is on
+      const res = await runChecksScript(script.stdout, tree, config.limits.checksMinutes, opts.signal, gateSandbox(config, repoDir))
       const detail = res.code === 0
         ? `passed in ${res.seconds}s`
         : res.code === 124
@@ -269,6 +270,30 @@ export function sandboxCheck(enabled: boolean, platform: NodeJS.Platform, has: (
   return missing.length
     ? { name, ok: false, optional: false, detail: `missing ${missing.join(', ')}: install ${missing.map(c => c === 'bwrap' ? 'bubblewrap' : c).join(', ')} or turn sandbox.enabled off` }
     : { name, ok: true, optional: false, detail: `on (${needs.join(', ')})` }
+}
+
+type Probe = (script: string, cwd: string) => Promise<{ code: number, output: string }>
+
+/** a trivial checks.sh in a fresh folder, under the gate sandbox */
+const probeGate = (domains: string[]): Probe => async (script, cwd) =>
+  runChecksScript(script, cwd, 1, undefined, { gitDir: join(cwd, 'no-repo', '.git'), domains })
+
+/**
+ * Can the gate sandbox start here? With the sandbox on, every gate runs
+ * checks.sh in it and fails if it can't start, so doctor tries one (#68).
+ */
+export async function gateSandboxCheck(enabled: boolean, domains: string[], probe: Probe = probeGate(domains)): Promise<DoctorCheck | null> {
+  if (!enabled) return null
+  const name = 'gate sandbox'
+  const dir = await mkdtemp(join(tmpdir(), 'factory-gate-probe-'))
+  try {
+    const res = await probe('touch made && exit 0', dir)
+    if (res.code === 0) return { name, ok: true, optional: false, detail: `checks.sh runs sandboxed (${['npm registry', ...domains].join(', ')}${domains.length ? '' : ' only'})` }
+    const why = res.output.trim().split('\n').filter(Boolean).at(-1) ?? `exit ${res.code}`
+    return { name, ok: false, optional: false, detail: `can't start: ${why}; every gate fails until it can, or turn sandbox.enabled off` }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 }
 
 /** agent-browser lets the UX and UI reviewers look at pages, except under the sandbox, where Chrome can't start */
@@ -315,6 +340,8 @@ export async function doctor(repoDir: string, opts: { baseChecks?: boolean } = {
   add('.factory/config.json', hasConfig, hasConfig ? 'ok' : configError)
   const sandboxed = config?.sandbox.enabled ?? false
   out.push(sandboxCheck(sandboxed, process.platform, onPath))
+  const gateBox = await gateSandboxCheck(sandboxed, config?.sandbox.domains ?? [])
+  if (gateBox) out.push(gateBox)
   if (config) {
     const base = config.baseBranch
     const remote = await sh('git', ['ls-remote', '--exit-code', '--heads', 'origin', base])

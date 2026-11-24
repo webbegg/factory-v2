@@ -3,7 +3,26 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { addendumBody } from './agents/prompts'
-import { agentsGuideCheck, browserCheck, checksScript, detectChecks, ensureGitignore, mergeMethodCheck, sandboxCheck, scaffoldAddenda, versionAtLeast } from './setup'
+import { realSandbox } from './testing'
+import { agentsGuideCheck, browserCheck, checksScript, detectChecks, ensureGitignore, gateSandboxCheck, mergeMethodCheck, sandboxCheck, scaffoldAddenda, versionAtLeast } from './setup'
+
+describe('gateSandboxCheck (#68)', () => {
+  test('off: no line, the agent sandbox line already says how to turn it on', async () => {
+    expect(await gateSandboxCheck(false, [], async () => ({ code: 1, output: '' }))).toBeNull()
+  })
+
+  test('on: runs a script under the gate sandbox; a failure is required and names why', async () => {
+    expect(await gateSandboxCheck(true, [], async () => ({ code: 0, output: '' })))
+      .toEqual({ name: 'gate sandbox', ok: true, optional: false, detail: 'checks.sh runs sandboxed (npm registry only)' })
+    expect(await gateSandboxCheck(true, ['pypi.org'], async () => ({ code: 0, output: '' }))).toMatchObject({ detail: 'checks.sh runs sandboxed (npm registry, pypi.org)' })
+    const bad = await gateSandboxCheck(true, [], async () => ({ code: 1, output: 'noise\n[factory] the gate sandbox couldn\'t start: bwrap missing\n' }))
+    expect(bad).toEqual({ name: 'gate sandbox', ok: false, optional: false, detail: 'can\'t start: [factory] the gate sandbox couldn\'t start: bwrap missing; every gate fails until it can, or turn sandbox.enabled off' })
+  })
+
+  test.skipIf(!realSandbox)('on macOS, for real: it starts', async () => {
+    expect(await gateSandboxCheck(true, [])).toMatchObject({ ok: true })
+  }, 30_000)
+})
 
 describe('sandboxCheck (#49)', () => {
   const all = () => true
