@@ -99,8 +99,14 @@ it to the running factory without a restart; the change still needs committing.
 
 `limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
 default 30; it and everything it started are killed) and each agent run
-(`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
-stalls with the reason, like any other failure. An agent whose report is
+(`agentTurns`, default 300; `agentBudgetUsd`, default 15; `agentMinutes`,
+default 45, its wall clock). A job that hits one stalls with the reason, like
+any other failure. `jobBudgetUsd` (default 25) caps a whole job: once its
+`costUsd` reaches it, the job goes to needs-human before its next builder,
+reviewer or approver run, with the spend and the cap in `decision.md`.
+Feedback or Merge from needs-human gives it a fresh `jobBudgetUsd` on top of
+what it has spent. The Settings page edits `agentMinutes` and `jobBudgetUsd`;
+the other limits stay as the file has them. An agent whose report is
 missing or whose first line isn't valid is asked once more, with the error,
 before the job stalls; `spec.md` must have a `## Acceptance criteria` section,
 and a review without a verdict is removed and run again. A stalled job's error is kept
