@@ -41,7 +41,10 @@ export function holdsSlot(job: Job): boolean {
   return !TERMINAL.has(job.stage) && !WAITING.has(job.stage)
 }
 
-type Via = 'advance' | 'feedback' | 'reject' | 'approve' | 'answer'
+type Via = 'advance' | 'feedback' | 'reject' | 'approve' | 'answer' | 'budget'
+
+/** The stages an over-budget job may leave for needs-human: the ones that run a builder, reviewer or approver. */
+const BUDGETED: readonly Stage[] = ['build', 'review', 'approve']
 
 /** Runs one step of a move that isn't safe to repeat, unless an earlier try of the same move finished it. */
 type Step = (key: string, run: () => Promise<unknown>) => Promise<void>
@@ -105,6 +108,18 @@ export class Machine {
     const job = await this.store.update(id, async (raw) => {
       from = raw.stage
       return this.transition(await this.sync(raw), stage, 'advance', this.steps(raw, stage))
+    })
+    await this.logMove(job, from)
+    return job
+  }
+
+  /** build, review or approve → needs-human because the job has spent its budget; `why` names the spend and the cap. */
+  async overBudget(id: string, why: string): Promise<Job> {
+    let from: Stage = 'needs-human'
+    const job = await this.store.update(id, async (raw) => {
+      require(BUDGETED.includes(raw.stage), `${id} is in ${raw.stage}, where no budgeted agent runs`)
+      from = raw.stage
+      return this.transition(await this.sync(raw), 'needs-human', 'budget', this.steps(raw, 'needs-human'), why)
     })
     await this.logMove(job, from)
     return job
@@ -272,7 +287,8 @@ export class Machine {
     return last
   }
 
-  private async transition(input: Job, stage: Stage, via: Via, step: Step, feedbackFile?: string): Promise<Job> {
+  /** `detail` is the feedback file for `feedback`, and why the job escalates for `budget`. */
+  private async transition(input: Job, stage: Stage, via: Via, step: Step, detail?: string): Promise<Job> {
     const job = { ...input }
     const old = job.stage
     const { github, git, issues } = this.ports
@@ -302,6 +318,10 @@ export class Machine {
       }
     } else if (closed) {
       await this.escalate(job, `PR #${job.pr} was closed outside the factory.`)
+    } else if (via === 'budget') {
+      // no BLOCKED build, last round or ESCALATE decision to require: the spend is the reason
+      require(BUDGETED.includes(old) && stage === 'needs-human' && detail, `${job.id}: a budget stop goes from build, review or approve to needs-human`)
+      await this.escalate(job, detail)
     } else if (stage === 'rejected' && WAITING.has(old)) {
       require(via === 'reject', 'use reject to reject a waiting job')
       const reason = body(await this.read(job, 'rejection.md') ?? '')
@@ -422,12 +442,14 @@ export class Machine {
       require(via === 'approve', 'use approve to merge an escalated job')
       // a fresh budget, so a conflict at the merge can still go back to build
       job.roundLimit = job.round + this.config.maxRounds
+      job.budgetLimitUsd = job.costUsd + this.config.limits.jobBudgetUsd
       job.mergeVia = 'operator'
       await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (old === 'needs-human') { // → build
-      require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
+      require(via === 'feedback' && detail, 'use feedback to send a job back to the builder')
       job.roundLimit = job.round + this.config.maxRounds
-      await this.nextRound(job, `feedback:${feedbackFile}`)
+      job.budgetLimitUsd = job.costUsd + this.config.limits.jobBudgetUsd
+      await this.nextRound(job, `feedback:${detail}`)
       await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     }
 

@@ -123,7 +123,12 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused', 'judged', 'decided'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused', 'judged', 'decided', 'budgetLimitUsd'] as const
+
+/** Thrown once an over-budget job has moved to needs-human, so its driver stops without stalling it. */
+class OverBudget extends Error {
+  override name = 'OverBudget'
+}
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -497,7 +502,12 @@ export class Orchestrator extends EventEmitter {
     while (!signal.aborted) {
       const job = await this.o.store.load(id)
       this.send({ type: 'job', job })
-      if (!await this.step(job, signal)) return
+      try {
+        if (!await this.step(job, signal)) return
+      } catch (err) {
+        // the job is in needs-human now; the next pass shows it and stops there
+        if (!(err instanceof OverBudget)) throw err
+      }
     }
   }
 
@@ -979,12 +989,33 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
+   * Before a builder, reviewer or approver run: a job that has spent its cap
+   * (job.json `budgetLimitUsd`, else `limits.jobBudgetUsd`) goes to a human
+   * instead, and the run never starts.
+   */
+  private async checkBudget(job: Job, agent: AgentName) {
+    if (agent === 'intake' || agent === 'spec-writer') return
+    // the in-memory job may predate the runs since it was loaded
+    const saved = await this.o.store.load(job.id)
+    const cap = saved.budgetLimitUsd ?? this.o.config.limits.jobBudgetUsd
+    if (saved.costUsd < cap) return
+    const why = `Job budget reached: spent $${saved.costUsd.toFixed(2)} of limits.jobBudgetUsd ($${cap}).`
+    await this.o.machine.overBudget(job.id, why)
+    this.send({ type: 'log', message: `${job.id}: ${agent} not started; ${why}` })
+    throw new OverBudget(why)
+  }
+
+  /**
    * One agent run and its checks. `again` marks a second run of the same
    * session, whose cost adds to the first instead of replacing it.
    */
   private async runAgent(job: Job, agent: AgentName, signal: AbortSignal, purpose: string,
     extra: Pick<AgentTask, 'stopCheck'>, opts: { resume?: string, again?: boolean } = {}) {
     const { store, paths, ports } = this.o
+    await this.checkBudget(job, agent)
+    const minutes = this.o.config.limits.agentMinutes
+    // the run's own clock, so a hung agent stalls its job while cancel and shutdown keep the job's signal
+    const clock = new AbortController()
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
     const shots = this.screenshots(job, agent)
@@ -1011,7 +1042,7 @@ export class Orchestrator extends EventEmitter {
       maxTurns: this.o.config.limits.agentTurns,
       maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,
-      signal,
+      signal: AbortSignal.any([signal, clock.signal]),
       onEvent: event => this.send({ type: 'agent', jobId: job.id, agent, event }),
       ...extra
     }
@@ -1028,9 +1059,13 @@ export class Orchestrator extends EventEmitter {
     const end = (ok: boolean, error?: string) => store.appendEvent(job.id, {
       at: ports.now(), type: 'agent-end', ...run, seconds: Math.round((performance.now() - t0) / 1000), cost, ok, ...(error === undefined ? {} : { error })
     })
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const watch = await this.watch(job, agent)
+      timer = setTimeout(() => clock.abort(), minutes * 60_000)
       const result = await this.o.runner.run(task)
+      // a run that ended in time is never taken for a timeout while its checks run
+      clearTimeout(timer)
       cost = result.costUsd
       await store.update(job.id, (j) => {
         const costs = { ...j.costs }
@@ -1044,6 +1079,7 @@ export class Orchestrator extends EventEmitter {
       })
       await watch.check()
       if (signal.aborted) throw new Error(`${agent} cancelled`)
+      if (clock.signal.aborted) throw new Error(`${agent} ran past limits.agentMinutes (${minutes})`)
       if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
       await this.matchesReply(job, agent, result.reply)
       await this.keepRepliedReport(job, agent, result.reply)
@@ -1054,6 +1090,8 @@ export class Orchestrator extends EventEmitter {
     } catch (err) {
       await end(false, redact((err as Error).message))
       throw err
+    } finally {
+      clearTimeout(timer)
     }
   }
 }

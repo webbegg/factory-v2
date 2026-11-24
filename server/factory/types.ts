@@ -78,6 +78,11 @@ export interface Job {
   costs: Record<string, number>
   /** sum of `costs` */
   costUsd: number
+  /**
+   * the job's spend cap, set to `costUsd + limits.jobBudgetUsd` when feedback or Merge renews it, written
+   * only by the factory; absent in older jobs, and absent or null means the current `limits.jobBudgetUsd`
+   */
+  budgetLimitUsd?: number | null
   started: string
   ended: string | null
   /** the last failure that stalled the job, kept across restarts until it starts again; absent in older jobs */
@@ -172,6 +177,10 @@ export interface FactoryConfig {
     agentTurns: number
     /** USD per agent run (a resumed builder counts from the resume) */
     agentBudgetUsd: number
+    /** wall-clock minutes per agent run; a run past it is aborted and the job stalls */
+    agentMinutes: number
+    /** USD per job, checked before each builder, reviewer and approver run; reaching it sends the job to a human */
+    jobBudgetUsd: number
   }
   /** GitHub CI on the gated commit, waited for between the push and `gh pr merge` */
   ci: {

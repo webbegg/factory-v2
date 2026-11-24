@@ -83,6 +83,16 @@ view; this file is for whoever changes the code.
   `loadErrors()` reads back into `Orchestrator.paused`. The drain skips a
   paused job and `Queue.rows()` shows it as a `skip` row, while it still holds
   its slot; `/api/state` sends `paused` and the `paused` event announces it.
+  `runAgent` gives each run its own `limits.agentMinutes` timer, joined to the
+  job's signal with `AbortSignal.any`; when only the timer fired the run throws
+  `<agent> ran past limits.agentMinutes (<n>)`, a plain error that stalls the
+  job (the job's own abort still means cancel or shutdown). Before a builder,
+  reviewer or approver run, `checkBudget` reads `costUsd` from job.json and, at
+  the cap (`job.json` `budgetLimitUsd`, else `limits.jobBudgetUsd`), moves the
+  job through `Machine.overBudget` (build/review/approve → needs-human, an
+  ESCALATE naming the spend) and ends the driver without an error.
+  `budgetLimitUsd` is in `TRUSTED`; feedback and Merge from needs-human set it
+  to `costUsd + limits.jobBudgetUsd`, next to the `roundLimit` renewal.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of

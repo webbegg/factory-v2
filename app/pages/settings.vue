@@ -25,8 +25,9 @@ const busy = ref(false)
 const saved = ref(false)
 
 function fill(config: FactoryConfig) {
-  const { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths } = structuredClone(config)
-  form.value = { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths }
+  const { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths, limits } = structuredClone(config)
+  const { agentMinutes, jobBudgetUsd } = limits
+  form.value = { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths, limits: { agentMinutes, jobBudgetUsd } }
   paths.value = protectedPaths.join('\n')
 }
 watch(() => data.value?.config, (config) => {
@@ -102,6 +103,37 @@ async function save() {
             <USelect
               v-model="form.mergeMethod"
               :items="mergeMethods"
+              class="w-full"
+            />
+          </UFormField>
+        </div>
+
+        <h2 class="text-sm font-semibold text-highlighted">
+          Limits
+        </h2>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <UFormField
+            label="Agent wall clock (minutes)"
+            help="A run still going after this long stops; its job stalls."
+          >
+            <UInput
+              v-model.number="form.limits.agentMinutes"
+              type="number"
+              :min="1"
+              :max="480"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField
+            label="Job budget (USD)"
+            help="At this spend a job comes to you before its next agent."
+          >
+            <UInput
+              v-model.number="form.limits.jobBudgetUsd"
+              type="number"
+              :min="0"
+              :max="1000"
+              step="any"
               class="w-full"
             />
           </UFormField>

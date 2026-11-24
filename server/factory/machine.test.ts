@@ -440,7 +440,7 @@ describe('feedback', () => {
     await seed(env, { stage: 'needs-human', round: 3, roundLimit: 3, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
     const { job, file } = await env.machine.feedback(ID, '  Use a dropdown instead.  ', 'octocat')
     expect(file).toBe('feedback-1.md')
-    expect(job).toMatchObject({ stage: 'build', round: 4, roundLimit: 6, roundReason: 'feedback:feedback-1.md' })
+    expect(job).toMatchObject({ stage: 'build', round: 4, roundLimit: 6, roundReason: 'feedback:feedback-1.md', budgetLimitUsd: job.costUsd + 25 })
     expect(await env.store.read(ID, 'feedback-1.md')).toBe('# Feedback 1\n\nFrom @octocat after the job escalated.\n\nUse a dropdown instead.\n')
     expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { remove: ['factory:needs-human'] }])
   })
@@ -533,7 +533,7 @@ describe('approve', () => {
     const env = await makeEnv()
     await seed(env, { stage: 'needs-human', round: 3, roundLimit: 3, pr: 9 }, { 'decision.md': 'ESCALATE\n\n## Why\nx\n' })
     const job = await env.machine.approve(ID, 'octocat', PICK)
-    expect(job).toMatchObject({ stage: 'merging', round: 3, roundLimit: 6 })
+    expect(job).toMatchObject({ stage: 'merging', round: 3, roundLimit: 6, budgetLimitUsd: job.costUsd + 25 })
     expect(await env.store.read(ID, 'decision-1.md')).toBe('ESCALATE\n\n## Why\nx\n')
     const decision = await env.store.read(ID, 'decision.md')
     expect(decision).toStartWith('APPROVE\n')
@@ -570,6 +570,34 @@ describe('approve', () => {
     const env = await makeEnv()
     await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
     await expect(env.machine.advance(ID, 'merging')).rejects.toThrow('use approve')
+  })
+})
+
+describe('overBudget', () => {
+  const WHY = 'Job budget reached: spent $25.40 of limits.jobBudgetUsd ($25).'
+
+  test('build, review or approve → needs-human without their usual preconditions, with the spend as the Why', async () => {
+    for (const stage of ['build', 'review', 'approve'] as const) {
+      const env = await makeEnv()
+      // round 1 of 3, no BLOCKED build, no reviews, no ESCALATE decision
+      await seed(env, { stage, round: 1, pr: 9, agents: REVIEWERS }, { 'build.md': 'STATUS: READY\n', 'decision.md': 'APPROVE\n' })
+      const job = await env.machine.overBudget(ID, WHY)
+      expect(job.stage).toBe('needs-human')
+      expect(await env.store.read(ID, 'decision.md')).toBe(`ESCALATE\n\n## Why\n${WHY}\n`)
+      expect(await env.store.read(ID, 'decision-1.md')).toBe('APPROVE\n')
+      expect(env.github.calls).toContainEqual(['comment', 'pr', 9, `### Factory: needs a human\n\n## Why\n${WHY}`])
+      expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+    }
+  })
+
+  test('refused from any other stage, and nothing is saved', async () => {
+    for (const stage of ['intake', 'spec', 'gate', 'merging', 'needs-human'] as const) {
+      const env = await makeEnv()
+      await seed(env, { stage, round: 1, pr: 9, agents: REVIEWERS })
+      await expect(env.machine.overBudget(ID, WHY)).rejects.toThrow(Refused)
+      expect((await env.store.load(ID)).stage).toBe(stage)
+      expect(await env.store.read(ID, 'decision.md')).toBeNull()
+    }
   })
 })
 
