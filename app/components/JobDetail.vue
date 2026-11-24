@@ -3,7 +3,7 @@ import type { Job } from '~/composables/useBoard'
 import type { JobFile } from '~~/server/factory/service'
 import { WAITING } from '~~/server/factory/types'
 
-interface Detail { job: Job, files: JobFile[] }
+interface Detail { job: Job, files: JobFile[], prHead: string | null }
 
 const props = defineProps<{ jobId: string }>()
 const emit = defineEmits<{ close: [] }>()
@@ -65,6 +65,7 @@ watch(() => job.value?.stage === 'needs-human' && job.value.pr ? props.jobId : n
       <JobDecision
         v-if="WAITING.has(job.stage)"
         :job="job"
+        :pr-head="detail?.prHead ?? null"
         @refresh="refresh()"
       />
 

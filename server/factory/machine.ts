@@ -5,7 +5,7 @@ import type { Ports, ThreadKind } from './ports'
 import { hash } from './provenance'
 import type { JobStore } from './store'
 import { TERMINAL, WAITING } from './types'
-import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Judged, Risk, RoundReason, Stage, Verdict } from './types'
+import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Judged, MergeRecord, Risk, RoundReason, Stage, Verdict } from './types'
 
 export { TERMINAL, WAITING }
 
@@ -131,6 +131,15 @@ export class Machine {
     await this.store.appendEvent(job.id, { at: this.ports.now(), type: 'stage', from, to: job.stage })
   }
 
+  /** Saves the merge step's record as job.json `merge` and merge.md; a record already there stays. */
+  recordMerge(id: string, record: MergeRecord): Promise<Job> {
+    return this.store.update(id, async (job) => {
+      if (job.merge) return job
+      await this.store.write(id, 'merge.md', mergeMarkdown(record))
+      return { ...job, merge: record }
+    })
+  }
+
   /** Records the routed agent set on an ACCEPTed intake job. */
   recordAgents(id: string, agents: JobAgents): Promise<Job> {
     return this.store.update(id, async (raw) => {
@@ -173,20 +182,28 @@ export class Machine {
     return { job, file }
   }
 
-  /** needs-human → merging on the operator's word, recorded as an APPROVE decision.md. */
-  async approve(id: string, operator: string): Promise<Job> {
+  /**
+   * needs-human → merging on the operator's word, recorded as an APPROVE decision.md that overrides the
+   * escalation and is pinned to the PR head the operator saw.
+   */
+  async approve(id: string, operator: string, { commit, reason }: { commit: string, reason: string }): Promise<Job> {
     const job = await this.store.update(id, async (raw) => {
       require(raw.stage === 'needs-human', `${id} is in ${raw.stage}, not needs-human`)
       require(raw.pr, `${id} has no PR to merge`)
-      await this.store.archive(id, 'decision.md')
-      await this.store.write(id, 'decision.md', `APPROVE\n\n@${operator} approved the merge from needs-human.\n`)
+      // both go into the header, so neither may carry a line break or anything but its own shape
+      require(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(operator), `'${operator}' isn't a GitHub login`)
+      require(/^[0-9a-f]{40}$/.test(commit), `'${commit}' isn't a full commit sha`)
+      const overrides = await this.store.archive(id, 'decision.md')
+      await this.store.write(id, 'decision.md', `APPROVE\nBY: @${operator}\nOVERRIDE: yes\nCOMMIT: ${commit}\n`
+      + `OVERRIDES: ${overrides ?? 'none'}\n\n## Reason\n${reason.trim() || 'No reason given.'}\n`)
       // the merge runs in this round: a conflict left by an earlier attempt must not count as this one's
       const rd = this.roundRel(raw)
       if (await this.store.read(id, `${rd}/sync.md`) !== null) {
         const k = (await readdir(this.store.path(id, rd))).filter(f => /^sync-\d+\.md$/.test(f)).length + 1
         await this.store.move(id, `${rd}/sync.md`, `${rd}/sync-${k}.md`)
       }
-      return this.transition(await this.sync(raw), 'merging', 'approve', this.steps(raw, 'merging'))
+      const next = await this.transition(await this.sync(raw), 'merging', 'approve', this.steps(raw, 'merging'))
+      return { ...next, override: { by: operator, commit, overrides } }
     })
     await this.logMove(job, 'needs-human')
     return job
@@ -197,10 +214,12 @@ export class Machine {
     let from: Stage = 'rejected'
     const job = await this.store.update(id, async (raw) => {
       require(WAITING.has(raw.stage), `${id} is in ${raw.stage}, not needs-info or needs-human`)
-      require(text.trim(), 'no reason given')
+      // a needs-info rejection answers the issue's author, so it says why; in needs-human the reason is optional
+      require(raw.stage === 'needs-human' || text.trim(), 'no reason given')
       from = raw.stage
+      const reason = text.trim() ? `\n${text.trim()}\n` : ''
       await this.store.write(id, 'rejection.md',
-        `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n\n${text.trim()}\n`)
+        `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n${reason}`)
       return this.transition(await this.sync(raw), 'rejected', 'reject', this.steps(raw, 'rejected'))
     })
     await this.logMove(job, from)
@@ -268,8 +287,19 @@ export class Machine {
       `${job.id}: ${old} → ${stage} is not a legal transition`)
 
     if (stage === 'merged') {
-      require(job.pr && await github.prState(job.pr) === 'MERGED', 'the PR isn\'t merged')
+      const pr = job.pr
+      require(pr && await github.prState(pr) === 'MERGED', 'the PR isn\'t merged')
       if (old === 'needs-human') await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+      // the merge step writes its own record first; anything else merged it outside the factory
+      if (!job.merge) {
+        // the record says what can be read; it never holds up the move
+        const commit = await github.prMergeCommit(pr).catch(() => null)
+        job.merge = {
+          by: 'external', approvedCommit: null, gatedCommit: null, base: null,
+          mergeCommit: commit?.sha ?? null, treeVerified: null, ci: null, overrides: []
+        }
+        await this.store.write(job.id, 'merge.md', mergeMarkdown(job.merge))
+      }
     } else if (closed) {
       await this.escalate(job, `PR #${job.pr} was closed outside the factory.`)
     } else if (stage === 'rejected' && WAITING.has(old)) {
@@ -375,6 +405,7 @@ export class Machine {
         const rec = job.decided ?? undefined
         require(rec?.round === job.round && rec.commit === head,
           `decision.md was decided on ${judgedOn(job, rec)}, HEAD is ${head.slice(0, 7)}; run the approver again`)
+        job.mergeVia = 'approver'
       }
     } else if (old === 'merging') {
       const sync = `${this.roundRel(job)}/sync.md`
@@ -391,6 +422,7 @@ export class Machine {
       require(via === 'approve', 'use approve to merge an escalated job')
       // a fresh budget, so a conflict at the merge can still go back to build
       job.roundLimit = job.round + this.config.maxRounds
+      job.mergeVia = 'operator'
       await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (old === 'needs-human') { // → build
       require(via === 'feedback' && feedbackFile, 'use feedback to send a job back to the builder')
@@ -422,6 +454,8 @@ export class Machine {
     // a job that moved on is past whatever stalled it
     job.error = null
     job.move = null
+    // an override holds only for the merge it started: escalating again or going back to build ends it
+    if (stage !== 'merging' && stage !== 'merged') job.override = null
     return job
   }
 
@@ -465,6 +499,18 @@ export class Machine {
 function judgedOn(job: Job, rec: Judged | undefined): string {
   if (!rec) return 'none'
   return rec.round === job.round ? rec.commit.slice(0, 7) : `${rec.commit.slice(0, 7)} in round ${rec.round}`
+}
+
+/** merge.md: the record as the factory saved it in job.json, one line per field. */
+export function mergeMarkdown(record: MergeRecord): string {
+  const lines = (Object.keys(record) as Array<keyof MergeRecord>).map((key) => {
+    const value = record[key]
+    return `- ${key}: ${Array.isArray(value) ? value.join('; ') || 'none' : value ?? 'none'}`
+  })
+  if (record.treeVerified === false) {
+    lines.push('- The merged tree could not be matched to the gated commit\'s, so the job went to needs-human. Nothing was reverted.')
+  }
+  return `# Merge\n\n## Summary\n${lines.join('\n')}\n`
 }
 
 function parseIntake(text: string): IntakeInfo {

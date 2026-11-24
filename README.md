@@ -18,9 +18,26 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
                                 └ ESCALATE → PR ready, you decide (merge, feedback, reject)
 ```
 
-On the board, an escalated job's **Merge** button approves it: the factory
-syncs with the base, gates again, and merges through `gh pr merge`, as after an
-APPROVE. Gating again reuses the round gate's pass, without re-running
+On the board, an escalated job's panel shows the PR head GitHub reports and has
+four actions sharing one text box, which only **Send feedback** requires:
+
+- **Merge** overrides the escalation for that PR head: the factory syncs with
+  the base, gates again, and merges through `gh pr merge`, as after an APPROVE.
+  It writes `decision.md` as `APPROVE` with `BY: @<you>`, `OVERRIDE: yes`,
+  `COMMIT: <the head you saw>` and `OVERRIDES: decision-<k>.md` (the archived
+  ESCALATE, or `none`), then your text, if any, under `## Reason`. Merge is
+  refused if the PR head moved since the panel showed it, and the job comes
+  back to needs-human if the branch moved before the merge step's base sync
+  (the factory's own sync doesn't count). Its card then reads "merged by
+  override".
+- **Already merged** is for a PR you merged on GitHub: the job moves to merged
+  if GitHub shows it merged, and the action is refused otherwise.
+- **Send feedback** sends the builder another round with your text. Text that
+  reads like an approval ("merge", "merged", "go on", "lgtm") first asks
+  "Did you mean Merge?", with Merge, Send as feedback anyway, or Back.
+- **Reject** rejects the job, with your text as the reason if you gave one.
+
+Gating again reuses the round gate's pass, without re-running
 `checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
 `BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
 The factory reads the PR on GitHub before it acts on feedback, an answer, a
@@ -29,6 +46,22 @@ PR closed on GitHub sends a builder round to needs-human and refuses feedback or
 an answer (a reject still rejects, without closing the PR again). A `gh pr
 merge` that fails while GitHub shows the PR merged, as when its response is
 lost, ends in merged, noted in `merge-checks.md`.
+
+Right before `gh pr merge` the factory fetches `origin/<base>` again. If it
+moved since the merge gate (another merge landed during the CI wait, say), the
+job syncs, gates, pushes and waits for CI again in the same round; each
+earlier `merge-checks.md` stays as `merge-checks-<k>.md`. After two such
+repeats a base that is still moving sends the job to needs-human. After a
+`merge` or `squash` merge the factory compares the merge commit's tree with
+the gated commit's; when they differ, or GitHub shows no merge commit, the
+job goes to needs-human with both commits named. Nothing is ever reverted and
+the branch is kept. Every merge leaves a record in `merge.md` and `job.json`
+`merge`: `by` (`factory` after an APPROVE, `operator` after your Merge,
+`external` for a PR merged outside the factory), the approved, gated, base
+and merge commits, `treeVerified` (`null` for `rebase` and external merges),
+`ci` (`passed`, `none-seen` or `off`) and any overrides. The merged sweep
+skips a job whose `treeVerified` is `false`; it moves to merged only when you
+act on it, and keeps its record.
 
 The board's **Inbox** lists what waits on you: escalated (needs-human) jobs and
 stalled jobs, each once. Jobs whose intake asked the issue's author a question
@@ -200,7 +233,8 @@ in the running factory and is not kept across a restart.
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
-  and a second gate. The factory never deploys.
+  and a second gate, and only while `origin/<base>` is still the base that
+  gate ran against, checked again right before `gh pr merge`. The factory never deploys.
 - `checks.md` and `merge-checks.md` start with `GATE:`, `COMMIT:` (the
   worktree HEAD) and `BASE:` (the `origin/<base>` sha the checks ran against).
   The round gate skips `checks.sh` when the builder's last stop check

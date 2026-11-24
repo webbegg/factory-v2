@@ -6,9 +6,9 @@ import { globToRegExp } from './gate'
 import type { StopCheckRecord } from './gate'
 import type { CommitCheck } from './ports'
 import { route } from './route'
-import { makeEnv, seed } from './testing'
+import { makeEnv, MERGE_SHA, seed } from './testing'
 import type { TestEnv } from './testing'
-import type { Job } from './types'
+import type { Job, MergeRecord } from './types'
 
 const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
@@ -618,6 +618,190 @@ describe('merge', () => {
       expect(decision).toContain('- x ## Fake y\n')
       expect(decision).toContain(`- ${'z'.repeat(200)}\n`)
       expect(decision).not.toContain('z'.repeat(201))
+    })
+  })
+
+  describe('re-checking the base before gh pr merge (#75)', () => {
+    const passing = [[{ name: 'build', state: 'success' as const, url: null }]]
+    const syncs = (env: TestEnv) => env.git.calls.filter(c => c[0] === 'merge' && c[2] === 'refs/remotes/origin/main')
+
+    /** checks.sh counts its runs; each CI poll can move origin/main */
+    async function moving(env: TestEnv, move: (poll: number) => string | null) {
+      await approved(env)
+      withChecks(env, `echo run >> ${counter(env)}`)
+      env.github.checkResponses = passing
+      const commitChecks = env.github.commitChecks.bind(env.github)
+      let polls = 0
+      env.github.commitChecks = async (sha) => {
+        const moved = move(++polls)
+        if (moved) env.git.remoteHeads.set('main', moved)
+        return commitChecks(sha)
+      }
+    }
+
+    test('a base that moved during the CI wait syncs and gates again in the same round, then merges', async () => {
+      const env = await makeEnv()
+      await moving(env, poll => poll === 1 ? BASE : null)
+      let gatesAtMerge = 0
+      const prMerge = env.github.prMerge.bind(env.github)
+      env.github.prMerge = async (...args) => {
+        gatesAtMerge = await runs(env)
+        return prMerge(...args)
+      }
+      const logs: string[] = []
+      env.merger.onLog = m => logs.push(m)
+      const job = await env.merger.merge(ID)
+      expect(job).toMatchObject({ stage: 'merged', round: 1, roundLimit: 3 })
+      expect(syncs(env)).toHaveLength(2)
+      expect(await runs(env)).toBe(2)
+      expect(gatesAtMerge).toBe(2)
+      expect(env.github.calls.filter(c => c[0] === 'merge')).toHaveLength(1)
+      expect(await env.store.read(ID, 'round-1/merge-checks-1.md')).toStartWith(`GATE: PASS\nCOMMIT: ${SHA}\nBASE: ${SHA}\n`)
+      expect(await env.store.read(ID, 'round-1/merge-checks.md')).toStartWith(`GATE: PASS\nCOMMIT: ${SHA}\nBASE: ${BASE}\n`)
+      expect(logs).toContain(`${ID}: origin/main moved since the merge gate; syncing and gating again`)
+      expect(job.merge?.base).toBe(BASE)
+    })
+
+    test('a base that keeps moving goes to needs-human after two repeats, without merging', async () => {
+      const env = await makeEnv()
+      await moving(env, poll => String(poll).repeat(40))
+      const job = await env.merger.merge(ID)
+      expect(job).toMatchObject({ stage: 'needs-human', round: 1 })
+      expect(await runs(env)).toBe(3)
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE')
+      expect(decision).toContain('origin/main kept moving')
+      expect(decision).toContain('BASE 2222222; origin/main is now 3333333')
+      expect(await env.store.files(ID, /^decision-\d+\.md$/)).toEqual(['decision-1.md'])
+      for (const k of [1, 2]) expect(await env.store.read(ID, `round-1/merge-checks-${k}.md`)).toStartWith('GATE: PASS')
+      expect(job.merge).toBeUndefined()
+    })
+
+    test('an unreadable gate base counts as moved', async () => {
+      const env = await makeEnv({ ci: { wait: false, startMinutes: 2, minutes: 30 } })
+      await approved(env)
+      env.git.remoteHeads.set('main', null)
+      expect((await env.merger.merge(ID)).stage).toBe('needs-human')
+      expect(await env.store.read(ID, 'decision.md')).toContain('BASE unknown; origin/main is now unknown')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    })
+
+    test('a failing gate in a repeat escalates as any merge gate failure does', async () => {
+      const env = await makeEnv()
+      await moving(env, (poll) => {
+        if (poll === 1) withChecks(env, 'exit 1')
+        return poll === 1 ? BASE : null
+      })
+      const job = await env.merger.merge(ID)
+      expect(job).toMatchObject({ stage: 'needs-human', round: 1 })
+      expect(await env.store.read(ID, 'decision.md')).toContain('The gate failed after syncing with main')
+    })
+  })
+
+  describe('the merged tree and the merge record (#75)', () => {
+    const passing = [[{ name: 'build', state: 'success' as const, url: null }]]
+    const record = (fields: Partial<MergeRecord> = {}): MergeRecord => ({
+      by: 'factory', approvedCommit: SHA, gatedCommit: SHA, base: SHA, mergeCommit: MERGE_SHA,
+      treeVerified: true, ci: 'passed', overrides: [], ...fields
+    })
+
+    for (const mergeMethod of ['merge', 'squash'] as const) {
+      test(`${mergeMethod}: a merge commit with the gated tree is verified and recorded`, async () => {
+        const env = await makeEnv({ mergeMethod })
+        await approved(env)
+        env.github.checkResponses = passing
+        const job = await env.merger.merge(ID)
+        expect(job.stage).toBe('merged')
+        expect(job.mergeVia).toBe('approver')
+        expect(job.merge).toEqual(record())
+        expect(env.git.calls).toContainEqual(['tree', job.worktree, SHA])
+        const md = await env.store.read(ID, 'merge.md') ?? ''
+        expect(md).toStartWith('# Merge\n\n## Summary\n- by: factory\n')
+        expect(md).toContain('- treeVerified: true\n')
+        expect(md).toContain('- overrides: none\n')
+      })
+    }
+
+    test('a merge commit whose tree differs goes to needs-human, keeps the branch and is not swept', async () => {
+      const env = await makeEnv()
+      const seeded = await approved(env)
+      env.github.checkResponses = passing
+      env.git.trees.set(SHA, OTHER)
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('needs-human')
+      expect(job.merge).toEqual(record({ treeVerified: false }))
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE')
+      expect(decision).toContain('PR #9 merged as ddddddd, whose tree differs from the gated commit aaaaaaa\'s')
+      expect(decision).toContain('Nothing was reverted')
+      expect(env.git.calls.some(c => c[0] === 'deleteRemoteBranch')).toBe(false)
+      expect(await env.store.read(ID, 'merge.md')).toContain('went to needs-human. Nothing was reverted.')
+      await env.queue.sweepMerged(() => false)
+      const after = await env.store.load(ID)
+      expect(after.stage).toBe('needs-human')
+      expect(after.merge?.by).toBe('factory')
+      expect(after.branch).toBe(seeded.branch)
+    })
+
+    test('no merge commit on GitHub, or one that can\'t be read, can\'t be verified', async () => {
+      for (const missing of ['null', 'throws'] as const) {
+        const env = await makeEnv()
+        await approved(env)
+        env.github.checkResponses = passing
+        if (missing === 'null') {
+          env.github.mergeCommits.set(9, null)
+        } else {
+          env.github.prMergeCommit = async () => {
+            throw new Error('gh: HTTP 502')
+          }
+        }
+        const job = await env.merger.merge(ID)
+        expect(job.stage).toBe('needs-human')
+        expect(job.merge).toEqual(record({ mergeCommit: null, treeVerified: false }))
+        expect(await env.store.read(ID, 'decision.md')).toContain('GitHub reports no merge commit for PR #9')
+      }
+    })
+
+    test('rebase merges without comparing trees', async () => {
+      const env = await makeEnv({ mergeMethod: 'rebase' })
+      await approved(env)
+      env.github.checkResponses = passing
+      env.git.trees.set(SHA, OTHER)
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('merged')
+      expect(job.merge?.treeVerified).toBeNull()
+      expect(env.git.calls.some(c => c[0] === 'tree')).toBe(false)
+    })
+
+    test('a lost merge response still checks the tree and records the merge', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.checkResponses = passing
+      env.github.mergeLost = 'gh: unexpected EOF'
+      const job = await env.merger.merge(ID)
+      expect(job.stage).toBe('merged')
+      expect(job.merge).toEqual(record())
+    })
+
+    test('ci is off, none-seen or passed as the wait went', async () => {
+      const off = await makeEnv({ ci: { wait: false, startMinutes: 2, minutes: 30 } })
+      await approved(off)
+      expect((await off.merger.merge(ID)).merge?.ci).toBe('off')
+      const none = await makeEnv()
+      await approved(none)
+      expect((await none.merger.merge(ID)).merge?.ci).toBe('none-seen')
+      const passed = await makeEnv()
+      await approved(passed)
+      passed.github.checkResponses = passing
+      expect((await passed.merger.merge(ID)).merge?.ci).toBe('passed')
+    })
+
+    test('a PR merged before the step ran is recorded as external', async () => {
+      const env = await makeEnv()
+      await approved(env)
+      env.github.prStates.set(9, 'MERGED')
+      expect((await env.merger.merge(ID)).merge).toMatchObject({ by: 'external', gatedCommit: null })
     })
   })
 

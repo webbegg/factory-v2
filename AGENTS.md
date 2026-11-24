@@ -24,7 +24,16 @@ view; this file is for whoever changes the code.
   `route.ts`, `merge.ts` (after the push it polls `commitChecks` on the gated
   commit per `ci.wait` / `ci.startMinutes` / `ci.minutes`, through injectable
   `sleep`/`now` that `makeEnv()` fakes; the jobs inside that wait are
-  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`),
+  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`;
+  right before `prMerge` it fetches and compares `origin/<base>` with the
+  gate's `base`, repeating sync, gate, push and CI wait at most twice in the
+  same round; after the merge it reads `prMergeCommit` and, for `merge` and
+  `squash`, compares its tree with `git.tree` of the gated commit, sending a
+  mismatch to needs-human; it saves `job.merge` and `merge.md` through
+  `Machine.recordMerge`, never overwriting a record, with `by` from
+  `job.mergeVia`, which the machine sets on the move into merging; the
+  machine records `by: 'external'` on a move to merged with no record yet;
+  `Queue.sweepMerged` skips a job whose `treeVerified` is `false`),
   `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
@@ -88,7 +97,11 @@ view; this file is for whoever changes the code.
   `/api/queue`; while paused, the board's `/api/merged` POST is the check
   for needs-human jobs merged by hand, on load and when a job panel opens).
   `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
-  merge (the board's Merge on an escalated job: `Orchestrator.approve`),
+  merge (the board's Merge on an escalated job: `Orchestrator.approve`, body
+  `{ commit, reason? }` with the PR head the panel showed, which
+  `GET /api/jobs/:id` sends as `prHead`), already-merged
+  (`Orchestrator.alreadyMerged`: moves a needs-human job to merged only when
+  GitHub shows its PR merged),
   retry (also the board's Resume), cancel (pauses) and rerun (Run again:
   `Orchestrator.runAgain` archives a rejected job's folder). `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
@@ -121,7 +134,8 @@ view; this file is for whoever changes the code.
   `JobDetail` is the shell: it fetches the detail, holds the live flags, the
   Stalled/Paused alerts and the panel grid, and composes `JobHeader` (meta,
   links, the run actions and their modals), `JobDecision` (the needs-human /
-  needs-info form, shown for `WAITING` stages), `JobFiles` (the file list and
+  needs-info form, shown for `WAITING` stages; its "Did you mean Merge?"
+  question comes from `looksLikeApproval` in `app/utils/decision.ts`), `JobFiles` (the file list and
   viewer, loading through `useJobFile` in `app/composables/useJobFile.ts`,
   which drops responses for a file or job the user has left) and
   `JobActivity` (the job's Live activity lines).

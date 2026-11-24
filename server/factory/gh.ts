@@ -24,6 +24,14 @@ interface RawIssue {
   comments: Array<{ author: { login: string } | null, body: string, createdAt: string }>
 }
 
+/** `value` when it is a 40-hex sha; anything else GitHub sends never reaches a git or API argument. */
+function sha40(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{40}$/i.test(value)) {
+    throw new Error(`not a commit sha: ${JSON.stringify(String(value).slice(0, 60))}`)
+  }
+  return value
+}
+
 /** GitHubPort over the `gh` CLI, in the target project's checkout. */
 export class GhCli implements GitHubPort {
   private login: string | null = null
@@ -81,6 +89,10 @@ export class GhCli implements GitHubPort {
     return (await this.json<{ state: PrState }>('pr', 'view', String(number), '--json', 'state')).state
   }
 
+  async prHead(number: number) {
+    return (await this.json<{ headRefOid: string }>('pr', 'view', String(number), '--json', 'headRefOid')).headRefOid
+  }
+
   async prIsDraft(number: number) {
     return (await this.json<{ isDraft: boolean }>('pr', 'view', String(number), '--json', 'isDraft')).isDraft
   }
@@ -97,13 +109,21 @@ export class GhCli implements GitHubPort {
     await this.gh(['pr', 'merge', String(number), `--${method}`, '--match-head-commit', headSha])
   }
 
+  async prMergeCommit(number: number) {
+    const raw = await this.json<{ mergeCommit: { oid: string } | null }>('pr', 'view', String(number), '--json', 'mergeCommit')
+    if (!raw.mergeCommit) return null
+    const sha = sha40(raw.mergeCommit.oid)
+    const tree = sha40((await this.gh(['api', `repos/{owner}/{repo}/git/commits/${sha}`, '--jq', '.tree.sha'])).trim())
+    return { sha, tree }
+  }
+
   /**
    * Check runs and commit statuses on `sha`, every page. `--jq` turns each page
    * into one line, so pages never run together into one unparseable blob.
    * Names and URLs are GitHub's text and are redacted like any other gh output.
    */
   async commitChecks(sha: string): Promise<CommitCheck[]> {
-    if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error(`not a commit sha: ${JSON.stringify(sha.slice(0, 60))}`)
+    sha40(sha)
     const pages = async <T>(endpoint: string, jq: string) =>
       (await this.gh(['api', `repos/{owner}/{repo}/commits/${sha}/${endpoint}?per_page=100`, '--paginate', '--jq', jq]))
         .split('\n').filter(line => line.trim()).map(line => JSON.parse(line) as { total: number, items: T[] })

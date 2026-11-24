@@ -124,6 +124,36 @@ describe('GhCli', () => {
     expect(ran).toBe(false)
   })
 
+  test('prMergeCommit reads the merge commit, then its tree (#75)', async () => {
+    const sha = 'd'.repeat(40)
+    const tree = 'e'.repeat(40)
+    const calls: string[][] = []
+    const merged = new GhCli(async (args) => {
+      calls.push(args)
+      return args[0] === 'pr' ? JSON.stringify({ mergeCommit: { oid: sha } }) : `${tree}\n`
+    })
+    expect(await merged.prMergeCommit(9)).toEqual({ sha, tree })
+    expect(calls).toEqual([
+      ['pr', 'view', '9', '--json', 'mergeCommit'],
+      ['api', `repos/{owner}/{repo}/git/commits/${sha}`, '--jq', '.tree.sha']
+    ])
+
+    const none = new GhCli(async () => JSON.stringify({ mergeCommit: null }))
+    expect(await none.prMergeCommit(9)).toBeNull()
+  })
+
+  test('prMergeCommit refuses a merge commit or tree that isn\'t a 40-hex sha (#75)', async () => {
+    let apiCalls = 0
+    const badSha = new GhCli(async (args) => {
+      if (args[0] === 'api') apiCalls++
+      return JSON.stringify({ mergeCommit: { oid: '../x' } })
+    })
+    await expect(badSha.prMergeCommit(9)).rejects.toThrow('not a commit sha')
+    expect(apiCalls).toBe(0)
+    const badTree = new GhCli(async args => args[0] === 'pr' ? JSON.stringify({ mergeCommit: { oid: 'd'.repeat(40) } }) : 'null\n')
+    await expect(badTree.prMergeCommit(9)).rejects.toThrow('not a commit sha')
+  })
+
   test('uploadImages posts each image from a temp file, never on the command line, and removes it', async () => {
     const sent: Array<{ args: string[], bytes: number[] }> = []
     let n = 0
@@ -196,6 +226,9 @@ describe('GitCli against a real repo', () => {
     await exec('git', ['commit', '-qam', 'change'], { cwd: wt })
     expect(await git.commitsAhead(wt, 'origin/main')).toBe(1)
     expect(await git.changedFiles(wt, 'origin/main')).toEqual([{ status: 'M', path: 'a.txt' }])
+    const tree = (await exec('git', ['rev-parse', 'HEAD^{tree}'], { cwd: wt })).trim()
+    expect(await git.tree(wt, await git.head(wt))).toBe(tree)
+    expect(tree).toMatch(/^[0-9a-f]{40}$/)
     // a rename reports both sides, so moving a file into a protected path is seen
     await exec('git', ['mv', 'long.txt', 'moved.txt'], { cwd: wt })
     await exec('git', ['commit', '-qm', 'rename'], { cwd: wt })
