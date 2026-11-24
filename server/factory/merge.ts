@@ -65,6 +65,8 @@ export class Merger {
   readonly ciWaiting = new Set<string>()
   /** told when a job enters and leaves the CI wait, so the board can show it */
   onCiWait: ((jobId: string, waiting: boolean) => void) | null = null
+  /** the commit and base the latest merge attempt gated, per job; none when that attempt ran no gate */
+  readonly gated = new Map<string, { commit: string, base: string | null }>()
   /** told a line for the board's activity feed */
   onLog: ((message: string) => void) | null = null
 
@@ -116,6 +118,7 @@ export class Merger {
   private async mergeNow(id: string, signal?: AbortSignal): Promise<Job> {
     const { store, ports, machine, gate, config } = this.o
     const base = config.baseBranch
+    this.gated.delete(id)
     let job = await store.load(id)
     if (job.stage === 'approve') job = await machine.advance(id, 'merging')
     if (job.stage !== 'merging') throw new Refused(`${id} is in ${job.stage}, not approve or merging`)
@@ -141,6 +144,7 @@ export class Merger {
 
     const headUnchanged = await ports.git.head(job.worktree) === before
     const result = await gate.run(id, { merge: true, signal, headUnchanged })
+    this.gated.set(id, { commit: result.commit, base: result.base })
     // stopped mid-gate: leave the job in merging for the next start
     if (signal?.aborted) throw new Error('merge cancelled')
     if (result.verdict !== 'PASS') {

@@ -13,11 +13,12 @@ import { Refused } from './machine'
 import type { Machine } from './machine'
 import type { Merger } from './merge'
 import type { Ports, PrState } from './ports'
+import { hash } from './provenance'
 import type { Queue } from './queue'
 import { route } from './route'
 import type { JobStore } from './store'
 import { WAITING } from './types'
-import type { FactoryConfig, FactoryPaths, Job, Stage } from './types'
+import type { FactoryConfig, FactoryPaths, Job, PromptSource, Stage } from './types'
 
 export interface OrchestratorOptions {
   paths: FactoryPaths
@@ -122,7 +123,7 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance'] as const
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -500,7 +501,7 @@ export class Orchestrator extends EventEmitter {
         const stopCheck = this.stopChecks.get(job.id)
         this.stopChecks.delete(job.id)
         const result = await gate.run(job.id, { signal, stopCheck })
-        await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit })
+        await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit, base: result.base })
         if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
         if (result.verdict === 'PASS') await machine.advance(job.id, 'review')
@@ -528,11 +529,12 @@ export class Orchestrator extends EventEmitter {
 
   private async merge(job: Job, signal: AbortSignal) {
     const { merger, store, ports } = this.o
+    const gated = () => merger.gated.get(job.id) ?? { commit: null, base: null }
     try {
       const merged = await merger.merge(job.id, signal)
-      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: merged.stage })
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: merged.stage, ...gated() })
     } catch (err) {
-      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: 'error', error: redact((err as Error).message) })
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: 'error', ...gated(), error: redact((err as Error).message) })
       throw err
     }
   }
@@ -718,16 +720,18 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** A prompt override or addendum counts only once it is committed on the base, where no agent can write it. */
-  private async prompt(agent: AgentName): Promise<string> {
+  private async prompt(agent: AgentName): Promise<{ text: string, source: PromptSource, sha: string, base: string | null }> {
     const { paths, ports, config } = this.o
     // an agent can move the local origin/<base>; fetching first puts it back
     await ports.git.fetch(paths.repo, config.baseBranch)
+    const base = await ports.git.remoteHead(paths.repo, config.baseBranch).catch(() => null)
     const ref = `refs/remotes/origin/${config.baseBranch}`
+    const made = (text: string, source: PromptSource) => ({ text, source, sha: hash(text), base })
     const override = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.md`)
-    if (override !== null) return override
+    if (override !== null) return made(override, 'override')
     const addendum = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.append.md`)
     const body = addendum === null ? null : addendumBody(addendum)
-    return body === null ? PROMPTS[agent] : withAddendum(PROMPTS[agent], body)
+    return body === null ? made(PROMPTS[agent], 'builtin') : made(withAddendum(PROMPTS[agent], body), 'addendum')
   }
 
   private model(job: Job, agent: AgentName): string {
@@ -896,6 +900,7 @@ export class Orchestrator extends EventEmitter {
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
       `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : '', noBrowser].filter(Boolean).join(' ')
     const resume = opts.resume ?? (agent === 'builder' ? job.sessions.builder : undefined)
+    const prompt = await this.prompt(agent)
     const task: AgentTask = {
       agent,
       jobId: job.id,
@@ -903,7 +908,7 @@ export class Orchestrator extends EventEmitter {
       round: job.round,
       model: this.model(job, agent),
       cwd: agent === 'intake' ? paths.repo : job.worktree,
-      systemPrompt: await this.prompt(agent),
+      systemPrompt: prompt.text,
       message,
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
@@ -919,7 +924,11 @@ export class Orchestrator extends EventEmitter {
     this.send({ type: 'log', message: `${job.id}: ${agent} started` })
     // logged outside the watch, so the factory's own lines are never taken for the agent's
     const run = { agent, model: task.model, round: job.round }
-    await store.appendEvent(job.id, { at: ports.now(), type: 'agent-start', ...run })
+    const head = existsSync(job.worktree) ? await ports.git.head(job.worktree).catch(() => null) : null
+    await store.appendEvent(job.id, {
+      at: ports.now(), type: 'agent-start', ...run, sessionId: resume ?? null, attempt: opts.again ? 2 : 1, head,
+      base: prompt.base, prompt: { source: prompt.source, sha: prompt.sha }
+    })
     const t0 = performance.now()
     let cost = 0
     const end = (ok: boolean, error?: string) => store.appendEvent(job.id, {

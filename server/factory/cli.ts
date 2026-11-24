@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { cp, mkdir, mkdtemp } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import type { FactoryEvent } from './orchestrator'
+import { BUILD_SHA_ENV, factorySha, factoryVersion } from './provenance'
 import { acquireLock, createFactory } from './service'
 import { doctor, init } from './setup'
 import type { Job } from './types'
@@ -25,9 +26,10 @@ function elapsed(job: Job): string {
 }
 
 export function table(jobs: Job[]): string {
-  const rows = [['job', 'issue', 'stage', 'round', 'pr', 'cost', 'time']]
+  const rows = [['job', 'issue', 'stage', 'round', 'pr', 'cost', 'factory', 'time']]
   for (const j of jobs) {
-    rows.push([j.id, `#${j.issue}`, j.stage, String(j.round), j.pr ? `#${j.pr}` : '-', `$${j.costUsd.toFixed(2)}`, elapsed(j)])
+    rows.push([j.id, `#${j.issue}`, j.stage, String(j.round), j.pr ? `#${j.pr}` : '-', `$${j.costUsd.toFixed(2)}`,
+      j.provenance?.factoryVersion ?? '-', elapsed(j)])
   }
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map(r => r[i]!.length)))
   const lines = rows.map(r => r.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd())
@@ -45,12 +47,6 @@ function printEvent(e: FactoryEvent) {
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
   return i >= 0 ? args[i + 1] : undefined
-}
-
-// The factory's own package.json, never the project's in repo / cwd
-function version(): string {
-  const here = dirname(fileURLToPath(import.meta.url))
-  return (JSON.parse(readFileSync(resolve(here, '../../package.json'), 'utf8')) as { version: string }).version
 }
 
 /**
@@ -74,6 +70,8 @@ async function ui(repo: string, args: string[]) {
   const output = [resolve(here, '../../.output'), resolve(here, '../.output')].find(p => existsSync(join(p, 'server/index.mjs')))
   if (!output) throw new Error('the UI is not built: run `bun run build` in the factory-v2 package')
   const entry = await snapshotBuild(output)
+  // read with the snapshot, so a later commit to the package can't change what this board records
+  process.env[BUILD_SHA_ENV] = await factorySha() ?? ''
   process.once('exit', () => rmSync(dirname(dirname(entry)), { recursive: true, force: true }))
   const port = flag(args, '--port') ?? process.env.PORT ?? '4400'
   process.env.FACTORY_PROJECT = repo
@@ -121,7 +119,7 @@ export async function main(argv: string[], repo = process.cwd()): Promise<void> 
   if (cmd === '-h' || cmd === '--help' || cmd === 'help') {
     console.log(USAGE)
   } else if (cmd === '--version' || cmd === '-v') {
-    console.log(version())
+    console.log(factoryVersion())
   } else if (cmd === 'ui' || cmd.startsWith('--')) {
     await ui(repo, cmd.startsWith('--') ? argv : args)
   } else if (cmd === 'run') {

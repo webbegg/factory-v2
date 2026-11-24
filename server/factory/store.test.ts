@@ -77,11 +77,11 @@ describe('JobStore', () => {
   test('appendEvent adds one JSON line per event and swallows I/O errors', async () => {
     const env = await makeEnv()
     await env.store.save(newJob(env))
-    await env.store.appendEvent('001-add-a-thing', { at: 't', type: 'merge', outcome: 'merged' })
+    await env.store.appendEvent('001-add-a-thing', { at: 't', type: 'merge', outcome: 'merged', commit: null, base: null })
     await env.store.appendEvent('001-add-a-thing', { at: 't', type: 'stage', from: 'merging', to: 'merged' })
     expect(await env.store.read('001-add-a-thing', 'events.jsonl')).toBe(
-      '{"at":"t","type":"merge","outcome":"merged"}\n{"at":"t","type":"stage","from":"merging","to":"merged"}\n')
+      '{"at":"t","type":"merge","outcome":"merged","commit":null,"base":null}\n{"at":"t","type":"stage","from":"merging","to":"merged"}\n')
     // no such job folder: the append fails, the caller doesn't
-    expect(await env.store.appendEvent('999-missing', { at: 't', type: 'merge', outcome: 'merged' })).toBeUndefined()
+    expect(await env.store.appendEvent('999-missing', { at: 't', type: 'merge', outcome: 'merged', commit: null, base: null })).toBeUndefined()
   })
 })
