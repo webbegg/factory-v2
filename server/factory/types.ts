@@ -62,6 +62,26 @@ export interface Job {
    * same move skips them; cleared when the move is saved, written only by the machine; absent in older jobs
    */
   move?: { from: Stage, to: Stage, done: string[] } | null
+  /** who moved the job into merging: the approver's APPROVE or the operator's Merge; set by the machine, absent in older jobs */
+  mergeVia?: 'approver' | 'operator' | null
+  /** what the factory can prove about the merge, also written as merge.md; never overwritten once set, absent in older jobs */
+  merge?: MergeRecord | null
+}
+
+export interface MergeRecord {
+  /** `factory` after the approver's APPROVE, `operator` after a Merge from needs-human, `external` when merged outside the factory */
+  by: 'factory' | 'operator' | 'external'
+  /** HEAD when the merge step started */
+  approvedCommit: string | null
+  /** the commit the last merge gate passed, which `gh pr merge` was pinned to */
+  gatedCommit: string | null
+  /** the origin/<base> sha that gate ran against */
+  base: string | null
+  mergeCommit: string | null
+  /** the merge commit's tree equals the gated commit's; null when not compared (rebase, external) */
+  treeVerified: boolean | null
+  ci: 'passed' | 'none-seen' | 'off' | null
+  overrides: string[]
 }
 
 /** One line of a job's events.jsonl, written only by the factory. */
