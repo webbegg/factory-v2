@@ -237,6 +237,32 @@ describe('orchestrator', () => {
       expect(f.env.git.calls.slice(started).some(c => c[0] === 'commitAll' && c[2] === 'Add subtract (round 2)')).toBe(true)
     })
 
+    test('a conflict round resumed mid-merge (dirty worktree): no new merge, and no "merge and push" text', async () => {
+      const f = await factory({
+        ...happy,
+        builder: async (t, n) => {
+          if (n === 2) f.env.git.mergeResult = { ok: true, output: '' }
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+        }
+      }, SANDBOX)
+      f.env.git.mergeResult = { ok: false, output: 'CONFLICT (content): src/a.ts' }
+      // the sync round starts on a dirty worktree, as after a restart mid-merge
+      const merge = f.env.git.merge.bind(f.env.git)
+      f.env.git.merge = async (cwd, ref) => {
+        const r = await merge(cwd, ref)
+        if (!r.ok) f.env.git.clean = false
+        return r
+      }
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      const round2 = f.runner.tasks.filter(t => t.agent === 'builder')[1]!
+      expect(f.env.git.calls.some(c => c[0] === 'startMerge')).toBe(false)
+      expect(round2.message).toContain('A merge of origin/main is under way in your worktree')
+      expect(round2.message).not.toContain('merge origin/main, resolve the conflicts, push')
+    })
+
     test('without the sandbox the builder commits and opens its PR itself', async () => {
       const { env, orch } = await factory({ ...happy })
       env.github.addIssue({ number: 1 })

@@ -79,7 +79,8 @@ export class GitCli implements GitPort {
   }
 
   async isClean(cwd: string) {
-    return !(await this.git(cwd, 'status', '--porcelain')).trim()
+    // never into submodules: a nested repo's own config would run its filters as the factory
+    return !(await this.git(cwd, 'status', '--porcelain', '--ignore-submodules=all')).trim()
   }
 
   async head(cwd: string) {
@@ -143,7 +144,11 @@ export class GitCli implements GitPort {
     const raw = (await this.git(cwd, 'diff', '--cached', '--raw', '--no-renames', '-z')).split('\0')
     const links: string[] = []
     for (let i = 0; i + 1 < raw.length; i += 2) if (raw[i]!.split(' ')[1] === '160000') links.push(raw[i + 1]!)
-    if (links.length) return { committed: false, problem: `nested git repositories can't be committed: remove ${links.map(l => `${l}/.git`).join(', ')}` }
+    if (links.length) {
+      // unstaged again: a staged gitlink makes the next add or status recurse into it and honour its config
+      await this.git(cwd, 'reset', '-q', '--', ...links)
+      return { committed: false, problem: `nested git repositories can't be committed: remove ${links.map(l => `${l}/.git`).join(', ')}` }
+    }
     const merging = (await this.tryGit(cwd, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).code === 0
     if (!merging && (await this.tryGit(cwd, 'diff', '--cached', '--quiet')).code === 0) return { committed: false }
     await this.git(cwd, 'commit', '-q', '--no-verify', '-m', message)

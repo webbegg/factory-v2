@@ -61,6 +61,9 @@ describe('GhCli', () => {
     expect(await pr.prCreate({ base: 'main', head: 'factory/001-x', title: 'T', body: 'Closes #1' }))
       .toEqual({ number: 42, url: 'https://github.com/o/r/pull/42' })
     expect(seen).toEqual([['pr', 'create', '--draft', '--base', 'main', '--head', 'factory/001-x', '--title', 'T', '--body', 'Closes #1']])
+    // title and body both come from build.md: both redacted
+    await pr.prCreate({ base: 'main', head: 'b', title: 'T https://u:pw@github.com/o/r', body: 'B https://u:pw@github.com/o/r' })
+    expect(seen[1]!.slice(-3)).toEqual(['T https://***@github.com/o/r', '--body', 'B https://***@github.com/o/r'])
   })
 
   test('commitChecks reads every page of check runs and statuses and maps their states', async () => {
@@ -329,13 +332,27 @@ describe('GitCli against a real repo', () => {
       await writeFile(join(nested, 'f.txt'), 'f\n')
       await exec('git', ['add', 'f.txt'], { cwd: nested })
       await exec('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'nested'], { cwd: nested })
+      // and its config runs a filter on any status that recurses into it (verify run 3, B1)
+      const marker = join(wt6, '..', 'pwned-006')
+      await exec('git', ['config', 'filter.evil.clean', `sh -c 'touch ${marker}; cat'`], { cwd: nested })
+      await writeFile(join(nested, '.gitattributes'), '* filter=evil\n')
+      await writeFile(join(nested, 'f.txt'), 'changed\n')
       const head = await git.head(wt6)
-      const refused = await git.commitAll(wt6, 'nested')
-      expect(refused.committed).toBe(false)
-      expect(refused.problem).toContain('sub')
-      expect(await git.head(wt6)).toBe(head)
-      await rm(nested, { recursive: true, force: true })
-      await exec('git', ['reset', '-q'], { cwd: wt6 })
+      try {
+        for (let i = 0; i < 2; i++) {
+          const refused = await git.commitAll(wt6, 'nested')
+          expect(refused.committed).toBe(false)
+          expect(refused.problem).toContain('sub')
+          // unstaged again, so nothing later recurses into it
+          expect((await exec('git', ['diff', '--cached', '--name-only'], { cwd: wt6 })).trim()).toBe('')
+        }
+        await git.isClean(wt6)
+        expect(existsSync(marker)).toBe(false)
+        expect(await git.head(wt6)).toBe(head)
+      } finally {
+        await rm(nested, { recursive: true, force: true })
+        await rm(marker, { force: true })
+      }
     } finally {
       await git.removeWorktree(wt6)
       await git.deleteBranch('factory/006-c')

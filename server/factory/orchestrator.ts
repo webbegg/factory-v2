@@ -536,7 +536,9 @@ export class Orchestrator extends EventEmitter {
     if (!this.o.config.sandbox.enabled || job.roundReason !== 'sync') return null
     const base = this.o.config.baseBranch
     // a dirty worktree is a merge (or work) already under way: never abort it
-    if (!await git.isClean(job.worktree)) return null
+    if (!await git.isClean(job.worktree)) {
+      return `A merge of origin/${base} is under way in your worktree: resolve any conflict markers left (read round-${job.round - 1}/sync.md), then update build.md for round ${job.round}.`
+    }
     await git.fetch(job.worktree, base)
     const merged = await git.startMerge(job.worktree, `refs/remotes/origin/${base}`)
     return merged.ok
