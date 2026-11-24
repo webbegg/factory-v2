@@ -1,5 +1,6 @@
 import type { Gate } from './gate'
 import { Refused } from './machine'
+import { firstLine } from './markdown'
 import type { Machine } from './machine'
 import type { CommitCheck, Ports } from './ports'
 import type { JobStore } from './store'
@@ -64,6 +65,8 @@ export class Merger {
   readonly ciWaiting = new Set<string>()
   /** told when a job enters and leaves the CI wait, so the board can show it */
   onCiWait: ((jobId: string, waiting: boolean) => void) | null = null
+  /** told a line for the board's activity feed */
+  onLog: ((message: string) => void) | null = null
 
   constructor(private o: MergerOptions) {}
 
@@ -157,11 +160,24 @@ export class Merger {
           await store.write(id, file, `${(await store.read(id, file) ?? '').trimEnd()}\n\n## GitHub CI\n${ci.note}\n`)
         }
       }
+    } catch (err) {
+      if (signal?.aborted) throw new Error('merge cancelled', { cause: err })
+      return fail(`The merge failed:\n\n\`\`\`\n${(err as Error).message}\n\`\`\``)
+    }
+    try {
       // pinned to the gated commit: a push after the gate makes GitHub refuse the merge
       await ports.github.prMerge(pr, config.mergeMethod, result.commit)
     } catch (err) {
       if (signal?.aborted) throw new Error('merge cancelled', { cause: err })
-      return fail(`The merge failed:\n\n\`\`\`\n${(err as Error).message}\n\`\`\``)
+      const message = (err as Error).message
+      // gh can fail after GitHub merged, e.g. when the response is lost; GitHub's state is the record
+      const state = await ports.github.prState(pr).catch(() => null)
+      if (state !== 'MERGED') return fail(`The merge failed:\n\n\`\`\`\n${message}\n\`\`\``)
+      const file = `round-${job.round}/merge-checks.md`
+      const note = `merge response lost: gh pr merge failed (${firstLine(message)}), but GitHub shows PR #${pr} merged.`
+      await store.write(id, file, `${(await store.read(id, file) ?? '').trimEnd()}\n\n## Merge\n${note}\n`)
+      await store.appendEvent(id, { at: ports.now(), type: 'pr', pr, state, note: 'merge response lost' })
+      this.onLog?.(`${id}: PR #${pr} merge response lost; GitHub shows it merged`)
     }
     await ports.git.deleteRemoteBranch(job.branch)
     return machine.advance(id, 'merged')

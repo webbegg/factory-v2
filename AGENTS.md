@@ -40,7 +40,10 @@ view; this file is for whoever changes the code.
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
   approve, reject, after job.json is saved) and agent, gate and merge lines from
   `orchestrator.ts`, which writes `agent-start` before an agent's watch is
-  taken and `agent-end` after its check so its own lines are never undone.
+  taken and `agent-end` after its check so its own lines are never undone,
+  and `pr` lines (the PR's state on GitHub and a note) from `orchestrator.ts`
+  and `merge.ts` whenever they act on a PR merged or closed outside the
+  factory, or on a merge whose `gh pr merge` response was lost.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.

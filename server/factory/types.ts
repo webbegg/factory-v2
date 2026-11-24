@@ -1,3 +1,5 @@
+import type { PrState } from './ports'
+
 export const STAGES = [
   'intake', 'needs-info', 'spec', 'build', 'gate', 'review',
   'approve', 'merging', 'needs-human', 'merged', 'rejected'
@@ -69,6 +71,7 @@ export type JobEvent = { at: string } & (
   | { type: 'agent-end', agent: string, model: string, round: number, seconds: number, cost: number, ok: boolean, error?: string }
   | { type: 'gate', verdict: GateVerdict, seconds: number, commit: string }
   | { type: 'merge', outcome: Stage | 'error', error?: string }
+  | { type: 'pr', pr: number, state: PrState, note: string }
 )
 
 export interface FactoryConfig {
