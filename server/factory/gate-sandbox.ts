@@ -11,8 +11,12 @@ export interface GateSandbox {
 }
 
 const REGISTRY_HOSTS = ['registry.npmjs.org']
-/** never readable by branch code; the model and GitHub env vars are scrubbed before it starts */
-export const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json', '~/.config/gh', '~/.git-credentials']
+/**
+ * Never readable by branch code; the model and GitHub env vars are scrubbed
+ * before it starts. Claude Code keeps its OAuth credentials in
+ * ~/.claude/.credentials.json on Linux, and ~/.factory holds the factory's own state.
+ */
+export const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json', '~/.config/gh', '~/.git-credentials', '~/.claude/.credentials.json', '~/.claude.json', '~/.factory']
 
 /**
  * Where a worktree's checks keep their package caches between rounds: one

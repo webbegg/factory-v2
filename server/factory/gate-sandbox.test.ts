@@ -14,6 +14,8 @@ describe('gateSandboxConfig (#68)', () => {
     expect(c.filesystem.allowWrite).toEqual(['/r/.worktrees/001-x', '/t/run', gateCacheDir('/r/.worktrees/001-x')])
     expect(c.filesystem.denyWrite).toEqual(['/r/.worktrees/001-x/.git', '/r/.git'])
     expect(c.filesystem.denyRead).toEqual(expect.arrayContaining(['~/.ssh', '~/.config/gh', '~/.git-credentials', '~/.aws']))
+    // Claude Code's OAuth credentials (Linux) and config, and the factory's own state
+    expect(c.filesystem.denyRead).toEqual(expect.arrayContaining(['~/.claude/.credentials.json', '~/.claude.json', '~/.factory']))
     expect(c.network).toEqual({ allowedDomains: ['registry.npmjs.org', 'pypi.org'], deniedDomains: [], strictAllowlist: true, allowLocalBinding: true })
   })
 

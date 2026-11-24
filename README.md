@@ -239,7 +239,10 @@ in the running factory and is not kept across a restart.
   temp folder and a package cache kept per worktree (outside the repo, so it
   can't poison yours), and nothing else: not `.git`, not your home. It reaches
   the npm registry and `domains` only, may bind local ports for tests, and
-  never sees secrets. A repo's own tests that start this sandbox can't, inside
+  never sees secrets (nor Claude's or the factory's own files). Binding local
+  ports also lets it, like the builder, connect to any port on localhost,
+  the board's included: the sandbox can't single one port out, and the board
+  doesn't yet tell its own page from a local script that sends no `Origin`. A repo's own tests that start this sandbox can't, inside
   it: skip them when `SANDBOX_RUNTIME=1`, as factory-v2's do.
 - The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
@@ -275,7 +278,8 @@ in the running factory and is not kept across a restart.
   credentials in URLs and GitHub/Anthropic tokens masked.
 - The board listens on 127.0.0.1, refuses foreign `Host` headers, API calls
   from any other origin (other localhost ports included, where job dev servers
-  run branch code) and non-JSON writes.
+  run branch code) and non-JSON writes. A local process that sends no
+  `Origin`, such as `curl` from a branch's tests, still gets through.
 - Attached screenshots are uploaded to GitHub as user attachments of the
   project's repository (the way `gh issue create --attach` does it); nothing is
   committed or released. Anyone who can see the repository can open them:
