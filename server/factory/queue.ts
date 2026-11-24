@@ -48,6 +48,8 @@ export class Queue {
     const { store, ports, machine } = this.o
     for (const j of await store.list()) {
       if (only && j.stage !== only) continue
+      // merged, but not as gated: it waits for an operator to look
+      if (j.merge?.treeVerified === false) continue
       if (!TERMINAL.has(j.stage) && !driving(j.id) && j.pr && await ports.github.prState(j.pr) === 'MERGED') {
         await machine.advance(j.id, 'merged')
       }

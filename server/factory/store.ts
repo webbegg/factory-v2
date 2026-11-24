@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { FactoryPaths, Job, JobEvent } from './types'
 
 const ARCHIVED = /\.rejected-\d+$/
@@ -91,11 +91,12 @@ export class JobStore {
     await rename(this.path(id, from), this.path(id, to))
   }
 
-  /** Moves a top-level `name.md` aside as `name-<k>.md`, the next free k, so a new one can't be mistaken for it. */
+  /** Moves `name.md` (top-level or in a round folder) aside as `name-<k>.md`, the next free k, so a new one can't be mistaken for it. */
   async archive(id: string, rel: string): Promise<string | null> {
     if (!existsSync(this.path(id, rel))) return null
     const stem = rel.replace(/\.md$/, '')
-    const k = (await this.files(id, new RegExp(`^${stem}-\\d+\\.md$`))).length + 1
+    const name = basename(stem)
+    const k = (await readdir(dirname(this.path(id, rel)))).filter(f => new RegExp(`^${name}-\\d+\\.md$`).test(f)).length + 1
     const to = `${stem}-${k}.md`
     await this.move(id, rel, to)
     return to

@@ -5,7 +5,7 @@ import type { Ports, ThreadKind } from './ports'
 import { hash } from './provenance'
 import type { JobStore } from './store'
 import { TERMINAL, WAITING } from './types'
-import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Risk, RoundReason, Stage, Verdict } from './types'
+import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, MergeRecord, Risk, RoundReason, Stage, Verdict } from './types'
 
 export { TERMINAL, WAITING }
 
@@ -146,6 +146,15 @@ export class Machine {
     await this.store.appendEvent(job.id, { at: this.ports.now(), type: 'stage', from, to: job.stage })
   }
 
+  /** Saves the merge step's record as job.json `merge` and merge.md; a record already there stays. */
+  recordMerge(id: string, record: MergeRecord): Promise<Job> {
+    return this.store.update(id, async (job) => {
+      if (job.merge) return job
+      await this.store.write(id, 'merge.md', mergeMarkdown(record))
+      return { ...job, merge: record }
+    })
+  }
+
   /** Records the routed agent set on an ACCEPTed intake job. */
   recordAgents(id: string, agents: JobAgents): Promise<Job> {
     return this.store.update(id, async (raw) => {
@@ -267,8 +276,19 @@ export class Machine {
       `${job.id}: ${old} → ${stage} is not a legal transition`)
 
     if (stage === 'merged') {
-      require(job.pr && await github.prState(job.pr) === 'MERGED', 'the PR isn\'t merged')
+      const pr = job.pr
+      require(pr && await github.prState(pr) === 'MERGED', 'the PR isn\'t merged')
       if (old === 'needs-human') await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+      // the merge step writes its own record first; anything else merged it outside the factory
+      if (!job.merge) {
+        // the record says what can be read; it never holds up the move
+        const commit = await github.prMergeCommit(pr).catch(() => null)
+        job.merge = {
+          by: 'external', approvedCommit: null, gatedCommit: null, base: null,
+          mergeCommit: commit?.sha ?? null, treeVerified: null, ci: null, overrides: []
+        }
+        await this.store.write(job.id, 'merge.md', mergeMarkdown(job.merge))
+      }
     } else if (closed) {
       await this.escalate(job, `PR #${job.pr} was closed outside the factory.`)
     } else if (via === 'budget') {
@@ -367,6 +387,7 @@ export class Machine {
       const want = stage === 'merging' ? 'APPROVE' : 'ESCALATE'
       const line = firstLine(await this.read(job, 'decision.md') ?? '')
       require(line === want, `decision.md starts with '${line}', not ${want}`)
+      if (stage === 'merging') job.mergeVia = 'approver'
     } else if (old === 'merging') {
       const sync = `${this.roundRel(job)}/sync.md`
       const conflicted = await this.read(job, sync) !== null
@@ -383,6 +404,7 @@ export class Machine {
       // a fresh budget, so a conflict at the merge can still go back to build
       job.roundLimit = job.round + this.config.maxRounds
       job.budgetLimitUsd = job.costUsd + this.config.limits.jobBudgetUsd
+      job.mergeVia = 'operator'
       await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
     } else if (old === 'needs-human') { // → build
       require(via === 'feedback' && detail, 'use feedback to send a job back to the builder')
@@ -452,6 +474,18 @@ export class Machine {
       await git.addWorktree(job.worktree, job.branch, `refs/remotes/origin/${base}`)
     }
   }
+}
+
+/** merge.md: the record as the factory saved it in job.json, one line per field. */
+export function mergeMarkdown(record: MergeRecord): string {
+  const lines = (Object.keys(record) as Array<keyof MergeRecord>).map((key) => {
+    const value = record[key]
+    return `- ${key}: ${Array.isArray(value) ? value.join('; ') || 'none' : value ?? 'none'}`
+  })
+  if (record.treeVerified === false) {
+    lines.push('- The merged tree could not be matched to the gated commit\'s, so the job went to needs-human. Nothing was reverted.')
+  }
+  return `# Merge\n\n## Summary\n${lines.join('\n')}\n`
 }
 
 function parseIntake(text: string): IntakeInfo {
