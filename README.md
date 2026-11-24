@@ -153,10 +153,10 @@ in the running factory and is not kept across a restart.
   from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.
-- Opt-in agent sandbox: `"sandbox": { "enabled": true, "domains": [] }` in
+- Opt-in sandbox: `"sandbox": { "enabled": true, "domains": [], "maxFileMB": 10 }` in
   `.factory/config.json` runs every agent's shell in the Claude Agent SDK
-  sandbox, and an agent run fails if the sandbox can't start (`doctor` says
-  whether it can). A shell may write the agent's own files and its working
+  sandbox and the gate's `checks.sh` in the same sandbox runtime, and an agent
+  run or a gate fails if the sandbox can't start (`doctor` says whether it can). A shell may write the agent's own files and its working
   folder, the job's worktree (the SDK always allows that; after a read-only
   agent the factory still checks that HEAD didn't move and no files were
   left). No shell may write the repo's `.git`, which the SDK would otherwise
@@ -164,7 +164,8 @@ in the running factory and is not kept across a restart.
   redirect git. The builder therefore doesn't commit, push or open its PR:
   it leaves its changes in the worktree, and each time it stops the factory
   commits all of them (titled from the `# Build:` line of `build.md`, refused
-  while conflict markers are left), pushes the branch and opens the draft PR.
+  while conflict markers, nested repositories or files over `maxFileMB` are
+  left), pushes the branch and opens the draft PR.
   On a conflict round the factory starts the merge and the builder resolves
   the conflicted files. Only the builder reaches the network, and only for
   packages: the npm registry and the hosts in `domains`, never GitHub. The
@@ -173,9 +174,14 @@ in the running factory and is not kept across a restart.
   factory names refs in full (`refs/remotes/origin/<base>`) whether the
   sandbox is on or not. Verified on macOS; Linux is untested. There is no browser
   under the sandbox, since Chrome can't start in it: agents that view pages are
-  told to read the code and `curl` their dev server. The sandbox covers shells
-  only. Write and Edit stay with the guard above, and the gate's `checks.sh`
-  runs outside it.
+  told to read the code and `curl` their dev server. For agents the sandbox
+  covers shells only; Write and Edit stay with the guard above. The gate's
+  `checks.sh`, the builder's code at work, may write the worktree, its own
+  temp folder and a package cache kept per worktree (outside the repo, so it
+  can't poison yours), and nothing else: not `.git`, not your home. It reaches
+  the npm registry and `domains` only, may bind local ports for tests, and
+  never sees secrets. A repo's own tests that start this sandbox can't, inside
+  it: skip them when `SANDBOX_RUNTIME=1`, as factory-v2's do.
 - The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
