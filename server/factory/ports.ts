@@ -43,6 +43,8 @@ export interface GitHubPort {
   prClose(number: number): Promise<void>
   /** merges only while the PR head is still `headSha` */
   prMerge(number: number, method: 'merge' | 'squash' | 'rebase', headSha: string): Promise<void>
+  /** the PR's merge commit and that commit's tree, or null when GitHub reports none */
+  prMergeCommit(number: number): Promise<{ sha: string, tree: string } | null>
   /** every check run and commit status on `sha`; a list GitHub reports as incomplete gets a pending entry */
   commitChecks(sha: string): Promise<CommitCheck[]>
   openPrsForBranch(branch: string): Promise<Array<{ number: number, url: string }>>
@@ -63,6 +65,8 @@ export interface GitPort {
   head(cwd: string): Promise<string>
   /** sha of origin/<branch>, or null when it doesn't exist */
   remoteHead(cwd: string, branch: string): Promise<string | null>
+  /** the tree sha of `ref` */
+  tree(cwd: string, ref: string): Promise<string>
   commitsAhead(cwd: string, base: string): Promise<number>
   /** files changed since forking from `base`; status is the git letter (A, M, D, R…) */
   changedFiles(cwd: string, base: string): Promise<Array<{ status: string, path: string }>>

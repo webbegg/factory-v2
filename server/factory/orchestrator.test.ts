@@ -1268,6 +1268,17 @@ describe('orchestrator', () => {
       expect(events.at(-1)).toEqual({ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged', commit: 'a'.repeat(40), base: 'a'.repeat(40) })
     })
 
+    test('the merge record says the operator merged an escalated job (#75)', async () => {
+      const { env, orch } = await escalated()
+      await orch.approve('001-issue-1')
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(job.stage).toBe('merged')
+      expect(job.mergeVia).toBe('operator')
+      expect(job.merge).toMatchObject({ by: 'operator', treeVerified: true, overrides: ['operator merge of an escalated job'] })
+      expect(await env.store.read(job.id, 'merge.md')).toContain('- by: operator\n')
+    })
+
     test('a conflict at the merge goes back to the builder, even after the last round escalated', async () => {
       const { env, runner, orch } = await escalated({ maxRounds: 1 })
       env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
@@ -1288,6 +1299,21 @@ describe('orchestrator', () => {
       await orch.idle()
       expect(await env.store.read(job.id, `round-${job.round}/merge-checks.md`)).toBeNull()
       expect(await env.store.read(job.id, 'decision.md')).toStartWith('ESCALATE')
+    })
+
+    test('Merge on a tree-mismatch job with its PR merged keeps the factory\'s record (#75)', async () => {
+      const { env, orch } = await escalated()
+      const record = {
+        by: 'factory' as const, approvedCommit: 'a'.repeat(40), gatedCommit: 'a'.repeat(40), base: 'a'.repeat(40),
+        mergeCommit: 'd'.repeat(40), treeVerified: false, ci: 'passed' as const, overrides: []
+      }
+      const job = await env.store.update('001-issue-1', j => ({ ...j, merge: record }))
+      env.github.prStates.set(job.pr!, 'MERGED')
+      // the tick and the board's check leave it for the operator
+      await orch.checkMerged()
+      expect((await env.store.load(job.id)).stage).toBe('needs-human')
+      expect((await orch.approve(job.id)).stage).toBe('merged')
+      expect((await env.store.load(job.id)).merge).toEqual(record)
     })
 
     test('checkMerged moves hand-merged needs-human jobs while paused, and only those', async () => {

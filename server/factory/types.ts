@@ -80,6 +80,26 @@ export interface Job {
   move?: { from: Stage, to: Stage, done: string[] } | null
   /** set once when the job is created, written only by the factory; absent in older jobs */
   provenance?: JobProvenance | null
+  /** who moved the job into merging: the approver's APPROVE or the operator's Merge; set by the machine, absent in older jobs */
+  mergeVia?: 'approver' | 'operator' | null
+  /** what the factory can prove about the merge, also written as merge.md; never overwritten once set, absent in older jobs */
+  merge?: MergeRecord | null
+}
+
+export interface MergeRecord {
+  /** `factory` after the approver's APPROVE, `operator` after a Merge from needs-human, `external` when merged outside the factory */
+  by: 'factory' | 'operator' | 'external'
+  /** HEAD when the merge step started */
+  approvedCommit: string | null
+  /** the commit the last merge gate passed, which `gh pr merge` was pinned to */
+  gatedCommit: string | null
+  /** the origin/<base> sha that gate ran against */
+  base: string | null
+  mergeCommit: string | null
+  /** the merge commit's tree equals the gated commit's; null when not compared (rebase, external) */
+  treeVerified: boolean | null
+  ci: 'passed' | 'none-seen' | 'off' | null
+  overrides: string[]
 }
 
 /** Where an agent's system prompt came from: the built-in one, or a base `<agent>.md` / `<agent>.append.md` */

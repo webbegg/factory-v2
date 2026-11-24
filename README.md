@@ -30,6 +30,22 @@ an answer (a reject still rejects, without closing the PR again). A `gh pr
 merge` that fails while GitHub shows the PR merged, as when its response is
 lost, ends in merged, noted in `merge-checks.md`.
 
+Right before `gh pr merge` the factory fetches `origin/<base>` again. If it
+moved since the merge gate (another merge landed during the CI wait, say), the
+job syncs, gates, pushes and waits for CI again in the same round; each
+earlier `merge-checks.md` stays as `merge-checks-<k>.md`. After two such
+repeats a base that is still moving sends the job to needs-human. After a
+`merge` or `squash` merge the factory compares the merge commit's tree with
+the gated commit's; when they differ, or GitHub shows no merge commit, the
+job goes to needs-human with both commits named. Nothing is ever reverted and
+the branch is kept. Every merge leaves a record in `merge.md` and `job.json`
+`merge`: `by` (`factory` after an APPROVE, `operator` after your Merge,
+`external` for a PR merged outside the factory), the approved, gated, base
+and merge commits, `treeVerified` (`null` for `rebase` and external merges),
+`ci` (`passed`, `none-seen` or `off`) and any overrides. The merged sweep
+skips a job whose `treeVerified` is `false`; it moves to merged only when you
+act on it, and keeps its record.
+
 The board's **Inbox** lists what waits on you: escalated (needs-human) jobs and
 stalled jobs, each once. Jobs whose intake asked the issue's author a question
 are listed apart, under "Waiting on the author", and don't count. The tab title
@@ -199,7 +215,8 @@ in the running factory and is not kept across a restart.
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
-  and a second gate. The factory never deploys.
+  and a second gate, and only while `origin/<base>` is still the base that
+  gate ran against, checked again right before `gh pr merge`. The factory never deploys.
 - `checks.md` and `merge-checks.md` start with `GATE:`, `COMMIT:` (the
   worktree HEAD) and `BASE:` (the `origin/<base>` sha the checks ran against).
   The round gate skips `checks.sh` when the builder's last stop check
