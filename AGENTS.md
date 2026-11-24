@@ -60,9 +60,12 @@ view; this file is for whoever changes the code.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.
-  A cancel is not saved as an error: it puts the job in `Orchestrator.paused`
-  (in memory, gone on restart), which the drain skips until `start()` clears
-  it; `/api/state` sends `paused` and the `paused` event announces it.
+  A cancel is not saved as an error: once the driver stops it puts the job in
+  `Orchestrator.paused` and saves `job.json` `paused` (`by`, `at`, `reason`;
+  in `TRUSTED`; never for a shutdown abort), which `start()` clears and
+  `loadErrors()` reads back into `Orchestrator.paused`. The drain skips a
+  paused job and `Queue.rows()` shows it as a `skip` row, while it still holds
+  its slot; `/api/state` sends `paused` and the `paused` event announces it.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
