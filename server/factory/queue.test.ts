@@ -27,6 +27,18 @@ describe('queue', () => {
     expect(r[0]).toMatchObject({ job: '001-a', stage: 'build', note: 'round 1' })
   })
 
+  test('a paused job is skipped and still holds its slot', async () => {
+    const env = await makeEnv({ concurrency: 2 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2 })
+    env.github.addIssue({ number: 3 })
+    await seed(env, { id: '001-a', issue: 2, stage: 'build', round: 1, paused: { by: 'operator', at: 'x', reason: 'cancel' } })
+    const r = await env.queue.rows()
+    expect(rows(r)).toEqual(['new #1', 'hold #3', 'skip #2'])
+    expect(r[2]).toMatchObject({ job: '001-a', stage: 'build', note: 'paused: Resume on the board' })
+    expect(await env.queue.freeSlots()).toBe(1)
+  })
+
   test('needs-info resumes once the author replied, and takes a slot', async () => {
     const env = await makeEnv({ concurrency: 1 })
     const q = { author: 'operator', body: `${MARKER}\nWhich colour?`, createdAt: '1' }

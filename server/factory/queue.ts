@@ -90,6 +90,8 @@ export class Queue {
         others.push(row('skip', issue.number, j, 're-labeled after rejection: Run again on the board'))
       } else if (j.stage === 'merged') {
         others.push(row('skip', issue.number, j, 'merged'))
+      } else if (j.paused) {
+        others.push(row('skip', issue.number, j, 'paused: Resume on the board'))
       } else {
         running.push(row('resume', issue.number, j, `round ${j.round}`))
       }
@@ -194,6 +196,7 @@ export class Queue {
       started: ports.now(),
       ended: null,
       error: null,
+      paused: null,
       provenance: await this.provenance()
     }
     await store.write(id, 'issue.md', renderIssue(issue, await ports.github.operator()))

@@ -123,7 +123,7 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused'] as const
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -150,7 +150,7 @@ export class Orchestrator extends EventEmitter {
   private ticking: Promise<void> = Promise.resolve()
   /** last failure per job, also kept in job.json (see `loadErrors`); the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
-  /** jobs stopped by `cancel`; the drain leaves them alone until `start`, and like `errors` they are gone on restart */
+  /** jobs stopped by `cancel`, also kept in job.json (see `loadErrors`); the drain leaves them alone until `start` */
   readonly paused = new Set<string>()
   /** running jobs `cancel` aborted, so their driver's end is a pause, not a failure */
   private cancelling = new Set<string>()
@@ -187,10 +187,11 @@ export class Orchestrator extends EventEmitter {
     this.emit('event', e)
   }
 
-  /** Errors saved by an earlier process, so its stalled jobs stay stalled until retried. */
+  /** Errors and pauses saved by an earlier process, so its stalled and paused jobs stay so until started again. */
   async loadErrors(): Promise<void> {
     for (const job of await this.o.store.list()) {
       if (job.error) this.errors.set(job.id, job.error.message)
+      if (job.paused) this.paused.add(job.id)
     }
   }
 
@@ -429,18 +430,23 @@ export class Orchestrator extends EventEmitter {
     this.errors.delete(id)
     this.paused.delete(id)
     // a cancelled driver may end by returning or by any error its abort surfaced as
-    const pauseIfCancelled = () => {
+    const pauseIfCancelled = async () => {
       if (!this.cancelling.has(id)) return false
       this.paused.add(id)
       this.send({ type: 'paused', jobId: id })
+      const { store, ports } = this.o
+      await (async () => {
+        const by = await ports.github.operator()
+        await store.update(id, j => ({ ...j, paused: { by, at: ports.now(), reason: 'cancel' } }))
+      })().catch((e: Error) => this.send({ type: 'log', message: `${id}: couldn't save its pause: ${e.message}` }))
       return true
     }
     const done = this.drive(id, controller.signal)
-      .then(() => {
-        pauseIfCancelled()
+      .then(async () => {
+        await pauseIfCancelled()
       })
       .catch(async (err: Error) => {
-        if (pauseIfCancelled()) return
+        if (await pauseIfCancelled()) return
         const message = redact(err.message)
         this.errors.set(id, message)
         this.send({ type: 'error', jobId: id, message })
@@ -461,7 +467,8 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async drive(id: string, signal: AbortSignal) {
-    if ((await this.o.store.load(id)).error) await this.o.store.update(id, j => ({ ...j, error: null }))
+    const saved = await this.o.store.load(id)
+    if (saved.error || saved.paused) await this.o.store.update(id, j => ({ ...j, error: null, paused: null }))
     while (!signal.aborted) {
       const job = await this.o.store.load(id)
       this.send({ type: 'job', job })

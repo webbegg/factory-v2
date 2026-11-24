@@ -139,8 +139,8 @@ as "merging: waiting for CI" meanwhile. Because the factory now waits, the base
 branch's protection can require the CI check.
 Stopping the factory aborts running agents and checks; a job stopped that way
 is not marked as failed and resumes on the next start. Cancel on the board
-pauses a job instead of stalling it: it stays paused until you click Resume,
-and after a restart it simply shows Resume.
+pauses a job instead of stalling it. The pause is kept in the job, so it stays
+paused, showing Resume, until you click it, across restarts too.
 
 A rejected job can be run again from its panel on the board (**Run again**).
 Its folder is kept as `.factory/jobs/<id>.rejected-<n>` and no longer counts as

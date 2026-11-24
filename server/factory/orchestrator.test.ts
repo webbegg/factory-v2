@@ -1112,6 +1112,24 @@ describe('orchestrator', () => {
     expect(job.error?.message).toContain('changed job.json fields it may not: error')
   })
 
+  test('an agent that sets paused in job.json is refused and the field restored', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'spec-writer': async (t) => {
+        await write(t, 'spec.md', SPEC)
+        const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+        await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, paused: { by: 'agent', at: 'x', reason: 'forged' } }))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('spec')
+    expect(orch.errors.get(job.id)).toContain('spec-writer changed job.json fields it may not: paused')
+    expect(job.paused).toBeNull()
+  })
+
   describe('shutdown and cancel', () => {
     const held = {
       ...happy,
@@ -1143,11 +1161,14 @@ describe('orchestrator', () => {
       const stopped = await running()
       await stopped.orch.shutdown()
       expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
+      expect((await stopped.env.store.load('001-issue-1')).paused).toBeNull()
     }, 20_000)
 
     test('a cancel pauses the job instead of stalling it', async () => {
       const { env, orch, events } = await cancelled()
-      expect((await env.store.load('001-issue-1')).error).toBeNull()
+      const job = await env.store.load('001-issue-1')
+      expect(job.error).toBeNull()
+      expect(job.paused).toEqual({ by: 'operator', at: '2026-11-20T12:00:00Z', reason: 'cancel' })
       expect(orch.errors.has('001-issue-1')).toBe(false)
       expect([...orch.paused]).toEqual(['001-issue-1'])
       expect(events).toContainEqual({ type: 'paused', jobId: '001-issue-1' })
@@ -1172,6 +1193,48 @@ describe('orchestrator', () => {
       expect((await env.store.load('001-issue-1')).stage).toBe('merged')
       expect(orch.paused.size).toBe(0)
     }, 20_000)
+
+    test('a pause that can\'t be saved stays in memory and is logged', async () => {
+      const f = await running()
+      f.env.github.operator = () => Promise.reject(new Error('gh down'))
+      f.orch.cancel('001-issue-1')
+      await f.orch.idle()
+      expect(f.orch.paused.has('001-issue-1')).toBe(true)
+      expect((await f.env.store.load('001-issue-1')).paused).toBeNull()
+      expect(f.events).toContainEqual({ type: 'log', message: '001-issue-1: couldn\'t save its pause: gh down' })
+    }, 20_000)
+
+    test('a cancelled job stays paused after a restart until Resume', async () => {
+      const { env } = await cancelled()
+      const id = '001-issue-1'
+      const runner = new FakeRunner(env, { ...happy })
+      const next = new Orchestrator({ ...env, runner })
+      await next.loadErrors()
+      await next.drain()
+      await next.idle()
+      expect(next.paused.has(id)).toBe(true)
+      expect(next.errors.has(id)).toBe(false)
+      expect(runner.tasks.filter(t => t.jobId === id)).toEqual([])
+      expect((await env.store.load(id)).stage).toBe('spec')
+      expect((await env.store.load(id)).paused).not.toBeNull()
+
+      // what factory()'s builder hook does for the first runner
+      env.github.openPrs.set(`factory/${id}`, [{ number: 101, url: 'pr/1' }])
+      next.retry(id)
+      await next.idle()
+      const job = await env.store.load(id)
+      expect(job.paused).toBeNull()
+      expect(next.paused.size).toBe(0)
+      expect(job.stage).toBe('merged')
+    }, 20_000)
+
+    test('loadErrors leaves jobs without paused out', async () => {
+      const env = await makeEnv()
+      await seed(env, { id: '001-a', issue: 1, stage: 'build', round: 1 })
+      const orch = new Orchestrator({ ...env, runner: new FakeRunner(env, {}) })
+      await orch.loadErrors()
+      expect(orch.paused.size).toBe(0)
+    })
   })
 
   describe('merge from needs-human', () => {
