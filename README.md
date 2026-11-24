@@ -18,11 +18,50 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
                                 └ ESCALATE → PR ready, you decide (merge, feedback, reject)
 ```
 
-On the board, an escalated job's **Merge** button approves it: the factory
-syncs with the base, gates again, and merges through `gh pr merge`, as after an
-APPROVE. Gating again reuses the round gate's pass, without re-running
+On the board, an escalated job's panel shows the PR head GitHub reports and has
+four actions sharing one text box, which only **Send feedback** requires:
+
+- **Merge** overrides the escalation for that PR head: the factory syncs with
+  the base, gates again, and merges through `gh pr merge`, as after an APPROVE.
+  It writes `decision.md` as `APPROVE` with `BY: @<you>`, `OVERRIDE: yes`,
+  `COMMIT: <the head you saw>` and `OVERRIDES: decision-<k>.md` (the archived
+  ESCALATE, or `none`), then your text, if any, under `## Reason`. Merge is
+  refused if the PR head moved since the panel showed it, and the job comes
+  back to needs-human if the branch moved before the merge step's base sync
+  (the factory's own sync doesn't count). Its card then reads "merged by
+  override".
+- **Already merged** is for a PR you merged on GitHub: the job moves to merged
+  if GitHub shows it merged, and the action is refused otherwise.
+- **Send feedback** sends the builder another round with your text. Text that
+  reads like an approval ("merge", "merged", "go on", "lgtm") first asks
+  "Did you mean Merge?", with Merge, Send as feedback anyway, or Back.
+- **Reject** rejects the job, with your text as the reason if you gave one.
+
+Gating again reuses the round gate's pass, without re-running
 `checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
 `BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
+The factory reads the PR on GitHub before it acts on feedback, an answer, a
+reject or a builder round: a PR already merged moves the job to merged, and a
+PR closed on GitHub sends a builder round to needs-human and refuses feedback or
+an answer (a reject still rejects, without closing the PR again). A `gh pr
+merge` that fails while GitHub shows the PR merged, as when its response is
+lost, ends in merged, noted in `merge-checks.md`.
+
+Right before `gh pr merge` the factory fetches `origin/<base>` again. If it
+moved since the merge gate (another merge landed during the CI wait, say), the
+job syncs, gates, pushes and waits for CI again in the same round; each
+earlier `merge-checks.md` stays as `merge-checks-<k>.md`. After two such
+repeats a base that is still moving sends the job to needs-human. After a
+`merge` or `squash` merge the factory compares the merge commit's tree with
+the gated commit's; when they differ, or GitHub shows no merge commit, the
+job goes to needs-human with both commits named. Nothing is ever reverted and
+the branch is kept. Every merge leaves a record in `merge.md` and `job.json`
+`merge`: `by` (`factory` after an APPROVE, `operator` after your Merge,
+`external` for a PR merged outside the factory), the approved, gated, base
+and merge commits, `treeVerified` (`null` for `rebase` and external merges),
+`ci` (`passed`, `none-seen` or `off`) and any overrides. The merged sweep
+skips a job whose `treeVerified` is `false`; it moves to merged only when you
+act on it, and keeps its record.
 
 The board's **Inbox** lists what waits on you: escalated (needs-human) jobs and
 stalled jobs, each once. Jobs whose intake asked the issue's author a question
@@ -76,7 +115,7 @@ They are uploaded when you send and appended to the text as markdown images.
 |---|---|
 | `factory [ui] [--port n] [--no-open]` | the board: run the queue, follow jobs, answer what waits on you |
 | `factory run [issue]` | headless: drain the queue (or one issue) and exit |
-| `factory status` | jobs, stages, PRs, cost |
+| `factory status` | jobs, stages, PRs, cost, factory version |
 | `factory init` / `factory doctor` | set up / check a project (also on the board's Setup page) |
 | `factory --version` / `-v` | print the factory version |
 
@@ -93,11 +132,18 @@ it to the running factory without a restart; the change still needs committing.
 
 `limits` in `.factory/config.json` caps each `checks.sh` run (`checksMinutes`,
 default 30; it and everything it started are killed) and each agent run
-(`agentTurns`, default 300; `agentBudgetUsd`, default 15). A job that hits one
-stalls with the reason, like any other failure. An agent whose report is
+(`agentTurns`, default 300; `agentBudgetUsd`, default 15; `agentMinutes`,
+default 45, its wall clock). A job that hits one stalls with the reason, like
+any other failure. `jobBudgetUsd` (default 25) caps a whole job: once its
+`costUsd` reaches it, the job goes to needs-human before its next builder,
+reviewer or approver run, with the spend and the cap in `decision.md`.
+Feedback or Merge from needs-human gives it a fresh `jobBudgetUsd` on top of
+what it has spent. The Settings page edits `agentMinutes` and `jobBudgetUsd`;
+the other limits stay as the file has them. An agent whose report is
 missing or whose first line isn't valid is asked once more, with the error,
 before the job stalls; `spec.md` must have a `## Acceptance criteria` section,
-and a review without a verdict is removed and run again. A stalled job's error is kept
+and a review without a verdict, or without the factory's record of the commit
+it judged in this round, is removed and run again. A stalled job's error is kept
 in its `job.json`, so it stays stalled across a restart until you retry it.
 Retrying a job that stalled in the middle of a stage change doesn't repeat the
 comments or labels that change already posted.
@@ -117,8 +163,8 @@ as "merging: waiting for CI" meanwhile. Because the factory now waits, the base
 branch's protection can require the CI check.
 Stopping the factory aborts running agents and checks; a job stopped that way
 is not marked as failed and resumes on the next start. Cancel on the board
-pauses a job instead of stalling it: it stays paused until you click Resume,
-and after a restart it simply shows Resume.
+pauses a job instead of stalling it. The pause is kept in the job, so it stays
+paused, showing Resume, until you click it, across restarts too.
 
 A rejected job can be run again from its panel on the board (**Run again**).
 Its folder is kept as `.factory/jobs/<id>.rejected-<n>` and no longer counts as
@@ -128,7 +174,20 @@ to get that new job.
 
 Each job folder has an `events.jsonl`: one JSON line per stage change, agent
 run (start and end, with model, round, seconds, cost and any error), gate and
-merge attempt. Only the factory writes it.
+merge attempt. Only the factory writes it. An `agent-start` line also has the
+`sessionId` it resumes (null for a new session), the `attempt` (2 for a second
+run in the same session), the worktree `head` (null at intake), the `base` sha,
+and the system `prompt`'s `source` (`builtin`, `override` or `addendum`) and
+`sha`. `gate` lines have the `commit` and `base` they checked; `merge` lines
+have the `commit` and `base` that attempt's gate ran on, both null when it ran
+no gate.
+
+Each job's `job.json` has a `provenance` block, written once when the job is
+created: the factory version and git sha (for the board, the sha when it
+started), `claude --version`, the `origin/<base>` sha, sha256 prefixes of
+`.factory/config.json` and `.factory/checks.sh` on that base, and whether the
+sandbox was on. Jobs from before it have none. `factory status` shows the
+version in its `factory` column (`-` for those jobs).
 
 Running one issue (**Run issue** on the board, or **Run it now** on New request)
 while every slot is busy queues it: the board shows it as queued, and it starts on
@@ -149,7 +208,7 @@ in the running factory and is not kept across a restart.
   command it can't read still runs as you (unless the sandbox below is on), so
   protect the base branch on GitHub. After every agent the factory also checks what it changed: any job
   file other than its report (links included, `events.jsonl` too), the job's
-  routing, stage and error in `job.json`, or a report whose verdict differs
+  routing, stage, error and provenance in `job.json` or the review and decision records, or a report whose verdict differs
   from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.
@@ -186,7 +245,8 @@ in the running factory and is not kept across a restart.
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in
   `.factory/`, which is always protected. Merges happen only through `gh pr merge`, after a re-sync
-  and a second gate. The factory never deploys.
+  and a second gate, and only while `origin/<base>` is still the base that
+  gate ran against, checked again right before `gh pr merge`. The factory never deploys.
 - `checks.md` and `merge-checks.md` start with `GATE:`, `COMMIT:` (the
   worktree HEAD) and `BASE:` (the `origin/<base>` sha the checks ran against).
   The round gate skips `checks.sh` when the builder's last stop check
@@ -196,6 +256,18 @@ in the running factory and is not kept across a restart.
   the round's `checks.md` passed against the current `origin/<base>`. A
   skipped run is written down with its source, only a PASS is reused, and
   protected paths are checked every time.
+- After each reviewer and approver run the factory records the verdict, the
+  worktree HEAD it judged, the `origin/<base>` sha and the round in
+  `job.json` (`judged` per lens, `decided` for the approver), and writes
+  `COMMIT:` and `BASE:` under the first line of `review-<lens>.md` and
+  `decision.md`. Those lines are for you; the record in `job.json` is what
+  counts. A lens whose last verdict was PASS on the HEAD under review now isn't
+  run again: its new `review-<lens>.md` is a copy with `REUSED: round-<k>`
+  naming the round it came from. A CHANGES, a PASS on another commit or a
+  missing record runs the reviewer. `review → approve` needs every routed
+  lens recorded on HEAD in this round, and `approve → merging` needs the
+  decision recorded on HEAD in this round; either refuses naming both commits.
+  Your Merge on an escalated job needs no record.
 - `checks.sh` runs without environment variables named like secrets (`*TOKEN*`,
   `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `AUTH`), so branch code
   never sees the factory's credentials; checks that need one must get it some

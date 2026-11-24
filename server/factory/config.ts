@@ -21,7 +21,7 @@ export function defaultConfig(): FactoryConfig {
     },
     protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],
     ports: { base: 5100, step: 10 },
-    limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 },
+    limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15, agentMinutes: 45, jobBudgetUsd: 25 },
     ci: { wait: true, startMinutes: 2, minutes: 30 },
     // off until a live job has gone through every stage under it
     sandbox: { enabled: false, domains: [], maxFileMB: 10 }
@@ -67,8 +67,10 @@ function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
 
 /** The keys the Settings page edits; everything else in the file is left alone. */
 export type ConfigUpdate = Pick<FactoryConfig, 'concurrency' | 'maxRounds' | 'baseBranch' | 'mergeMethod' | 'models' | 'routing' | 'protectedPaths'>
+  & { limits: Pick<FactoryConfig['limits'], 'agentMinutes' | 'jobBudgetUsd'> }
 
-const EDITABLE = ['concurrency', 'maxRounds', 'baseBranch', 'mergeMethod', 'models', 'routing', 'protectedPaths'] as const
+const EDITABLE = ['concurrency', 'maxRounds', 'baseBranch', 'mergeMethod', 'models', 'routing', 'protectedPaths', 'limits'] as const
+const EDITABLE_LIMITS = ['agentMinutes', 'jobBudgetUsd'] as const
 const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const
 const AGENT_MODELS = ['intake', 'spec', 'builder', 'approver'] as const
 const RISKS = ['low', 'medium', 'high'] as const
@@ -136,7 +138,15 @@ export function validateConfigUpdate(input: unknown): ConfigUpdate {
     return p
   })
 
-  return { concurrency, maxRounds, baseBranch: branch, mergeMethod, models, routing, protectedPaths }
+  const l = exactKeys(o.limits, 'limits', EDITABLE_LIMITS, 'limits.')
+  const agentMinutes = integer(l.agentMinutes, 'limits.agentMinutes', 1, 480)
+  const jobBudgetUsd = l.jobBudgetUsd
+  if (typeof jobBudgetUsd !== 'number') throw new Error('limits.jobBudgetUsd must be a number')
+  if (!Number.isFinite(jobBudgetUsd) || jobBudgetUsd <= 0 || jobBudgetUsd > 1000) {
+    throw new Error('limits.jobBudgetUsd must be greater than 0 and at most 1000')
+  }
+
+  return { concurrency, maxRounds, baseBranch: branch, mergeMethod, models, routing, protectedPaths, limits: { agentMinutes, jobBudgetUsd } }
 }
 
 /**
@@ -147,7 +157,9 @@ export async function saveConfig(paths: FactoryPaths, input: unknown): Promise<F
   const update = validateConfigUpdate(input)
   const file = join(paths.factory, 'config.json')
   const raw = JSON.parse(await readFile(file, 'utf8')) as Partial<FactoryConfig>
-  const next = { ...raw, ...update }
+  // the page edits two limits; the others in the file stay as they are
+  const limits = { ...(isObject(raw.limits) ? raw.limits : {}), ...update.limits } as FactoryConfig['limits']
+  const next = { ...raw, ...update, limits }
   await writeFile(file, JSON.stringify(next, null, 2) + '\n')
   return withDefaults(next)
 }

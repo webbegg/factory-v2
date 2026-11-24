@@ -3,8 +3,10 @@ import { renderIssue, repliedSinceQuestion } from './issue'
 import { holdsSlot, Refused, TERMINAL } from './machine'
 import type { Machine } from './machine'
 import type { Ports } from './ports'
+import { hash } from './provenance'
+import type { BuildInfo } from './provenance'
 import type { JobStore } from './store'
-import type { FactoryConfig, FactoryPaths, Job, Stage } from './types'
+import type { FactoryConfig, FactoryPaths, Job, JobProvenance, Stage } from './types'
 
 export type QueueAction = 'resume' | 'new' | 'hold' | 'wait' | 'skip'
 
@@ -22,6 +24,7 @@ export interface QueueOptions {
   store: JobStore
   ports: Ports
   machine: Machine
+  build: BuildInfo
 }
 
 export function slugify(title: string): string {
@@ -45,6 +48,8 @@ export class Queue {
     const { store, ports, machine } = this.o
     for (const j of await store.list()) {
       if (only && j.stage !== only) continue
+      // merged, but not as gated: it waits for an operator to look
+      if (j.merge?.treeVerified === false) continue
       if (!TERMINAL.has(j.stage) && !driving(j.id) && j.pr && await ports.github.prState(j.pr) === 'MERGED') {
         await machine.advance(j.id, 'merged')
       }
@@ -85,6 +90,8 @@ export class Queue {
         others.push(row('skip', issue.number, j, 're-labeled after rejection: Run again on the board'))
       } else if (j.stage === 'merged') {
         others.push(row('skip', issue.number, j, 'merged'))
+      } else if (j.paused) {
+        others.push(row('skip', issue.number, j, 'paused: Resume on the board'))
       } else {
         running.push(row('resume', issue.number, j, `round ${j.round}`))
       }
@@ -132,6 +139,26 @@ export class Queue {
     return issue
   }
 
+  /** Best effort: a read that fails leaves only its own field null, never stopping the job. */
+  private async provenance(): Promise<JobProvenance> {
+    const { ports, config, paths, build } = this.o
+    const base = config.baseBranch
+    const ref = `refs/remotes/origin/${base}`
+    // a failed fetch leaves the last fetched base, which the reads below then all describe
+    await ports.git.fetch(paths.repo, base).catch(() => {})
+    const onBase = async (path: string) => {
+      const text = await ports.git.show(paths.repo, ref, path).catch(() => null)
+      return text === null ? null : hash(text)
+    }
+    return {
+      ...build,
+      baseSha: await ports.git.remoteHead(paths.repo, base).catch(() => null),
+      configSha: await onBase('.factory/config.json'),
+      checksSha: await onBase('.factory/checks.sh'),
+      sandbox: config.sandbox.enabled
+    }
+  }
+
   /** A new job for an open, labeled issue, starting at intake. */
   async create(number: number): Promise<Job> {
     const { store, ports, config, paths } = this.o
@@ -168,7 +195,11 @@ export class Queue {
       costUsd: 0,
       started: ports.now(),
       ended: null,
-      error: null
+      error: null,
+      paused: null,
+      provenance: await this.provenance(),
+      judged: {},
+      decided: null
     }
     await store.write(id, 'issue.md', renderIssue(issue, await ports.github.operator()))
     await store.save(job)

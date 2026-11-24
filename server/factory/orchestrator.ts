@@ -8,15 +8,17 @@ import { sandboxNote } from './agents/runner'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
-import { firstLine, section } from './markdown'
+import { body, firstLine, section } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
 import type { Merger } from './merge'
-import type { Ports } from './ports'
+import type { Ports, PrState } from './ports'
+import { hash } from './provenance'
 import type { Queue } from './queue'
 import { route } from './route'
 import type { JobStore } from './store'
-import type { FactoryConfig, FactoryPaths, Job } from './types'
+import { WAITING } from './types'
+import type { FactoryConfig, FactoryPaths, Job, PromptSource, Stage } from './types'
 
 export interface OrchestratorOptions {
   paths: FactoryPaths
@@ -121,7 +123,12 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused', 'judged', 'decided', 'budgetLimitUsd'] as const
+
+/** Thrown once an over-budget job has moved to needs-human, so its driver stops without stalling it. */
+class OverBudget extends Error {
+  override name = 'OverBudget'
+}
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -148,7 +155,7 @@ export class Orchestrator extends EventEmitter {
   private ticking: Promise<void> = Promise.resolve()
   /** last failure per job, also kept in job.json (see `loadErrors`); the drain leaves these alone until `retry` */
   readonly errors = new Map<string, string>()
-  /** jobs stopped by `cancel`; the drain leaves them alone until `start`, and like `errors` they are gone on restart */
+  /** jobs stopped by `cancel`, also kept in job.json (see `loadErrors`); the drain leaves them alone until `start` */
   readonly paused = new Set<string>()
   /** running jobs `cancel` aborted, so their driver's end is a pause, not a failure */
   private cancelling = new Set<string>()
@@ -166,6 +173,7 @@ export class Orchestrator extends EventEmitter {
   constructor(private o: OrchestratorOptions) {
     super()
     o.merger.onCiWait = (jobId, waiting) => this.send({ type: 'ci', jobId, waiting })
+    o.merger.onLog = message => this.send({ type: 'log', message })
   }
 
   get isDraining() {
@@ -184,10 +192,11 @@ export class Orchestrator extends EventEmitter {
     this.emit('event', e)
   }
 
-  /** Errors saved by an earlier process, so its stalled jobs stay stalled until retried. */
+  /** Errors and pauses saved by an earlier process, so its stalled and paused jobs stay so until started again. */
   async loadErrors(): Promise<void> {
     for (const job of await this.o.store.list()) {
       if (job.error) this.errors.set(job.id, job.error.message)
+      if (job.paused) this.paused.add(job.id)
     }
   }
 
@@ -222,14 +231,48 @@ export class Orchestrator extends EventEmitter {
     return { job, queued: !job }
   }
 
+  /** Records why the factory acted on a PR's state on GitHub, in events.jsonl and the activity feed. */
+  private async recordPr(id: string, pr: number, state: PrState, note: string) {
+    await this.o.store.appendEvent(id, { at: this.o.ports.now(), type: 'pr', pr, state, note })
+    this.send({ type: 'log', message: `${id}: PR #${pr} ${note}` })
+  }
+
+  /**
+   * A waiting job's PR as GitHub has it, before an operator's action: MERGED moves the job to merged
+   * and returns it, CLOSED refuses the action, OPEN (or no PR) returns null so the action goes ahead.
+   */
+  private async checkPr(id: string, waiting: Stage, action: string): Promise<Job | null> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (current.stage !== waiting || !current.pr) return null
+    const pr = current.pr
+    const state = await ports.github.prState(pr)
+    if (state === 'MERGED') {
+      const job = await machine.advance(id, 'merged')
+      await this.recordPr(id, pr, state, 'was already merged on GitHub; moved to merged')
+      this.send({ type: 'job', job })
+      return job
+    }
+    if (state === 'CLOSED') {
+      await this.recordPr(id, pr, state, `was closed outside the factory; ${action} refused`)
+      throw new Refused(`PR closed outside the factory: #${pr} is closed on GitHub, so ${action} can't go on; reject the job instead`)
+    }
+    return null
+  }
+
   async feedback(id: string, text: string): Promise<Job> {
+    const merged = await this.checkPr(id, 'needs-human', 'feedback')
+    if (merged) return merged
     const { job } = await this.o.machine.feedback(id, text, await this.o.ports.github.operator())
     this.start(id)
     return job
   }
 
-  /** The operator's Merge on an escalated job: the merging step syncs, gates and merges it. */
-  async approve(id: string): Promise<Job> {
+  /**
+   * The operator's Merge on an escalated job, for the PR head they saw: the merging step syncs, gates and
+   * merges it, unless the branch moves first.
+   */
+  async approve(id: string, { commit, reason }: { commit: string, reason: string }): Promise<Job> {
     const { store, machine, ports } = this.o
     const current = await store.load(id)
     // merged by hand already: nothing was approved through the factory, so no APPROVE is written
@@ -238,8 +281,30 @@ export class Orchestrator extends EventEmitter {
       this.send({ type: 'job', job })
       return job
     }
-    const job = await machine.approve(id, await ports.github.operator())
+    if (current.pr) {
+      const head = await ports.github.prHead(current.pr)
+      if (head !== commit) {
+        throw new Refused(`PR #${current.pr} moved: its head is ${head.slice(0, 7)}, not the ${commit.slice(0, 7)} you chose to merge; `
+          + 'look at the new commits again')
+      }
+    }
+    const job = await machine.approve(id, await ports.github.operator(), { commit, reason })
     this.start(id)
+    return job
+  }
+
+  /** The operator says a needs-human job's PR was merged on GitHub; only GitHub's state can confirm it. */
+  async alreadyMerged(id: string): Promise<Job> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (current.stage !== 'needs-human') throw new Refused(`${id} is in ${current.stage}, not needs-human`)
+    const pr = current.pr
+    if (!pr) throw new Refused(`${id} has no PR`)
+    const state = await ports.github.prState(pr)
+    if (state !== 'MERGED') throw new Refused(`PR #${pr} is ${state} on GitHub, not merged`)
+    const job = await machine.advance(id, 'merged')
+    await this.recordPr(id, pr, state, 'was merged on GitHub, as the operator said; moved to merged')
+    this.send({ type: 'job', job })
     return job
   }
 
@@ -254,13 +319,29 @@ export class Orchestrator extends EventEmitter {
   }
 
   async reject(id: string, text: string): Promise<Job> {
-    const job = await this.o.machine.reject(id, text, await this.o.ports.github.operator())
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (WAITING.has(current.stage) && current.pr) {
+      const pr = current.pr
+      const state = await ports.github.prState(pr)
+      if (state === 'MERGED') {
+        const job = await machine.advance(id, 'merged')
+        await this.recordPr(id, pr, state, 'was already merged on GitHub; moved to merged instead of rejected')
+        this.send({ type: 'job', job })
+        return job
+      }
+      // the machine leaves a closed PR as it is
+      if (state === 'CLOSED') await this.recordPr(id, pr, state, 'was closed outside the factory; rejected without closing it')
+    }
+    const job = await machine.reject(id, text, await ports.github.operator())
     this.send({ type: 'job', job })
     return job
   }
 
   /** The operator answers intake's questions on the issue; the job goes back to intake. */
   async answer(id: string, text: string, reply: (issue: number, body: string) => Promise<void>): Promise<Job> {
+    const merged = await this.checkPr(id, 'needs-info', 'the answer')
+    if (merged) return merged
     const next = await this.o.machine.answer(id, text, reply)
     this.start(id)
     return next
@@ -379,18 +460,23 @@ export class Orchestrator extends EventEmitter {
     this.errors.delete(id)
     this.paused.delete(id)
     // a cancelled driver may end by returning or by any error its abort surfaced as
-    const pauseIfCancelled = () => {
+    const pauseIfCancelled = async () => {
       if (!this.cancelling.has(id)) return false
       this.paused.add(id)
       this.send({ type: 'paused', jobId: id })
+      const { store, ports } = this.o
+      await (async () => {
+        const by = await ports.github.operator()
+        await store.update(id, j => ({ ...j, paused: { by, at: ports.now(), reason: 'cancel' } }))
+      })().catch((e: Error) => this.send({ type: 'log', message: `${id}: couldn't save its pause: ${e.message}` }))
       return true
     }
     const done = this.drive(id, controller.signal)
-      .then(() => {
-        pauseIfCancelled()
+      .then(async () => {
+        await pauseIfCancelled()
       })
       .catch(async (err: Error) => {
-        if (pauseIfCancelled()) return
+        if (await pauseIfCancelled()) return
         const message = redact(err.message)
         this.errors.set(id, message)
         this.send({ type: 'error', jobId: id, message })
@@ -411,11 +497,17 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async drive(id: string, signal: AbortSignal) {
-    if ((await this.o.store.load(id)).error) await this.o.store.update(id, j => ({ ...j, error: null }))
+    const saved = await this.o.store.load(id)
+    if (saved.error || saved.paused) await this.o.store.update(id, j => ({ ...j, error: null, paused: null }))
     while (!signal.aborted) {
       const job = await this.o.store.load(id)
       this.send({ type: 'job', job })
-      if (!await this.step(job, signal)) return
+      try {
+        if (!await this.step(job, signal)) return
+      } catch (err) {
+        // the job is in needs-human now; the next pass shows it and stops there
+        if (!(err instanceof OverBudget)) throw err
+      }
     }
   }
 
@@ -451,7 +543,7 @@ export class Orchestrator extends EventEmitter {
         const stopCheck = this.stopChecks.get(job.id)
         this.stopChecks.delete(job.id)
         const result = await gate.run(job.id, { signal, stopCheck })
-        await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit })
+        await store.appendEvent(job.id, { at: this.o.ports.now(), type: 'gate', verdict: result.verdict, seconds: result.seconds, commit: result.commit, base: result.base })
         if (signal.aborted) throw new Error('gate cancelled')
         this.send({ type: 'log', message: result.line })
         if (result.verdict === 'PASS') await machine.advance(job.id, 'review')
@@ -463,8 +555,11 @@ export class Orchestrator extends EventEmitter {
       case 'approve': {
         // an earlier round's APPROVE must never stand in for this round's decision
         await store.archive(job.id, 'decision.md')
+        const judging = await this.judging(job)
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
+        await machine.recordDecision(job.id, { verdict: line, ...judging })
+        await this.stamp(job, 'decision.md', judging)
         if (line === 'APPROVE') await this.merge(job, signal)
         else await machine.advance(job.id, 'needs-human')
         return true
@@ -479,11 +574,12 @@ export class Orchestrator extends EventEmitter {
 
   private async merge(job: Job, signal: AbortSignal) {
     const { merger, store, ports } = this.o
+    const gated = () => merger.gated.get(job.id) ?? { commit: null, base: null }
     try {
       const merged = await merger.merge(job.id, signal)
-      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: merged.stage })
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: merged.stage, ...gated() })
     } catch (err) {
-      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: 'error', error: redact((err as Error).message) })
+      await store.appendEvent(job.id, { at: ports.now(), type: 'merge', outcome: 'error', ...gated(), error: redact((err as Error).message) })
       throw err
     }
   }
@@ -549,6 +645,21 @@ export class Orchestrator extends EventEmitter {
 
   private async build(job: Job, signal: AbortSignal): Promise<boolean> {
     const { machine, store, gate } = this.o
+    if (job.pr) {
+      const pr = job.pr
+      const state = await this.o.ports.github.prState(pr)
+      if (state === 'MERGED') {
+        await machine.advance(job.id, 'merged')
+        await this.recordPr(job.id, pr, state, 'was already merged on GitHub; moved to merged')
+        return true
+      }
+      // no builder can push to a closed PR
+      if (state === 'CLOSED') {
+        await machine.advance(job.id, 'needs-human')
+        await this.recordPr(job.id, pr, state, 'was closed outside the factory; moved to needs-human')
+        return true
+      }
+    }
     const sandboxed = this.o.config.sandbox.enabled
     const resuming = !job.sessions.builder && (await store.read(job.id, 'build.md')) !== null
     const sync = await this.startSync(job)
@@ -610,16 +721,68 @@ export class Orchestrator extends EventEmitter {
     return true
   }
 
-  private async review(job: Job, signal: AbortSignal): Promise<boolean> {
+  /** The commit and base a reviewer or the approver is about to judge; the watch refuses one that moves HEAD. */
+  private async judging(job: Job): Promise<{ commit: string, base: string | null }> {
+    const { git } = this.o.ports
+    const { paths, config } = this.o
+    const commit = await git.head(job.worktree)
+    // the base is only shown, so a failed read must not keep the agent from running
+    const base = await git.fetch(paths.repo, config.baseBranch)
+      .then(() => git.remoteHead(paths.repo, config.baseBranch))
+      .catch(() => null)
+    return { commit, base }
+  }
+
+  /**
+   * Puts the factory's `COMMIT:` / `BASE:` lines under a report's first line, dropping any `COMMIT:`,
+   * `BASE:` or `REUSED:` the agent wrote in its header, so a reader sees only the factory's. They are
+   * for the reader: job.json is what counts.
+   */
+  private async stamp(job: Job, rel: string, judged: { commit: string, base: string | null }) {
+    const text = await this.o.store.read(job.id, rel) ?? ''
+    const [first = '', ...rest] = text.split('\n')
+    const end = rest.findIndex(l => !l.trim())
+    const head = (end < 0 ? rest : rest.slice(0, end)).filter(l => !/^\s*(COMMIT|BASE|REUSED)\s*:/i.test(l))
+    const tail = end < 0 ? [''] : rest.slice(end)
+    await this.o.store.write(job.id, rel, [first, `COMMIT: ${judged.commit}`, `BASE: ${judged.base ?? 'unknown'}`, ...head, ...tail].join('\n'))
+  }
+
+  /** Copies a lens's last PASS into this round when it was given on the HEAD under review now. */
+  private async reuse(job: Job, lens: string, head: string): Promise<boolean> {
     const { machine, store } = this.o
+    const rec = job.judged?.[lens]
+    if (!rec || rec.verdict !== 'PASS' || rec.commit !== head || rec.round >= job.round) return false
+    const from = `round-${rec.round}/review-${lens}.md`
+    const isFile = (await lstat(store.path(job.id, from)).catch(() => null))?.isFile()
+    const text = isFile ? await store.read(job.id, from) : null
+    if (text === null || firstLine(text) !== 'VERDICT: PASS') return false
+    const rel = `round-${job.round}/review-${lens}.md`
+    const note = `Reused from ${from}: PASS on ${head.slice(0, 7)}, and HEAD hasn't changed, so reviewer-${lens} was not run.`
+    const lines = ['VERDICT: PASS', `COMMIT: ${head}`, `BASE: ${rec.base ?? 'unknown'}`, `REUSED: round-${rec.round}`]
+    await store.write(job.id, rel, `${[lines.join('\n'), note, body(text)].filter(Boolean).join('\n\n')}\n`)
+    await machine.recordReview(job.id, lens, { verdict: 'PASS', commit: head, base: rec.base, reusedFrom: rec.round })
+    this.send({ type: 'log', message: `${job.id}: reviewer-${lens} not run; reused its PASS from ${from} on the same HEAD` })
+    return true
+  }
+
+  private async review(job: Job, signal: AbortSignal): Promise<boolean> {
+    const { machine, store, ports } = this.o
     const lenses = Object.keys(job.agents?.reviewers ?? {})
     const written = async (r: string) => (await lstat(store.path(job.id, `round-${job.round}/review-${r}.md`)).catch(() => null))?.isFile()
-    // a review with no verdict counts as missing, so its lens runs again instead of blocking every retry
+    const head = await ports.git.head(job.worktree)
+    // a review with no verdict, or with no record of being judged on HEAD this round, counts as missing,
+    // so its lens runs again instead of blocking every retry
     for (const r of lenses) {
       const rel = `round-${job.round}/review-${r}.md`
-      if (!await written(r) || VERDICTS.includes(firstLine(await store.read(job.id, rel) ?? ''))) continue
+      if (!await written(r)) continue
+      const rec = job.judged?.[r]
+      let why = 'has no verdict on its first line'
+      if (VERDICTS.includes(firstLine(await store.read(job.id, rel) ?? ''))) {
+        if (rec?.round === job.round && rec.commit === head) continue
+        why = `has no record of being judged on ${head.slice(0, 7)} in round ${job.round}`
+      }
       await rm(store.path(job.id, rel))
-      this.send({ type: 'log', message: `${job.id}: ${rel} has no verdict on its first line; removed it, so reviewer-${r} runs again` })
+      this.send({ type: 'log', message: `${job.id}: ${rel} ${why}; removed it, so reviewer-${r} runs again` })
     }
     // a resumed review may already have some verdicts on disk
     this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
@@ -628,7 +791,14 @@ export class Orchestrator extends EventEmitter {
     // One at a time: with reviewers side by side, the watch could not tell
     // which of them wrote a verdict, so one could overwrite another's.
     for (const r of missing) {
-      await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
+      if (!await this.reuse(job, r, head)) {
+        const judging = await this.judging(job)
+        await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
+        const rel = `round-${job.round}/review-${r}.md`
+        const verdict = firstLine(await store.read(job.id, rel) ?? '').slice('VERDICT: '.length)
+        await machine.recordReview(job.id, r, { verdict, ...judging })
+        await this.stamp(job, rel, judging)
+      }
       // show each verdict on the board as it lands
       this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     }
@@ -655,16 +825,18 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** A prompt override or addendum counts only once it is committed on the base, where no agent can write it. */
-  private async prompt(agent: AgentName): Promise<string> {
+  private async prompt(agent: AgentName): Promise<{ text: string, source: PromptSource, sha: string, base: string | null }> {
     const { paths, ports, config } = this.o
     // an agent can move the local origin/<base>; fetching first puts it back
     await ports.git.fetch(paths.repo, config.baseBranch)
+    const base = await ports.git.remoteHead(paths.repo, config.baseBranch).catch(() => null)
     const ref = `refs/remotes/origin/${config.baseBranch}`
+    const made = (text: string, source: PromptSource) => ({ text, source, sha: hash(text), base })
     const override = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.md`)
-    if (override !== null) return override
+    if (override !== null) return made(override, 'override')
     const addendum = await ports.git.show(paths.repo, ref, `.factory/agents/${agent}.append.md`)
     const body = addendum === null ? null : addendumBody(addendum)
-    return body === null ? PROMPTS[agent] : withAddendum(PROMPTS[agent], body)
+    return body === null ? made(PROMPTS[agent], 'builtin') : made(withAddendum(PROMPTS[agent], body), 'addendum')
   }
 
   private model(job: Job, agent: AgentName): string {
@@ -818,12 +990,33 @@ export class Orchestrator extends EventEmitter {
   }
 
   /**
+   * Before a builder, reviewer or approver run: a job that has spent its cap
+   * (job.json `budgetLimitUsd`, else `limits.jobBudgetUsd`) goes to a human
+   * instead, and the run never starts.
+   */
+  private async checkBudget(job: Job, agent: AgentName) {
+    if (agent === 'intake' || agent === 'spec-writer') return
+    // the in-memory job may predate the runs since it was loaded
+    const saved = await this.o.store.load(job.id)
+    const cap = saved.budgetLimitUsd ?? this.o.config.limits.jobBudgetUsd
+    if (saved.costUsd < cap) return
+    const why = `Job budget reached: spent $${saved.costUsd.toFixed(2)} of limits.jobBudgetUsd ($${cap}).`
+    await this.o.machine.overBudget(job.id, why)
+    this.send({ type: 'log', message: `${job.id}: ${agent} not started; ${why}` })
+    throw new OverBudget(why)
+  }
+
+  /**
    * One agent run and its checks. `again` marks a second run of the same
    * session, whose cost adds to the first instead of replacing it.
    */
   private async runAgent(job: Job, agent: AgentName, signal: AbortSignal, purpose: string,
     extra: Pick<AgentTask, 'stopCheck'>, opts: { resume?: string, again?: boolean } = {}) {
     const { store, paths, ports } = this.o
+    await this.checkBudget(job, agent)
+    const minutes = this.o.config.limits.agentMinutes
+    // the run's own clock, so a hung agent stalls its job while cancel and shutdown keep the job's signal
+    const clock = new AbortController()
     const port = this.port(job, agent)
     const lead = agent === 'builder' ? `Build round ${job.round}.` : ''
     const shots = this.screenshots(job, agent)
@@ -833,6 +1026,7 @@ export class Orchestrator extends EventEmitter {
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
       `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : '', noBrowser].filter(Boolean).join(' ')
     const resume = opts.resume ?? (agent === 'builder' ? job.sessions.builder : undefined)
+    const prompt = await this.prompt(agent)
     const task: AgentTask = {
       agent,
       jobId: job.id,
@@ -840,7 +1034,7 @@ export class Orchestrator extends EventEmitter {
       round: job.round,
       model: this.model(job, agent),
       cwd: agent === 'intake' ? paths.repo : job.worktree,
-      systemPrompt: await this.prompt(agent),
+      systemPrompt: prompt.text,
       message,
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
@@ -849,22 +1043,30 @@ export class Orchestrator extends EventEmitter {
       maxTurns: this.o.config.limits.agentTurns,
       maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,
-      signal,
+      signal: AbortSignal.any([signal, clock.signal]),
       onEvent: event => this.send({ type: 'agent', jobId: job.id, agent, event }),
       ...extra
     }
     this.send({ type: 'log', message: `${job.id}: ${agent} started` })
     // logged outside the watch, so the factory's own lines are never taken for the agent's
     const run = { agent, model: task.model, round: job.round }
-    await store.appendEvent(job.id, { at: ports.now(), type: 'agent-start', ...run })
+    const head = existsSync(job.worktree) ? await ports.git.head(job.worktree).catch(() => null) : null
+    await store.appendEvent(job.id, {
+      at: ports.now(), type: 'agent-start', ...run, sessionId: resume ?? null, attempt: opts.again ? 2 : 1, head,
+      base: prompt.base, prompt: { source: prompt.source, sha: prompt.sha }
+    })
     const t0 = performance.now()
     let cost = 0
     const end = (ok: boolean, error?: string) => store.appendEvent(job.id, {
       at: ports.now(), type: 'agent-end', ...run, seconds: Math.round((performance.now() - t0) / 1000), cost, ok, ...(error === undefined ? {} : { error })
     })
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const watch = await this.watch(job, agent)
+      timer = setTimeout(() => clock.abort(), minutes * 60_000)
       const result = await this.o.runner.run(task)
+      // a run that ended in time is never taken for a timeout while its checks run
+      clearTimeout(timer)
       cost = result.costUsd
       await store.update(job.id, (j) => {
         const costs = { ...j.costs }
@@ -878,6 +1080,7 @@ export class Orchestrator extends EventEmitter {
       })
       await watch.check()
       if (signal.aborted) throw new Error(`${agent} cancelled`)
+      if (clock.signal.aborted) throw new Error(`${agent} ran past limits.agentMinutes (${minutes})`)
       if (!result.ok) throw new Error(`${agent} failed: ${result.error ?? 'unknown error'}`)
       await this.matchesReply(job, agent, result.reply)
       await this.keepRepliedReport(job, agent, result.reply)
@@ -888,6 +1091,8 @@ export class Orchestrator extends EventEmitter {
     } catch (err) {
       await end(false, redact((err as Error).message))
       throw err
+    } finally {
+      clearTimeout(timer)
     }
   }
 }

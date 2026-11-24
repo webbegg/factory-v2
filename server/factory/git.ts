@@ -92,6 +92,10 @@ export class GitCli implements GitPort {
     return res.code === 0 ? res.stdout.trim() : null
   }
 
+  async tree(cwd: string, ref: string) {
+    return (await this.git(cwd, 'rev-parse', '--verify', `${ref}^{tree}`)).trim()
+  }
+
   async commitsAhead(cwd: string, base: string) {
     return Number((await this.git(cwd, 'rev-list', '--count', `${base}..HEAD`)).trim())
   }

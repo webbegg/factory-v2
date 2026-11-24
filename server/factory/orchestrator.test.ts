@@ -1,20 +1,26 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isWritable, NO_BROWSER, SANDBOX_BUILD } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
+import { defaultConfig } from './config'
 import type { AgentName } from './agents/prompts'
 import { Refused } from './machine'
+import { firstLine } from './markdown'
 import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
 import { makeEnv, seed } from './testing'
 import type { TestEnv } from './testing'
 import type { Job } from './types'
 
-/** returns an error message to fail the agent, `{ reply }` to answer with text, anything else to succeed */
+/**
+ * returns an error message to fail the agent at no cost, `{ failed }` to fail it after it spent the usual
+ * cost, `{ reply }` to answer with text, anything else to succeed
+ */
 type Script = (task: AgentTask, call: number) => unknown
 
 /** Plays each agent by writing the file it would write. */
@@ -35,6 +41,8 @@ class FakeRunner implements AgentRunner {
     try {
       const error: unknown = await this.scripts[task.agent]?.(task, n)
       if (typeof error === 'string') return { ok: false, reply: '', sessionId: null, costUsd: 0, error }
+      const failed = (error as { failed?: string } | undefined)?.failed
+      if (failed) return { ok: false, reply: '', sessionId: `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25, error: failed }
       const reply = (error as { reply?: string } | undefined)?.reply ?? 'done'
       return { ok: true, reply, sessionId: task.resume ?? `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25 }
     } finally {
@@ -46,6 +54,8 @@ class FakeRunner implements AgentRunner {
     return this.tasks.filter(t => !jobId || t.jobId === jobId).map(t => t.agent)
   }
 }
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12)
 
 const write = (task: AgentTask, rel: string, text: string) => writeFile(join(task.jobDir, rel), text)
 
@@ -282,7 +292,8 @@ describe('orchestrator', () => {
     await orch.idle()
     const job = (await env.store.list())[0]!
     expect(job.stage).toBe('merged')
-    expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe(`${report}\n`)
+    expect(await env.store.read(job.id, 'round-1/review-code.md'))
+      .toBe(`VERDICT: PASS\nCOMMIT: ${'a'.repeat(40)}\nBASE: ${'a'.repeat(40)}\n\n## Summary\n- fine\n`)
   })
 
   test('a final reply that is not a report is not saved, and the job stalls', async () => {
@@ -413,7 +424,7 @@ describe('orchestrator', () => {
       orch.retry(job.id)
       await orch.idle()
       expect(orch.errors.get(job.id) ?? '').not.toContain('first line isn\'t a verdict')
-      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe('VERDICT: PASS\n')
+      expect(firstLine(await env.store.read(job.id, 'round-1/review-code.md') ?? '')).toBe('VERDICT: PASS')
       expect((await env.store.load(job.id)).stage).not.toBe('review')
     })
 
@@ -518,12 +529,114 @@ describe('orchestrator', () => {
   })
 
   test('every agent run is capped by limits.agentTurns and limits.agentBudgetUsd', async () => {
-    const { env, runner, orch } = await factory({ ...happy }, { limits: { checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
+    const { env, runner, orch } = await factory({ ...happy }, { limits: { ...defaultConfig().limits, checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
     env.github.addIssue({ number: 1 })
     await orch.drain()
     await orch.idle()
     expect(runner.tasks.length).toBeGreaterThan(0)
     for (const t of runner.tasks) expect(t).toMatchObject({ maxTurns: 42, maxBudgetUsd: 3.5 })
+  })
+
+  describe('limits.agentMinutes and limits.jobBudgetUsd (#77)', () => {
+    /** a builder that runs until its signal aborts, then fails having spent the usual cost */
+    const hung = (t: AgentTask) => new Promise<{ failed: string }>((resolve) => {
+      if (t.signal!.aborted) resolve({ failed: 'aborted' })
+      t.signal!.addEventListener('abort', () => resolve({ failed: 'aborted' }), { once: true })
+    })
+    const limits = (more: Partial<ReturnType<typeof defaultConfig>['limits']>) => ({ limits: { ...defaultConfig().limits, ...more } })
+
+    test('a run past agentMinutes is aborted and stalls the job, with its cost kept and no second try', async () => {
+      const { env, runner, orch } = await factory({ ...happy, builder: hung }, limits({ agentMinutes: 0.001 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      const error = 'builder ran past limits.agentMinutes (0.001)'
+      const job = await env.store.load(id)
+      expect(job.stage).toBe('build')
+      expect(orch.errors.get(id)).toContain(error)
+      expect(job.error?.message).toContain(error)
+      expect(orch.paused.has(id)).toBe(false)
+      expect(job.paused ?? null).toBeNull()
+      const ends = (await readEvents(env, id)).filter(e => e.type === 'agent-end')
+      expect(ends.at(-1)).toMatchObject({ agent: 'builder', ok: false, error })
+      expect(runner.agents(id).filter(a => a === 'builder')).toHaveLength(1)
+      // intake, spec and the aborted builder at 0.25 each
+      expect(job.costUsd).toBe(0.75)
+    })
+
+    test('a cancel under a long agentMinutes still pauses the job instead of stalling it', async () => {
+      const { env, runner, orch } = await factory({ ...happy, builder: hung }, limits({ agentMinutes: 45 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      while (!runner.tasks.some(t => t.agent === 'builder')) await Bun.sleep(5)
+      orch.cancel('001-issue-1')
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(orch.paused.has(job.id)).toBe(true)
+      expect(job.paused).toMatchObject({ reason: 'cancel' })
+      expect(job.error).toBeNull()
+      expect(orch.errors.has(job.id)).toBe(false)
+    }, 20_000)
+
+    test('a job at its budget goes to needs-human before the builder starts; feedback renews the allowance', async () => {
+      const { env, runner, orch } = await factory({ ...happy }, limits({ jobBudgetUsd: 0.5 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      const job = await env.store.load(id)
+      expect(job.stage).toBe('needs-human')
+      expect(runner.agents(id)).toEqual(['intake', 'spec-writer'])
+      const events = await readEvents(env, id)
+      expect(events.some(e => e.type === 'agent-start' && e.agent === 'builder')).toBe(false)
+      expect(events.at(-1)).toMatchObject({ type: 'stage', from: 'build', to: 'needs-human' })
+      const decision = await env.store.read(id, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE\n')
+      expect(decision).toContain('Job budget reached: spent $0.50 of limits.jobBudgetUsd ($0.5).')
+      expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+      expect(env.github.calls.some(c => c[0] === 'comment' && c[1] === 'issue' && String(c[3]).startsWith('### Factory: needs a human')
+        && String(c[3]).includes('Job budget reached'))).toBe(true)
+      expect(orch.errors.has(id)).toBe(false)
+      expect(job.error).toBeNull()
+
+      await orch.feedback(id, 'go on')
+      const renewed = await env.store.load(id)
+      expect(renewed.stage).toBe('build')
+      expect(renewed.budgetLimitUsd).toBe(renewed.costUsd + 0.5)
+      await orch.idle()
+      expect(runner.agents(id)).toContain('builder')
+    })
+
+    test('the budget is checked before each reviewer too', async () => {
+      const { env, runner, orch } = await factory({ ...happy }, limits({ jobBudgetUsd: 0.75 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      expect((await env.store.load(id)).stage).toBe('needs-human')
+      expect(runner.agents(id)).toEqual(['intake', 'spec-writer', 'builder'])
+      expect((await readEvents(env, id)).some(e => e.type === 'agent-start' && String(e.agent).startsWith('reviewer-'))).toBe(false)
+      expect(await env.store.read(id, 'decision.md')).toContain('spent $0.75 of limits.jobBudgetUsd ($0.75)')
+      expect(orch.errors.has(id)).toBe(false)
+    })
+
+    test('an agent that sets budgetLimitUsd in job.json is refused and the field restored', async () => {
+      const { env, orch } = await factory({
+        ...happy,
+        builder: async (t) => {
+          await write(t, 'build.md', 'STATUS: READY\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, budgetLimitUsd: 1000 }))
+        }
+      })
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(orch.errors.get(job.id)).toContain('builder changed job.json fields it may not: budgetLimitUsd')
+      expect(job.budgetLimitUsd ?? null).toBeNull()
+    })
   })
 
   test('shutdown aborts running agents and waits for their drivers', async () => {
@@ -630,7 +743,8 @@ describe('orchestrator', () => {
     await orch.drain()
     await orch.idle()
     expect((await env.store.list())[0]!.stage).toBe('merged')
-    expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver', 'builder', 'reviewer-code', 'approver'])
+    // the conflict round leaves HEAD where round 1's PASS was given, so that review is reused
+    expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver', 'builder', 'approver'])
     expect(runner.tasks[5]!.message).toContain('The branch conflicts with origin/main: read round-1/sync.md, merge origin/main, resolve the conflicts, push, and update build.md for round 2.')
   })
 
@@ -929,6 +1043,185 @@ describe('orchestrator', () => {
     expect(seen).toContainEqual({ code: 'PASS', ux: 'pending', ui: 'pending' })
   })
 
+  describe('reviews and decisions are bound to the commit they judged (#74)', () => {
+    const HEAD = 'a'.repeat(40)
+    const MOVED = 'c'.repeat(40)
+    const BASE = 'b'.repeat(40)
+    const ui: Partial<Record<AgentName, Script>> = {
+      ...happy,
+      'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n'),
+      'reviewer-code': t => write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n\n## Summary\n- read every line\n'),
+      'reviewer-ux': t => write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n'),
+      // CHANGES once, so the job has a second round
+      'reviewer-ui': (t, n) => write(t, `round-${t.round}/review-ui.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
+    }
+
+    /** the running test's env, for scripts that move the fake HEAD or read job.json */
+    let current: TestEnv
+
+    async function drained(scripts: Partial<Record<AgentName, Script>>) {
+      const made = await factory(scripts)
+      current = made.env
+      made.env.git.remoteHeads.set('main', BASE)
+      const logs: string[] = []
+      made.orch.on('event', (e: FactoryEvent) => {
+        if (e.type === 'log') logs.push(e.message)
+      })
+      made.env.github.addIssue({ number: 1 })
+      await made.orch.drain()
+      await made.orch.idle()
+      const job = (await made.env.store.list())[0]!
+      const reviewers = (round: number) => made.runner.tasks.filter(t => t.round === round && t.agent.startsWith('reviewer-')).map(t => t.agent)
+      return { ...made, job, logs, reviewers }
+    }
+
+    test('a PASS on the same HEAD is reused in the next round; a CHANGES lens runs again', async () => {
+      const { env, orch, job, logs, reviewers } = await drained(ui)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job).toMatchObject({ stage: 'merged', round: 2 })
+      expect(reviewers(1)).toEqual(['reviewer-code', 'reviewer-ux', 'reviewer-ui'])
+      expect(reviewers(2)).toEqual(['reviewer-ui'])
+      const started = (await readEvents(env, job.id)).filter(e => e.type === 'agent-start' && e.round === 2).map(e => e.agent)
+      expect(started).toEqual(['builder', 'reviewer-ui', 'approver'])
+      expect(await env.store.read(job.id, 'round-2/review-code.md')).toBe(
+        `VERDICT: PASS\nCOMMIT: ${HEAD}\nBASE: ${BASE}\nREUSED: round-1\n\n`
+        + 'Reused from round-1/review-code.md: PASS on aaaaaaa, and HEAD hasn\'t changed, so reviewer-code was not run.\n\n'
+        + '## Summary\n- read every line\n')
+      expect(await env.store.read(job.id, 'round-2/review-ux.md')).toContain('REUSED: round-1')
+      expect(job.judged).toEqual({
+        code: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2, reusedFrom: 1 },
+        ux: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2, reusedFrom: 1 },
+        ui: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2 }
+      })
+      expect(logs.some(l => l.includes('reviewer-code not run') && l.includes('round-1/review-code.md'))).toBe(true)
+    })
+
+    test('a new HEAD runs every lens again', async () => {
+      const { env, orch, job, reviewers } = await drained({
+        ...ui,
+        builder: async (t, n) => {
+          if (n === 2) {
+            current.git.headSha = MOVED
+            current.git.remoteSha = MOVED
+          }
+          await write(t, 'build.md', 'STATUS: READY\n')
+        }
+      })
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job).toMatchObject({ stage: 'merged', round: 2 })
+      expect(reviewers(2)).toEqual(['reviewer-code', 'reviewer-ux', 'reviewer-ui'])
+      expect(await env.store.read(job.id, 'round-2/review-code.md')).not.toContain('REUSED')
+      expect(job.judged!.code).toEqual({ verdict: 'PASS', commit: MOVED, base: BASE, round: 2 })
+    })
+
+    test('each run records verdict, commit, base and round in job.json and under the report\'s first line', async () => {
+      let atApprove: Job | null = null
+      const { env, orch, job } = await drained({
+        ...happy,
+        // the agent's own COMMIT/BASE lines are dropped for the factory's
+        'reviewer-code': async (t) => {
+          await write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\nCOMMIT: forged\nSCOPE: all\n\n## Summary\n- ok\n')
+        },
+        'approver': async (t) => {
+          atApprove = await current.store.load(t.jobId)
+          await write(t, 'decision.md', 'APPROVE\nBASE: forged\n\n## Why\nok\n')
+        }
+      })
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job.stage).toBe('merged')
+      expect(atApprove!.judged).toEqual({ code: { verdict: 'PASS', commit: HEAD, base: BASE, round: 1 } })
+      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe(`VERDICT: PASS\nCOMMIT: ${HEAD}\nBASE: ${BASE}\nSCOPE: all\n\n## Summary\n- ok\n`)
+      expect(job.decided).toEqual({ verdict: 'APPROVE', commit: HEAD, base: BASE, round: 1 })
+      expect(await env.store.read(job.id, 'decision.md')).toBe(`APPROVE\nCOMMIT: ${HEAD}\nBASE: ${BASE}\n\n## Why\nok\n`)
+    })
+
+    test('a base that can\'t be read is recorded as null and shown as unknown', async () => {
+      const { env, orch } = await factory({ ...happy })
+      env.git.remoteHead = async (_cwd: string, branch: string) => {
+        if (branch === 'main') throw new Error('no origin/main')
+        return HEAD
+      }
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(job.judged!.code!.base).toBeNull()
+      expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
+    })
+
+    test('a failed fetch of the base still runs the reviewer and records base as null', async () => {
+      const { env, runner, orch } = await factory({ ...happy })
+      const fetch = env.git.fetch.bind(env.git)
+      let failed = false
+      // the first base fetch in review is the one made right before the reviewer runs
+      env.git.fetch = async (cwd: string, ref: string) => {
+        if (!failed && cwd === env.paths.repo && (await env.store.list())[0]?.stage === 'review') {
+          failed = true
+          throw new Error('could not resolve host')
+        }
+        return fetch(cwd, ref)
+      }
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(failed).toBe(true)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(runner.agents()).toContain('reviewer-code')
+      expect(job.judged!.code).toEqual({ verdict: 'PASS', commit: HEAD, base: null, round: 1 })
+      expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
+    })
+
+    test('a reviewer that writes judged in job.json is refused and the field restored', async () => {
+      const { orch, job } = await drained({
+        ...happy,
+        'reviewer-code': async (t) => {
+          await write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, judged: { code: { verdict: 'PASS', commit: HEAD, base: null, round: 1 } } }))
+        }
+      })
+      expect(job.stage).toBe('review')
+      expect(orch.errors.get(job.id)).toContain('reviewer-code changed job.json fields it may not: judged')
+      expect(job.judged).toEqual({})
+    })
+
+    test('an approver that writes decided in job.json is refused and the field restored', async () => {
+      const { env, orch, job } = await drained({
+        ...happy,
+        approver: async (t) => {
+          await write(t, 'decision.md', 'APPROVE\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, decided: { verdict: 'APPROVE', commit: HEAD, base: null, round: 1 } }))
+        }
+      })
+      expect(job.stage).toBe('approve')
+      expect(orch.errors.get(job.id)).toContain('approver changed job.json fields it may not: decided')
+      expect(job.decided).toBeNull()
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    })
+
+    test('a review with a verdict but no record on HEAD this round runs its lens again', async () => {
+      const { env, runner, orch } = await factory({ ...happy })
+      const logs: string[] = []
+      orch.on('event', (e: FactoryEvent) => {
+        if (e.type === 'log') logs.push(e.message)
+      })
+      const job = await seed(env, { stage: 'review', round: 1, pr: 101, agents: { reviewers: { code: 'haiku' } } }, {
+        'round-1/review-code.md': 'VERDICT: PASS\n'
+      })
+      orch.retry(job.id)
+      await orch.idle()
+      expect(runner.agents()).toEqual(['reviewer-code', 'approver'])
+      expect(logs.some(l => l.includes('round-1/review-code.md has no record') && l.includes('runs again'))).toBe(true)
+      // past approve and into the merge, whose gate fails only because the seeded job has no worktree
+      const done = await env.store.load(job.id)
+      expect(done.stage).toBe('needs-human')
+      expect(await env.store.read(job.id, 'decision.md')).toContain('The gate failed after syncing')
+      expect(done.judged!.code).toEqual({ verdict: 'PASS', commit: HEAD, base: HEAD, round: 1 })
+    })
+  })
+
   test('concurrency caps running jobs and the drain finishes them all', async () => {
     const { env, runner, orch } = await factory({ ...happy }, { concurrency: 2 })
     for (const n of [1, 2, 3]) env.github.addIssue({ number: n })
@@ -956,6 +1249,7 @@ describe('orchestrator', () => {
 
   test('a drained job logs its stages, agent runs, gate and merge to events.jsonl', async () => {
     const { env, orch } = await factory({ ...happy })
+    env.git.remoteHeads.set('main', 'b'.repeat(40))
     env.github.addIssue({ number: 1 })
     await orch.drain()
     await orch.idle()
@@ -975,8 +1269,68 @@ describe('orchestrator', () => {
     expect(ends[0]).toMatchObject({ model: 'fable', round: 0 })
     const gates = events.filter(e => e.type === 'gate')
     expect(gates).toHaveLength(1)
-    expect(gates[0]).toMatchObject({ verdict: 'PASS', seconds: expect.any(Number), commit: 'a'.repeat(40) })
-    expect(events.filter(e => e.type === 'merge')).toEqual([{ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged' }])
+    expect(gates[0]).toMatchObject({ verdict: 'PASS', seconds: expect.any(Number), commit: 'a'.repeat(40), base: 'b'.repeat(40) })
+    expect(events.filter(e => e.type === 'merge')).toEqual([
+      { at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged', commit: 'a'.repeat(40), base: 'b'.repeat(40) }
+    ])
+    const starts = events.filter(e => e.type === 'agent-start')
+    for (const e of starts) {
+      expect(e).toMatchObject({ attempt: 1, base: 'b'.repeat(40), prompt: { source: 'builtin', sha: sha256(PROMPTS[e.agent as AgentName]) } })
+      expect(Object.keys(e)).toEqual(['at', 'type', 'agent', 'model', 'round', 'sessionId', 'attempt', 'head', 'base', 'prompt'])
+    }
+    // intake runs before the worktree exists; the rest see its HEAD
+    expect(starts.map(e => e.head)).toEqual([null, 'a'.repeat(40), 'a'.repeat(40), 'a'.repeat(40), 'a'.repeat(40)])
+    expect(starts.map(e => e.sessionId)).toEqual([null, null, null, null, null])
+    for (const e of ends) expect(Object.keys(e)).not.toContain('prompt')
+  })
+
+  test('agent-start names each prompt\'s source and the hash of the exact prompt the agent got', async () => {
+    const { env, runner, orch } = await factory({ ...happy })
+    env.git.committed.set('.factory/agents/spec-writer.md', 'committed spec prompt')
+    env.git.committed.set('.factory/agents/builder.append.md', 'Builders run the linter.\n')
+    // a scaffold addendum with only its comment is the built-in prompt
+    env.git.committed.set('.factory/agents/intake.append.md', '<!--\n  one line on what the project is for\n-->\n')
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const starts = (await readEvents(env, '001-issue-1')).filter(e => e.type === 'agent-start')
+    const source = Object.fromEntries(starts.map(e => [e.agent, (e.prompt as { source: string }).source]))
+    expect(source).toEqual({ 'intake': 'builtin', 'spec-writer': 'override', 'builder': 'addendum', 'reviewer-code': 'builtin', 'approver': 'builtin' })
+    for (const e of starts) {
+      const task = runner.tasks.find(t => t.agent === e.agent)!
+      expect((e.prompt as { sha: string }).sha).toBe(sha256(task.systemPrompt))
+    }
+    expect(runner.tasks.find(t => t.agent === 'builder')!.systemPrompt).toBe(withAddendum(PROMPTS.builder, 'Builders run the linter.'))
+  })
+
+  test('a re-prompt\'s agent-start is attempt 2 and names the session it resumes', async () => {
+    const { env, orch } = await factory({ ...happy, approver: (t, n) => write(t, 'decision.md', n === 1 ? 'maybe\n' : 'APPROVE\n') })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const starts = (await readEvents(env, '001-issue-1')).filter(e => e.type === 'agent-start' && e.agent === 'approver')
+    expect(starts.map(e => [e.attempt, e.sessionId])).toEqual([[1, null], [2, '001-issue-1-approver-1']])
+  })
+
+  test('an agent that rewrites provenance in job.json stalls the job and the value is restored', async () => {
+    let before: Job['provenance']
+    const { env, orch } = await factory({
+      ...happy,
+      'spec-writer': async (t) => {
+        await write(t, 'spec.md', SPEC)
+        const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+        before = j.provenance
+        await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, provenance: { ...j.provenance, factorySha: null, sandbox: true } }))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('spec')
+    expect(orch.errors.get(job.id)).toContain('spec-writer changed job.json fields it may not: provenance')
+    expect(before).toMatchObject({ factorySha: 'f'.repeat(40), sandbox: false })
+    expect((await env.store.load(job.id)).provenance).toEqual(before)
   })
 
   test('a failed agent\'s error is kept in job.json, loaded by a new orchestrator, and cleared by retry', async () => {
@@ -1049,6 +1403,24 @@ describe('orchestrator', () => {
     expect(job.error?.message).toContain('changed job.json fields it may not: error')
   })
 
+  test('an agent that sets paused in job.json is refused and the field restored', async () => {
+    const { env, orch } = await factory({
+      ...happy,
+      'spec-writer': async (t) => {
+        await write(t, 'spec.md', SPEC)
+        const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+        await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, paused: { by: 'agent', at: 'x', reason: 'forged' } }))
+      }
+    })
+    env.github.addIssue({ number: 1 })
+    await orch.drain()
+    await orch.idle()
+    const job = (await env.store.list())[0]!
+    expect(job.stage).toBe('spec')
+    expect(orch.errors.get(job.id)).toContain('spec-writer changed job.json fields it may not: paused')
+    expect(job.paused).toBeNull()
+  })
+
   describe('shutdown and cancel', () => {
     const held = {
       ...happy,
@@ -1080,11 +1452,14 @@ describe('orchestrator', () => {
       const stopped = await running()
       await stopped.orch.shutdown()
       expect((await stopped.env.store.load('001-issue-1')).error).toBeNull()
+      expect((await stopped.env.store.load('001-issue-1')).paused).toBeNull()
     }, 20_000)
 
     test('a cancel pauses the job instead of stalling it', async () => {
       const { env, orch, events } = await cancelled()
-      expect((await env.store.load('001-issue-1')).error).toBeNull()
+      const job = await env.store.load('001-issue-1')
+      expect(job.error).toBeNull()
+      expect(job.paused).toEqual({ by: 'operator', at: '2026-11-20T12:00:00Z', reason: 'cancel' })
       expect(orch.errors.has('001-issue-1')).toBe(false)
       expect([...orch.paused]).toEqual(['001-issue-1'])
       expect(events).toContainEqual({ type: 'paused', jobId: '001-issue-1' })
@@ -1109,6 +1484,48 @@ describe('orchestrator', () => {
       expect((await env.store.load('001-issue-1')).stage).toBe('merged')
       expect(orch.paused.size).toBe(0)
     }, 20_000)
+
+    test('a pause that can\'t be saved stays in memory and is logged', async () => {
+      const f = await running()
+      f.env.github.operator = () => Promise.reject(new Error('gh down'))
+      f.orch.cancel('001-issue-1')
+      await f.orch.idle()
+      expect(f.orch.paused.has('001-issue-1')).toBe(true)
+      expect((await f.env.store.load('001-issue-1')).paused).toBeNull()
+      expect(f.events).toContainEqual({ type: 'log', message: '001-issue-1: couldn\'t save its pause: gh down' })
+    }, 20_000)
+
+    test('a cancelled job stays paused after a restart until Resume', async () => {
+      const { env } = await cancelled()
+      const id = '001-issue-1'
+      const runner = new FakeRunner(env, { ...happy })
+      const next = new Orchestrator({ ...env, runner })
+      await next.loadErrors()
+      await next.drain()
+      await next.idle()
+      expect(next.paused.has(id)).toBe(true)
+      expect(next.errors.has(id)).toBe(false)
+      expect(runner.tasks.filter(t => t.jobId === id)).toEqual([])
+      expect((await env.store.load(id)).stage).toBe('spec')
+      expect((await env.store.load(id)).paused).not.toBeNull()
+
+      // what factory()'s builder hook does for the first runner
+      env.github.openPrs.set(`factory/${id}`, [{ number: 101, url: 'pr/1' }])
+      next.retry(id)
+      await next.idle()
+      const job = await env.store.load(id)
+      expect(job.paused).toBeNull()
+      expect(next.paused.size).toBe(0)
+      expect(job.stage).toBe('merged')
+    }, 20_000)
+
+    test('loadErrors leaves jobs without paused out', async () => {
+      const env = await makeEnv()
+      await seed(env, { id: '001-a', issue: 1, stage: 'build', round: 1 })
+      const orch = new Orchestrator({ ...env, runner: new FakeRunner(env, {}) })
+      await orch.loadErrors()
+      expect(orch.paused.size).toBe(0)
+    })
   })
 
   describe('merge from needs-human', () => {
@@ -1130,35 +1547,146 @@ describe('orchestrator', () => {
       return f
     }
 
+    // FakeGit's head and FakeGitHub's PR head both default to this
+    const HEAD = 'a'.repeat(40)
+    const PICK = { commit: HEAD, reason: 'Looks fine to me.' }
+
     test('Merge syncs, gates and merges through GitHub', async () => {
       const { env, orch } = await escalated()
-      await orch.approve('001-issue-1')
+      await orch.approve('001-issue-1', PICK)
       await orch.idle()
       expect((await env.store.load('001-issue-1')).stage).toBe('merged')
       expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
       expect(await env.store.read('001-issue-1', 'decision-1.md')).toStartWith('ESCALATE')
       const events = await readEvents(env, '001-issue-1')
       expect(events.filter(e => e.type === 'stage').slice(-2).map(e => `${e.from}→${e.to}`)).toEqual(['needs-human→merging', 'merging→merged'])
-      expect(events.at(-1)).toEqual({ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged' })
+      expect(events.at(-1)).toEqual({ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'merged', commit: 'a'.repeat(40), base: 'a'.repeat(40) })
+    })
+
+    test('the merge record says the operator merged an escalated job (#75)', async () => {
+      const { env, orch } = await escalated()
+      await orch.approve('001-issue-1', PICK)
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(job.stage).toBe('merged')
+      expect(job.mergeVia).toBe('operator')
+      expect(job.merge).toMatchObject({ by: 'operator', treeVerified: true, overrides: ['operator merge of an escalated job'] })
+      expect(await env.store.read(job.id, 'merge.md')).toContain('- by: operator\n')
     })
 
     test('a conflict at the merge goes back to the builder, even after the last round escalated', async () => {
       const { env, runner, orch } = await escalated({ maxRounds: 1 })
       env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
-      await orch.approve('001-issue-1')
+      await orch.approve('001-issue-1', PICK)
       await orch.idle()
       expect(runner.tasks.filter(t => t.agent === 'builder').at(-1)!.message).toContain('read round-1/sync.md')
       expect((await env.store.load('001-issue-1')).round).toBe(2)
+      // no gate ran in the conflicting attempt, whatever the next one gated
+      const merges = (await readEvents(env, '001-issue-1')).filter(e => e.type === 'merge')
+      expect(merges[0]).toEqual({ at: '2026-11-20T12:00:00Z', type: 'merge', outcome: 'build', commit: null, base: null })
     })
 
     test('an already merged PR moves to merged with no gate', async () => {
       const { env, orch } = await escalated()
       const job = await env.store.load('001-issue-1')
       env.github.prStates.set(job.pr!, 'MERGED')
-      expect((await orch.approve(job.id)).stage).toBe('merged')
+      expect((await orch.approve(job.id, PICK)).stage).toBe('merged')
       await orch.idle()
       expect(await env.store.read(job.id, `round-${job.round}/merge-checks.md`)).toBeNull()
       expect(await env.store.read(job.id, 'decision.md')).toStartWith('ESCALATE')
+    })
+
+    test('Merge is refused when the PR head moved since the panel showed it', async () => {
+      const { env, orch } = await escalated()
+      const job = await env.store.load('001-issue-1')
+      const decision = await env.store.read(job.id, 'decision.md')
+      env.github.prHeads.set(job.pr!, 'f'.repeat(40))
+      await expect(orch.approve(job.id, PICK)).rejects.toThrow(Refused)
+      await expect(orch.approve(job.id, PICK)).rejects.toThrow('its head is fffffff, not the aaaaaaa you chose')
+      expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+      expect((await env.store.load(job.id)).stage).toBe('needs-human')
+    })
+
+    test('a branch moved before the merge step\'s sync escalates and merges nothing', async () => {
+      const { env, orch } = await escalated()
+      // someone pushed after the click
+      env.git.headSha = 'e'.repeat(40)
+      await orch.approve('001-issue-1', PICK)
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(job.stage).toBe('needs-human')
+      expect(job.override).toBeNull()
+      expect(await env.store.read(job.id, 'decision.md')).toContain('The branch moved from aaaaaaa to eeeeeee since @operator chose Merge')
+      expect(await env.store.read(job.id, 'decision-2.md')).toStartWith('APPROVE\nBY: @operator\nOVERRIDE: yes')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+      expect(env.git.calls.some(c => c[0] === 'push')).toBe(false)
+    })
+
+    test('a successful sync records its head, so a resumed override merge passes the check', async () => {
+      const { env, orch } = await escalated()
+      await orch.approve('001-issue-1', PICK)
+      await orch.idle()
+      expect((await env.store.load('001-issue-1')).override).toMatchObject({ commit: HEAD, synced: HEAD })
+    })
+
+    test('a resumed override merge whose head is the recorded sync merges', async () => {
+      const { env, orch } = await escalated()
+      const id = '001-issue-1'
+      // approved for 'c…', then the factory's own base sync made 'a…' before a cancel mid-gate
+      env.github.prHeads.set((await env.store.load(id)).pr!, 'c'.repeat(40))
+      await env.machine.approve(id, 'operator', { commit: 'c'.repeat(40), reason: '' })
+      await env.store.update(id, j => ({ ...j, override: { ...j.override!, synced: HEAD } }))
+      orch.retry(id)
+      await orch.idle()
+      expect((await env.store.load(id)).stage).toBe('merged')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
+    })
+
+    describe('Already merged', () => {
+      test('moves a job whose PR GitHub shows merged, without a decision or a merge', async () => {
+        const { env, orch } = await escalated()
+        const events: FactoryEvent[] = []
+        orch.on('event', (e: FactoryEvent) => events.push(e))
+        const job = await env.store.load('001-issue-1')
+        const decision = await env.store.read(job.id, 'decision.md')
+        env.github.prStates.set(job.pr!, 'MERGED')
+        expect((await orch.alreadyMerged(job.id)).stage).toBe('merged')
+        expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+        expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+        expect((await readEvents(env, job.id)).at(-1)).toMatchObject({ type: 'pr', pr: job.pr, state: 'MERGED' })
+        expect(events).toContainEqual(expect.objectContaining({ type: 'job', job: expect.objectContaining({ stage: 'merged' }) }))
+      })
+
+      test('refuses an open PR and leaves the job where it was', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load('001-issue-1')
+        const decision = await env.store.read(job.id, 'decision.md')
+        await expect(orch.alreadyMerged(job.id)).rejects.toThrow(`PR #${job.pr} is OPEN on GitHub, not merged`)
+        expect((await env.store.load(job.id)).stage).toBe('needs-human')
+        expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+      })
+
+      test('refuses a job that isn\'t waiting on a human', async () => {
+        const { env, orch } = await escalated()
+        await seed(env, { id: '002-other', issue: 2, stage: 'review', round: 1, pr: 200 })
+        env.github.prStates.set(200, 'MERGED')
+        await expect(orch.alreadyMerged('002-other')).rejects.toThrow('not needs-human')
+      })
+    })
+
+    test('Merge on a tree-mismatch job with its PR merged keeps the factory\'s record (#75)', async () => {
+      const { env, orch } = await escalated()
+      const record = {
+        by: 'factory' as const, approvedCommit: 'a'.repeat(40), gatedCommit: 'a'.repeat(40), base: 'a'.repeat(40),
+        mergeCommit: 'd'.repeat(40), treeVerified: false, ci: 'passed' as const, overrides: []
+      }
+      const job = await env.store.update('001-issue-1', j => ({ ...j, merge: record }))
+      env.github.prStates.set(job.pr!, 'MERGED')
+      // the tick and the board's check leave it for the operator
+      await orch.checkMerged()
+      expect((await env.store.load(job.id)).stage).toBe('needs-human')
+      expect((await orch.approve(job.id, PICK)).stage).toBe('merged')
+      expect((await env.store.load(job.id)).merge).toEqual(record)
     })
 
     test('checkMerged moves hand-merged needs-human jobs while paused, and only those', async () => {
@@ -1171,6 +1699,98 @@ describe('orchestrator', () => {
       await orch.checkMerged()
       expect((await env.store.load(job.id)).stage).toBe('merged')
       expect((await env.store.load('002-other')).stage).toBe('review')
+    })
+
+    describe('the PR\'s state on GitHub comes first (#72)', () => {
+      const ID = '001-issue-1'
+
+      test('feedback on a merged PR moves the job to merged and starts nothing', async () => {
+        const { env, runner, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'MERGED')
+        const tasks = runner.tasks.length
+        expect((await orch.feedback(ID, 'go on')).stage).toBe('merged')
+        await orch.idle()
+        expect((await env.store.load(ID)).stage).toBe('merged')
+        expect(existsSync(join(env.paths.jobs, ID, 'feedback-1.md'))).toBe(false)
+        expect(runner.tasks).toHaveLength(tasks)
+        const events = await readEvents(env, ID)
+        expect(events).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'MERGED' }))
+        expect(events).toContainEqual(expect.objectContaining({ type: 'stage', from: 'needs-human', to: 'merged' }))
+      })
+
+      test('feedback on a closed PR is refused and the job stays in needs-human', async () => {
+        const { env, runner, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'CLOSED')
+        const tasks = runner.tasks.length
+        const refusal = orch.feedback(ID, 'go on')
+        await expect(refusal).rejects.toBeInstanceOf(Refused)
+        await expect(refusal).rejects.toThrow('PR closed outside the factory')
+        await orch.idle()
+        expect(await env.store.load(ID)).toMatchObject({ stage: 'needs-human', round: job.round })
+        expect(existsSync(join(env.paths.jobs, ID, 'feedback-1.md'))).toBe(false)
+        expect(runner.tasks).toHaveLength(tasks)
+        expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'CLOSED' }))
+      })
+
+      test('reject on a merged PR moves the job to merged and closes nothing', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'MERGED')
+        expect((await orch.reject(ID, 'no')).stage).toBe('merged')
+        expect((await env.store.load(ID)).stage).toBe('merged')
+        expect(await env.store.read(ID, 'rejection.md')).toBeNull()
+        expect(env.github.calls.some(c => c[0] === 'close')).toBe(false)
+        expect(env.github.calls.some(c => c[0] === 'comment' && String(c[3]).includes('rejected'))).toBe(false)
+      })
+
+      test('reject on a closed PR rejects without closing the PR again', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'CLOSED')
+        expect((await orch.reject(ID, 'no')).stage).toBe('rejected')
+        expect(env.github.calls.some(c => c[0] === 'close')).toBe(false)
+        expect(env.git.calls).toContainEqual(['deleteRemoteBranch', job.branch])
+        expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'CLOSED' }))
+      })
+    })
+  })
+
+  describe('a builder round reads the PR first (#72)', () => {
+    const ID = '001-issue-1'
+    /** round 1's gate fails, and the PR is `state` on GitHub before round 2's builder */
+    async function secondRound(state: 'MERGED' | 'CLOSED') {
+      const f = await factory({
+        ...happy,
+        builder: async (t, n) => {
+          if (n === 1) await writeFile(join(t.cwd, 'broken'), 'x')
+          await write(t, 'build.md', 'STATUS: READY\n\n# Build\n')
+          f.env.github.prStates.set(101, state)
+        }
+      })
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      return f
+    }
+
+    test('on a merged PR, the job moves to merged with no second builder', async () => {
+      const { env, runner } = await secondRound('MERGED')
+      expect(await env.store.load(ID)).toMatchObject({ stage: 'merged', round: 2 })
+      expect(runner.tasks.filter(t => t.agent === 'builder').map(t => t.round)).toEqual([1])
+      expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: 101, state: 'MERGED' }))
+    })
+
+    test('on a closed PR, the job escalates with no second builder', async () => {
+      const { env, runner } = await secondRound('CLOSED')
+      expect(await env.store.load(ID)).toMatchObject({ stage: 'needs-human', round: 2 })
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE')
+      expect(decision).toContain('closed outside the factory')
+      expect(runner.tasks.filter(t => t.agent === 'builder').map(t => t.round)).toEqual([1])
+      expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+      expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: 101, state: 'CLOSED' }))
     })
   })
 
@@ -1416,10 +2036,10 @@ describe('screenshot folders', () => {
 
   test('a reviewer may not add to its own folder from an earlier round', async () => {
     const { orch, job, dir } = await run({
-      'reviewer-code': (t, n) => write(t, `round-${t.round}/review-code.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n'),
-      'reviewer-ui': async (t) => {
+      // CHANGES in round 1, so round 2 runs it again rather than reusing a PASS on the same HEAD
+      'reviewer-ui': async (t, n) => {
         if (t.round === 2) await writeFile(join(t.jobDir, 'round-1/screenshots-ui/late.png'), PNG)
-        await write(t, `round-${t.round}/review-ui.md`, 'VERDICT: PASS\n')
+        await write(t, `round-${t.round}/review-ui.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
       }
     })
     expect(job.round).toBe(2)
@@ -1448,9 +2068,10 @@ describe('screenshot folders', () => {
 
     const deleted = await run({
       ...firstRound,
-      'reviewer-ux': async (t) => {
+      // CHANGES in round 1, so round 2 runs it again rather than reusing a PASS on the same HEAD
+      'reviewer-ux': async (t, n) => {
         if (t.round === 2) await rm(shot(t))
-        await write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n')
+        await write(t, `round-${t.round}/review-ux.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
       }
     })
     expect(deleted.orch.errors.get(deleted.job.id)).toContain('reviewer-ux changed job files it may not: round-1/screenshots-ui/desktop.png (deleted)')

@@ -9,7 +9,10 @@ view; this file is for whoever changes the code.
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk; it
   re-exports `TERMINAL` and `WAITING`, which live in `types.ts` so the board
-  can import them),
+  can import them; `recordReview` / `recordDecision` save the `job.json`
+  `judged` (per lens) and `decided` records of the commit, base and round a
+  reviewer or the approver judged, kept across rounds, which `review → approve`
+  and `approve → merging` hold against HEAD),
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
   job's `events.jsonl` and never throws; `list()` skips `<id>.rejected-<n>`
   folders, which `archiveJob` makes, while `Queue.create` numbers new ids
@@ -21,12 +24,26 @@ view; this file is for whoever changes the code.
   `route.ts`, `merge.ts` (after the push it polls `commitChecks` on the gated
   commit per `ci.wait` / `ci.startMinutes` / `ci.minutes`, through injectable
   `sleep`/`now` that `makeEnv()` fakes; the jobs inside that wait are
-  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`),
+  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`;
+  right before `prMerge` it fetches and compares `origin/<base>` with the
+  gate's `base`, repeating sync, gate, push and CI wait at most twice in the
+  same round; after the merge it reads `prMergeCommit` and, for `merge` and
+  `squash`, compares its tree with `git.tree` of the gated commit, sending a
+  mismatch to needs-human; it saves `job.merge` and `merge.md` through
+  `Machine.recordMerge`, never overwriting a record, with `by` from
+  `job.mergeVia`, which the machine sets on the move into merging; the
+  machine records `by: 'external'` on a move to merged with no record yet;
+  `Queue.sweepMerged` skips a job whose `treeVerified` is `false`),
   `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
   in the same session, when its report is missing or its first line invalid,
-  while the builder's one second try stays in `build()`), `agents/` (prompts and the
+  while the builder's one second try stays in `build()`; after each reviewer
+  and approver run it records `judged` / `decided` through those machine
+  methods and writes `COMMIT:` / `BASE:` under the report's first line, and
+  `review()` copies a lens's PASS recorded on the current HEAD into the new
+  round, with `REUSED:`, instead of running it; `judged` and `decided` are in
+  `TRUSTED`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
   `setup.ts` (`init` / `doctor`; `init` writes the commented prompt addenda
   through `scaffoldAddenda`, which is unit-tested on its own; `baseChecks` runs `checks.sh` on
@@ -40,13 +57,42 @@ view; this file is for whoever changes the code.
   `events.jsonl` gets `stage` lines from `Machine` (advance, feedback,
   approve, reject, after job.json is saved) and agent, gate and merge lines from
   `orchestrator.ts`, which writes `agent-start` before an agent's watch is
-  taken and `agent-end` after its check so its own lines are never undone.
+  taken and `agent-end` after its check so its own lines are never undone,
+  and `pr` lines (the PR's state on GitHub and a note) from `orchestrator.ts`
+  and `merge.ts` whenever they act on a PR merged or closed outside the
+  factory, or on a merge whose `gh pr merge` response was lost.
+  `agent-start` also records `sessionId` (the session resumed, null when new),
+  `attempt` (2 for an `again` run), `head` (the worktree's, null at intake),
+  `base` and `prompt` (`source` builtin/override/addendum and the `hash` of the
+  exact `systemPrompt`, all from `prompt()`); `agent-end` keeps only agent,
+  model and round. `gate` lines carry `GateResult.base`; `merge` lines carry
+  the `commit` and `base` of that attempt's merge gate from `Merger.gated`,
+  cleared at each attempt's start, so both are null when no gate ran.
+  `job.json` `provenance` is written once by `Queue.create` (best effort: a
+  failed read nulls only its field), is in `TRUSTED`, and is absent in older
+  jobs. Its build info comes from `buildInfo()` in `provenance.ts`, read once
+  per process and injected into `createFactory` (`makeEnv()` passes
+  `FAKE_BUILD`); `ui()` reads the package's git sha when it takes the board's
+  snapshot and passes it in `FACTORY_BUILD_SHA`, so a later commit can't change it.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.
-  A cancel is not saved as an error: it puts the job in `Orchestrator.paused`
-  (in memory, gone on restart), which the drain skips until `start()` clears
-  it; `/api/state` sends `paused` and the `paused` event announces it.
+  A cancel is not saved as an error: once the driver stops it puts the job in
+  `Orchestrator.paused` and saves `job.json` `paused` (`by`, `at`, `reason`;
+  in `TRUSTED`; never for a shutdown abort), which `start()` clears and
+  `loadErrors()` reads back into `Orchestrator.paused`. The drain skips a
+  paused job and `Queue.rows()` shows it as a `skip` row, while it still holds
+  its slot; `/api/state` sends `paused` and the `paused` event announces it.
+  `runAgent` gives each run its own `limits.agentMinutes` timer, joined to the
+  job's signal with `AbortSignal.any`; when only the timer fired the run throws
+  `<agent> ran past limits.agentMinutes (<n>)`, a plain error that stalls the
+  job (the job's own abort still means cancel or shutdown). Before a builder,
+  reviewer or approver run, `checkBudget` reads `costUsd` from job.json and, at
+  the cap (`job.json` `budgetLimitUsd`, else `limits.jobBudgetUsd`), moves the
+  job through `Machine.overBudget` (build/review/approve → needs-human, an
+  ESCALATE naming the spend) and ends the driver without an error.
+  `budgetLimitUsd` is in `TRUSTED`; feedback and Merge from needs-human set it
+  to `costUsd + limits.jobBudgetUsd`, next to the `roundLimit` renewal.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of
@@ -61,7 +107,11 @@ view; this file is for whoever changes the code.
   `/api/queue`; while paused, the board's `/api/merged` POST is the check
   for needs-human jobs merged by hand, on load and when a job panel opens).
   `server/api/jobs/[id]/[action].post.ts` takes feedback, reject, answer,
-  merge (the board's Merge on an escalated job: `Orchestrator.approve`),
+  merge (the board's Merge on an escalated job: `Orchestrator.approve`, body
+  `{ commit, reason? }` with the PR head the panel showed, which
+  `GET /api/jobs/:id` sends as `prHead`), already-merged
+  (`Orchestrator.alreadyMerged`: moves a needs-human job to merged only when
+  GitHub shows its PR merged),
   retry (also the board's Resume), cancel (pauses) and rerun (Run again:
   `Orchestrator.runAgain` archives a rejected job's folder). `server/api/uploads.post.ts`
   takes images as base64 JSON and returns GitHub URLs, which the board appends
@@ -94,7 +144,8 @@ view; this file is for whoever changes the code.
   `JobDetail` is the shell: it fetches the detail, holds the live flags, the
   Stalled/Paused alerts and the panel grid, and composes `JobHeader` (meta,
   links, the run actions and their modals), `JobDecision` (the needs-human /
-  needs-info form, shown for `WAITING` stages), `JobFiles` (the file list and
+  needs-info form, shown for `WAITING` stages; its "Did you mean Merge?"
+  question comes from `looksLikeApproval` in `app/utils/decision.ts`), `JobFiles` (the file list and
   viewer, loading through `useJobFile` in `app/composables/useJobFile.ts`,
   which drops responses for a file or job the user has left) and
   `JobActivity` (the job's Live activity lines).

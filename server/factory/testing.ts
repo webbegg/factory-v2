@@ -9,6 +9,7 @@ import { Machine } from './machine'
 import { Merger } from './merge'
 import { GitHubIssues } from './issue'
 import type { CommitCheck, GitHubPort, GitPort, IssueData, Ports, PrState, ThreadKind } from './ports'
+import type { BuildInfo } from './provenance'
 import { Queue } from './queue'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths, Job } from './types'
@@ -21,6 +22,11 @@ export type Call = [string, ...unknown[]]
  * start inside another, as when the factory gates its own repo (#68).
  */
 export const realSandbox = process.platform === 'darwin' && process.env.SANDBOX_RUNTIME !== '1'
+
+/** the tree FakeGit reports for any ref without its own entry */
+export const FAKE_TREE = 'e'.repeat(40)
+/** the merge commit FakeGitHub's prMerge records when the test set none */
+export const MERGE_SHA = 'd'.repeat(40)
 
 export class FakeGitHub implements GitHubPort {
   calls: Call[] = []
@@ -67,6 +73,12 @@ export class FakeGitHub implements GitHubPort {
     return this.prStates.get(number) ?? 'OPEN'
   }
 
+  /** PR number → head sha on GitHub; unset PRs report `FakeGit`'s default head */
+  prHeads = new Map<number, string>()
+  async prHead(number: number) {
+    return this.prHeads.get(number) ?? 'a'.repeat(40)
+  }
+
   async prIsDraft(number: number) {
     return this.drafts.has(number)
   }
@@ -81,10 +93,22 @@ export class FakeGitHub implements GitHubPort {
   }
 
   mergeError: string | null = null
+  /** merges the PR, then throws this, as when gh loses GitHub's response */
+  mergeLost: string | null = null
   async prMerge(number: number, method: string, headSha: string) {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
+    // a merge commit whose tree matches FakeGit's default, unless the test set one (null included)
+    if (!this.mergeCommits.has(number)) this.mergeCommits.set(number, { sha: MERGE_SHA, tree: FAKE_TREE })
     this.calls.push(['merge', number, method, headSha])
+    if (this.mergeLost) throw new Error(this.mergeLost)
+  }
+
+  /** PR → its merge commit; a PR without an entry has none */
+  mergeCommits = new Map<number, { sha: string, tree: string } | null>()
+  async prMergeCommit(number: number) {
+    this.calls.push(['prMergeCommit', number])
+    return this.mergeCommits.get(number) ?? null
   }
 
   /** answers to `commitChecks`, in order; the last one repeats */
@@ -165,6 +189,14 @@ export class FakeGit implements GitPort {
     return this.remoteHeads.has(branch) ? this.remoteHeads.get(branch)! : this.remoteSha
   }
 
+  /** ref → tree sha; any other ref has `defaultTree` */
+  trees = new Map<string, string>()
+  defaultTree = FAKE_TREE
+  async tree(cwd: string, ref: string) {
+    this.calls.push(['tree', cwd, ref])
+    return this.trees.get(ref) ?? this.defaultTree
+  }
+
   async commitsAhead(_cwd: string, base: string) {
     fullRef(base)
     return this.ahead
@@ -227,7 +259,10 @@ export interface TestEnv {
   clock: { ms: number }
 }
 
-export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<TestEnv> {
+/** Fixed, so no test runs git or claude to find out what the factory is. */
+export const FAKE_BUILD: BuildInfo = { factoryVersion: '0.0.0-test', factorySha: 'f'.repeat(40), claudeVersion: '2.1.300 (Claude Code)' }
+
+export async function makeEnv(overrides: Partial<FactoryConfig> = {}, build: BuildInfo = FAKE_BUILD): Promise<TestEnv> {
   const repo = await mkdtemp(join(tmpdir(), 'factory-test-'))
   const paths: FactoryPaths = {
     repo,
@@ -242,7 +277,7 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}): Promise<T
   const issues = new GitHubIssues(github, store)
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
-  const queue = new Queue({ paths, config, store, ports, machine })
+  const queue = new Queue({ paths, config, store, ports, machine, build })
   const gate = new Gate({ paths, config, store, ports })
   const clock = { ms: 0 }
   const merger = new Merger({

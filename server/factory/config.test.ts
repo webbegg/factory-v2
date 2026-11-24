@@ -6,8 +6,9 @@ import type { ConfigUpdate } from './config'
 import { makeEnv } from './testing'
 
 function good(): ConfigUpdate {
-  const { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths } = defaultConfig()
-  return { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths }
+  const { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths, limits } = defaultConfig()
+  const { agentMinutes, jobBudgetUsd } = limits
+  return { concurrency, maxRounds, baseBranch, mergeMethod, models, routing, protectedPaths, limits: { agentMinutes, jobBudgetUsd } }
 }
 
 describe('validateConfigUpdate', () => {
@@ -36,6 +37,22 @@ describe('validateConfigUpdate', () => {
     expect(() => validateConfigUpdate({ ...good(), concurrency: 9 })).toThrow('concurrency must be an integer from 1 to 8')
     expect(() => validateConfigUpdate({ ...good(), concurrency: 1.5 })).toThrow('concurrency must be an integer from 1 to 8')
     expect(() => validateConfigUpdate({ ...good(), maxRounds: 0 })).toThrow('maxRounds must be an integer from 1 to 10')
+  })
+
+  test('accepts the agent wall clock and job budget limits; refuses bad values and other limits', () => {
+    const limits = { agentMinutes: 45, jobBudgetUsd: 25 }
+    expect(validateConfigUpdate({ ...good(), limits }).limits).toEqual(limits)
+    expect(validateConfigUpdate({ ...good(), limits: { agentMinutes: 480, jobBudgetUsd: 0.5 } }).limits).toEqual({ agentMinutes: 480, jobBudgetUsd: 0.5 })
+    for (const agentMinutes of [0, 1.5, 481]) {
+      expect(() => validateConfigUpdate({ ...good(), limits: { ...limits, agentMinutes } })).toThrow('limits.agentMinutes must be an integer from 1 to 480')
+    }
+    expect(() => validateConfigUpdate({ ...good(), limits: { ...limits, agentMinutes: '45' } })).toThrow('limits.agentMinutes must be a number')
+    for (const jobBudgetUsd of [0, -1, 1001, Number.POSITIVE_INFINITY]) {
+      expect(() => validateConfigUpdate({ ...good(), limits: { ...limits, jobBudgetUsd } })).toThrow('limits.jobBudgetUsd must be greater than 0 and at most 1000')
+    }
+    expect(() => validateConfigUpdate({ ...good(), limits: { ...limits, jobBudgetUsd: 'lots' } })).toThrow('limits.jobBudgetUsd must be a number')
+    expect(() => validateConfigUpdate({ ...good(), limits: { ...limits, checksMinutes: 5 } })).toThrow('unknown key "limits.checksMinutes"')
+    expect(() => validateConfigUpdate({ ...good(), limits: { agentMinutes: 45 } })).toThrow('limits.jobBudgetUsd is required')
   })
 
   test('rejects unsafe branch names, merge methods and routing shapes', () => {
@@ -166,6 +183,22 @@ describe('saveConfig', () => {
     const { paths, file, raw } = await seeded()
     await writeFile(file, JSON.stringify({ ...raw, limits: { checksMinutes: 0, agentTurns: -1, agentBudgetUsd: 'lots' } }))
     expect((await loadConfig(paths)).limits).toEqual(defaultConfig().limits)
+  })
+
+  test('the wall clock defaults to 45 minutes and the job budget to $25; bad values fall back', async () => {
+    expect(defaultConfig().limits).toMatchObject({ agentMinutes: 45, jobBudgetUsd: 25 })
+    const { paths, file, raw } = await seeded()
+    await writeFile(file, JSON.stringify({ ...raw, limits: { agentMinutes: 0, jobBudgetUsd: 'lots' } }))
+    expect((await loadConfig(paths)).limits).toMatchObject({ agentMinutes: 45, jobBudgetUsd: 25 })
+  })
+
+  test('saving the two limits keeps the other limits in the file exactly as they were', async () => {
+    const { paths, file, raw } = await seeded()
+    await writeFile(file, JSON.stringify({ ...raw, limits: { checksMinutes: 12, agentTurns: 99, agentBudgetUsd: 4 } }))
+    const config = await saveConfig(paths, { ...good(), limits: { agentMinutes: 60, jobBudgetUsd: 40 } })
+    const saved = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+    expect(saved.limits).toEqual({ checksMinutes: 12, agentTurns: 99, agentBudgetUsd: 4, agentMinutes: 60, jobBudgetUsd: 40 })
+    expect(config.limits).toEqual({ checksMinutes: 12, agentTurns: 99, agentBudgetUsd: 4, agentMinutes: 60, jobBudgetUsd: 40 })
   })
 
   test('an invalid update leaves the file byte-for-byte unchanged', async () => {

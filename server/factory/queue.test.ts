@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { MARKER } from './issue'
-import { makeEnv, seed } from './testing'
+import { FAKE_BUILD, makeEnv, seed } from './testing'
 
 const rows = (r: Array<{ action: string, issue: number }>) => r.map(x => `${x.action} #${x.issue}`)
 
@@ -23,6 +25,18 @@ describe('queue', () => {
     const r = await env.queue.rows()
     expect(rows(r)).toEqual(['resume #2', 'new #1', 'hold #3'])
     expect(r[0]).toMatchObject({ job: '001-a', stage: 'build', note: 'round 1' })
+  })
+
+  test('a paused job is skipped and still holds its slot', async () => {
+    const env = await makeEnv({ concurrency: 2 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2 })
+    env.github.addIssue({ number: 3 })
+    await seed(env, { id: '001-a', issue: 2, stage: 'build', round: 1, paused: { by: 'operator', at: 'x', reason: 'cancel' } })
+    const r = await env.queue.rows()
+    expect(rows(r)).toEqual(['new #1', 'hold #3', 'skip #2'])
+    expect(r[2]).toMatchObject({ job: '001-a', stage: 'build', note: 'paused: Resume on the board' })
+    expect(await env.queue.freeSlots()).toBe(1)
   })
 
   test('needs-info resumes once the author replied, and takes a slot', async () => {
@@ -78,6 +92,36 @@ describe('queue', () => {
     expect((await env.store.load('001-a')).stage).toBe('merged')
   })
 
+  test('a hand-merged needs-human job is recorded as an external merge, with merge.md (#75)', async () => {
+    const env = await makeEnv()
+    await seed(env, { id: '001-a', issue: 1, stage: 'needs-human', round: 1, pr: 5 })
+    env.github.prStates.set(5, 'MERGED')
+    env.github.mergeCommits.set(5, { sha: 'f'.repeat(40), tree: 'e'.repeat(40) })
+    await env.queue.sweepMerged(() => false)
+    const job = await env.store.load('001-a')
+    expect(job.stage).toBe('merged')
+    expect(job.merge).toEqual({
+      by: 'external', approvedCommit: null, gatedCommit: null, base: null,
+      mergeCommit: 'f'.repeat(40), treeVerified: null, ci: null, overrides: []
+    })
+    const md = await env.store.read('001-a', 'merge.md') ?? ''
+    expect(md).toStartWith('# Merge\n\n## Summary\n- by: external\n')
+    expect(md).toContain(`- mergeCommit: ${'f'.repeat(40)}\n`)
+  })
+
+  test('a merge commit that can\'t be read never holds up the move to merged (#75)', async () => {
+    const env = await makeEnv()
+    await seed(env, { id: '001-a', issue: 1, stage: 'needs-human', round: 1, pr: 5 })
+    env.github.prStates.set(5, 'MERGED')
+    env.github.prMergeCommit = async () => {
+      throw new Error('gh: HTTP 502')
+    }
+    await env.queue.sweepMerged(() => false)
+    const job = await env.store.load('001-a')
+    expect(job.stage).toBe('merged')
+    expect(job.merge).toMatchObject({ by: 'external', mergeCommit: null })
+  })
+
   test('rows only read: listing the queue changes no job', async () => {
     const env = await makeEnv()
     env.github.addIssue({ number: 1 })
@@ -117,6 +161,43 @@ describe('create', () => {
     })
     expect(job.worktree).toBe(`${env.paths.worktrees}/005-add-dark-mode-toggle`)
     expect(await env.store.read(job.id, 'issue.md')).toContain('# Issue #12: Add Dark-mode toggle to the settings page!')
+  })
+
+  test('records provenance from the build and origin/<base>, never the working copy', async () => {
+    const env = await makeEnv({ sandbox: { enabled: true, domains: [], maxFileMB: 10 } })
+    env.git.remoteHeads.set('main', 'b'.repeat(40))
+    env.git.committed.set('.factory/config.json', '{"concurrency":2}\n')
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'checks.sh'), 'bun test\n')
+    env.github.addIssue({ number: 1 })
+    const job = await env.queue.create(1)
+    const sha256 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12)
+    const provenance = {
+      factoryVersion: '0.0.0-test',
+      factorySha: 'f'.repeat(40),
+      claudeVersion: '2.1.300 (Claude Code)',
+      baseSha: 'b'.repeat(40),
+      configSha: sha256('{"concurrency":2}\n'),
+      checksSha: null,
+      sandbox: true
+    }
+    expect((await env.store.load(job.id)).provenance).toEqual(provenance)
+    expect(env.git.calls).toContainEqual(['fetch', env.paths.repo, 'main'])
+    expect(env.git.calls).toContainEqual(['show', env.paths.repo, 'refs/remotes/origin/main', '.factory/checks.sh'])
+
+    env.git.committed.set('.factory/checks.sh', 'bun test\n')
+    env.github.addIssue({ number: 2 })
+    const next = await env.queue.create(2)
+    expect((await env.store.load(next.id)).provenance?.checksSha).toBe(sha256('bun test\n'))
+  })
+
+  test('a missing claude or unreadable base still creates the job, with those fields null', async () => {
+    const env = await makeEnv({}, { ...FAKE_BUILD, claudeVersion: null })
+    env.git.fetch = () => Promise.reject(new Error('offline'))
+    env.git.remoteHead = () => Promise.reject(new Error('no ref'))
+    env.github.addIssue({ number: 1 })
+    const job = await env.queue.create(1)
+    expect((await env.store.load(job.id)).provenance).toMatchObject({ claudeVersion: null, baseSha: null, configSha: null, sandbox: false })
   })
 
   test('refuses duplicates, closed or unlabeled issues, and a full factory', async () => {

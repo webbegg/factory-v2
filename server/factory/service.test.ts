@@ -109,7 +109,8 @@ describe('fixture mode', () => {
     const jobs = await store.list()
     const keys = Object.keys(newJob(await makeEnv())).sort()
     for (const job of jobs) {
-      expect(Object.keys(job).sort()).toEqual(keys)
+      // optional: only a job merged by override has one
+      expect(Object.keys(job).filter(k => k !== 'override').sort()).toEqual(keys)
       expect(STAGES).toContain(job.stage)
       expect(job.id).toBe(job.id.replace(/[^\w.-]/g, ''))
     }

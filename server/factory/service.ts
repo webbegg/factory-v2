@@ -14,6 +14,8 @@ import { Merger } from './merge'
 import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
 import type { Ports } from './ports'
+import { buildInfo } from './provenance'
+import type { BuildInfo } from './provenance'
 import { Queue } from './queue'
 import type { DoctorCheck } from './setup'
 import { JobStore } from './store'
@@ -32,9 +34,10 @@ export interface Factory {
   orchestrator: Orchestrator
 }
 
-/** Wires the engine for one project checkout. */
-export async function createFactory(repo: string, runner: AgentRunner = new SdkRunner()): Promise<Factory> {
+/** Wires the engine for one project checkout; `build` is what new jobs record as their factory. */
+export async function createFactory(repo: string, runner: AgentRunner = new SdkRunner(), build?: BuildInfo): Promise<Factory> {
   const paths = factoryPaths(resolve(repo))
+  const info = build ?? await buildInfo()
   const config = await loadConfig(paths)
   const store = new JobStore(paths)
   const github = new GhCli(ghRunner(paths.repo))
@@ -46,7 +49,7 @@ export async function createFactory(repo: string, runner: AgentRunner = new SdkR
     now: () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
   }
   const machine = new Machine({ paths, config, store, ports })
-  const queue = new Queue({ paths, config, store, ports, machine })
+  const queue = new Queue({ paths, config, store, ports, machine, build: info })
   const gate = new Gate({ paths, config, store, ports })
   const merger = new Merger({ config, store, ports, machine, gate })
   const orchestrator = new Orchestrator({ paths, config, store, ports, machine, queue, gate, merger, runner })
@@ -89,6 +92,8 @@ export interface Fixtures {
   errors: Record<string, string>
   events: FactoryEvent[]
   checks: DoctorCheck[]
+  /** job id → the PR head `gh pr view` would report, shown by the needs-human panel */
+  prHeads: Record<string, string>
 }
 
 /** A sample project the board reads: no orchestrator, no lock, no gh, git or claude. */
@@ -114,7 +119,7 @@ export async function openFixtures(dir: string): Promise<FixtureBoard> {
   const paths = factoryPaths(resolve(dir))
   const config = await loadConfig(paths)
   const raw = JSON.parse(await readFile(join(paths.repo, 'fixture.json'), 'utf8')) as Partial<Fixtures>
-  const fixtures: Fixtures = { running: raw.running ?? [], errors: raw.errors ?? {}, events: raw.events ?? [], checks: raw.checks ?? [] }
+  const fixtures: Fixtures = { running: raw.running ?? [], errors: raw.errors ?? {}, events: raw.events ?? [], checks: raw.checks ?? [], prHeads: raw.prHeads ?? {} }
   return { paths, config, store: new JobStore(paths), fixtures }
 }
 
