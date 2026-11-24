@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir } from 'node:fs/promises'
 import { body, firstLine, header, section } from './markdown'
 import type { Ports, ThreadKind } from './ports'
+import { hash } from './provenance'
 import type { JobStore } from './store'
 import { TERMINAL, WAITING } from './types'
 import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Judged, Risk, RoundReason, Stage, Verdict } from './types'
@@ -45,11 +45,6 @@ type Via = 'advance' | 'feedback' | 'reject' | 'approve' | 'answer'
 
 /** Runs one step of a move that isn't safe to repeat, unless an earlier try of the same move finished it. */
 type Step = (key: string, run: () => Promise<unknown>) => Promise<void>
-
-/** Short enough for a key, long enough that a step with other content never matches. */
-function hash(text: string) {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12)
-}
 
 export interface MachineOptions {
   paths: FactoryPaths
