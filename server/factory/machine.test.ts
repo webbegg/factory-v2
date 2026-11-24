@@ -5,6 +5,7 @@ import { Refused, TRANSITIONS } from './machine'
 import { firstLine, header, section } from './markdown'
 import { ACCEPT, makeEnv, seed } from './testing'
 import { STAGES } from './types'
+import type { Judged } from './types'
 
 const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
@@ -240,8 +241,12 @@ describe('gate', () => {
   })
 })
 
+/** the factory's record of a review or decision; on the fake HEAD in round 1 unless told otherwise */
+const judged = (verdict: string, fields: Partial<Judged> = {}): Judged => ({ verdict, commit: SHA, base: null, round: 1, ...fields })
+
 describe('review', () => {
   const passing = { 'round-1/checks.md': checks('PASS'), 'round-1/review-code.md': 'VERDICT: PASS\n' }
+  const bothJudged = { judged: { code: judged('PASS'), ux: judged('PASS') } }
 
   test('waits for every reviewer', async () => {
     const env = await makeEnv()
@@ -263,9 +268,60 @@ describe('review', () => {
     expect(job).toMatchObject({ stage: 'build', round: 2, reviews: {}, roundReason: 'review' })
 
     const env2 = await makeEnv()
-    await seed(env2, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS }, { ...passing, 'round-1/review-ux.md': 'VERDICT: PASS\n' })
+    await seed(env2, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS, ...bothJudged }, { ...passing, 'round-1/review-ux.md': 'VERDICT: PASS\n' })
     await expect(env2.machine.advance(ID, 'build')).rejects.toThrow('every review passed')
     expect((await env2.machine.advance(ID, 'approve')).stage).toBe('approve')
+  })
+
+  test('a new round keeps the review and decision records', async () => {
+    const env = await makeEnv()
+    const records = { judged: { code: judged('PASS'), ux: judged('CHANGES') }, decided: judged('APPROVE') }
+    await seed(env, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS, ...records }, { ...passing, 'round-1/review-ux.md': 'VERDICT: CHANGES\n' })
+    expect(await env.machine.advance(ID, 'build')).toMatchObject({ round: 2, reviews: {}, ...records })
+  })
+
+  describe('approve needs every routed review recorded on HEAD in this round', () => {
+    const allPass = { ...passing, 'round-1/review-ux.md': 'VERDICT: PASS\n' }
+
+    test('a review judged on another commit is refused, naming the lens and both commits', async () => {
+      const env = await makeEnv()
+      const head = '89abcde'.padEnd(40, '0')
+      await seed(env, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS, judged: { code: judged('PASS', { commit: head }), ux: judged('PASS', { commit: '1234567'.padEnd(40, '0') }) } }, allPass)
+      env.git.headSha = head
+      const refusal = env.machine.advance(ID, 'approve')
+      await expect(refusal).rejects.toThrow(Refused)
+      await expect(refusal).rejects.toThrow('review-ux.md was judged on 1234567, HEAD is 89abcde; run the review again')
+      expect((await env.store.load(ID)).stage).toBe('review')
+    })
+
+    test('a missing record is refused', async () => {
+      const env = await makeEnv()
+      await seed(env, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS, judged: { ux: judged('PASS') } }, allPass)
+      await expect(env.machine.advance(ID, 'approve')).rejects.toThrow('review-code.md was judged on none, HEAD is aaaaaaa')
+      const older = await makeEnv()
+      await seed(older, { stage: 'review', round: 1, pr: 9, agents: REVIEWERS }, allPass)
+      await expect(older.machine.advance(ID, 'approve')).rejects.toThrow(Refused)
+    })
+
+    test('a record from an earlier round is refused', async () => {
+      const env = await makeEnv()
+      await seed(env, { stage: 'review', round: 2, pr: 9, agents: REVIEWERS, judged: { code: judged('PASS', { round: 2 }), ux: judged('PASS') } }, {
+        'round-2/checks.md': checks('PASS'), 'round-2/review-code.md': 'VERDICT: PASS\n', 'round-2/review-ux.md': 'VERDICT: PASS\n'
+      })
+      await expect(env.machine.advance(ID, 'approve')).rejects.toThrow('review-ux.md was judged on aaaaaaa in round 1, HEAD is aaaaaaa')
+    })
+  })
+
+  test('recordReview saves the record with the current round, only for a routed lens in review', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'review', round: 2, pr: 9, agents: REVIEWERS })
+    const job = await env.machine.recordReview(ID, 'code', { verdict: 'PASS', commit: SHA, base: 'b'.repeat(40) })
+    expect(job.judged).toEqual({ code: { verdict: 'PASS', commit: SHA, base: 'b'.repeat(40), round: 2 } })
+    await expect(env.machine.recordReview(ID, 'security', { verdict: 'PASS', commit: SHA, base: null })).rejects.toThrow('no security reviewer routed')
+    await expect(env.machine.recordDecision(ID, { verdict: 'APPROVE', commit: SHA, base: null })).rejects.toThrow('not approve')
+    const built = await makeEnv()
+    await seed(built, { stage: 'build', round: 2, agents: REVIEWERS })
+    await expect(built.machine.recordReview(ID, 'code', { verdict: 'PASS', commit: SHA, base: null })).rejects.toThrow('not review')
   })
 
   test('CHANGES on the last round escalates', async () => {
@@ -281,9 +337,38 @@ describe('review', () => {
 describe('approve', () => {
   test('the move follows decision.md', async () => {
     const env = await makeEnv()
-    await seed(env, { stage: 'approve', round: 1, pr: 9, agents: REVIEWERS }, { 'decision.md': 'APPROVE\n\n## Why\nfine\n' })
+    await seed(env, { stage: 'approve', round: 1, pr: 9, agents: REVIEWERS, decided: judged('APPROVE') }, { 'decision.md': 'APPROVE\n\n## Why\nfine\n' })
     await expect(env.machine.advance(ID, 'needs-human')).rejects.toThrow('starts with \'APPROVE\', not ESCALATE')
     expect((await env.machine.advance(ID, 'merging')).stage).toBe('merging')
+  })
+
+  test('merging needs the decision recorded on HEAD in this round', async () => {
+    const decision = { 'decision.md': 'APPROVE\n\n## Why\nfine\n' }
+    const env = await makeEnv()
+    await seed(env, { stage: 'approve', round: 1, pr: 9, agents: REVIEWERS, decided: judged('APPROVE', { commit: '1234567'.padEnd(40, '0') }) }, decision)
+    env.git.headSha = '89abcde'.padEnd(40, '0')
+    await expect(env.machine.advance(ID, 'merging')).rejects.toThrow('decision.md was decided on 1234567, HEAD is 89abcde; run the approver again')
+    expect((await env.store.load(ID)).stage).toBe('approve')
+
+    for (const decided of [null, undefined, judged('APPROVE', { round: 0 })]) {
+      const other = await makeEnv()
+      await seed(other, { stage: 'approve', round: 1, pr: 9, agents: REVIEWERS, decided }, decision)
+      await expect(other.machine.advance(ID, 'merging')).rejects.toThrow(Refused)
+    }
+  })
+
+  test('recordDecision saves the record with the current round, only in approve', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'approve', round: 2, pr: 9, agents: REVIEWERS })
+    const job = await env.machine.recordDecision(ID, { verdict: 'APPROVE', commit: SHA, base: null })
+    expect(job.decided).toEqual({ verdict: 'APPROVE', commit: SHA, base: null, round: 2 })
+    await expect(env.machine.recordReview(ID, 'code', { verdict: 'PASS', commit: SHA, base: null })).rejects.toThrow('not review')
+  })
+
+  test('ESCALATE needs no decision record', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'approve', round: 1, pr: 9, agents: REVIEWERS }, { 'decision.md': 'ESCALATE\n\n## Why\nx\n' })
+    expect((await env.machine.advance(ID, 'needs-human')).stage).toBe('needs-human')
   })
 
   test('ESCALATE posts the decision on the PR', async () => {

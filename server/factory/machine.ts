@@ -5,7 +5,7 @@ import type { Ports, ThreadKind } from './ports'
 import { hash } from './provenance'
 import type { JobStore } from './store'
 import { TERMINAL, WAITING } from './types'
-import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, MergeRecord, Risk, RoundReason, Stage, Verdict } from './types'
+import type { FactoryConfig, FactoryPaths, IntakeInfo, Job, JobAgents, Judged, MergeRecord, Risk, RoundReason, Stage, Verdict } from './types'
 
 export { TERMINAL, WAITING }
 
@@ -162,6 +162,23 @@ export class Machine {
       require(job.stage === 'intake' && job.intake?.decision === 'ACCEPT',
         `${id}: route only an intake job that intake ACCEPTed`)
       return { ...job, agents }
+    })
+  }
+
+  /** Records what a routed reviewer judged in this round, which `review → approve` holds against HEAD. */
+  recordReview(id: string, lens: string, rec: Omit<Judged, 'round'>): Promise<Job> {
+    return this.store.update(id, (job) => {
+      require(job.stage === 'review', `${id} is in ${job.stage}, not review`)
+      require(job.agents && lens in job.agents.reviewers, `${id} has no ${lens} reviewer routed`)
+      return { ...job, judged: { ...job.judged, [lens]: { ...rec, round: job.round } } }
+    })
+  }
+
+  /** Records what the approver decided in this round, which `approve → merging` holds against HEAD. */
+  recordDecision(id: string, rec: Omit<Judged, 'round'>): Promise<Job> {
+    return this.store.update(id, (job) => {
+      require(job.stage === 'approve', `${id} is in ${job.stage}, not approve`)
+      return { ...job, decided: { ...rec, round: job.round } }
     })
   }
 
@@ -384,6 +401,12 @@ export class Machine {
       const changes = Object.entries(job.reviews).filter(([, v]) => v === 'CHANGES').map(([r]) => r)
       if (stage === 'approve') {
         require(!changes.length, `reviews want CHANGES: ${changes.join(', ')}`)
+        const head = await git.head(job.worktree)
+        for (const lens of Object.keys(job.agents?.reviewers ?? {})) {
+          const rec = job.judged?.[lens]
+          require(rec?.round === job.round && rec.commit === head,
+            `review-${lens}.md was judged on ${judgedOn(job, rec)}, HEAD is ${head.slice(0, 7)}; run the review again`)
+        }
       } else {
         require(changes.length, 'every review passed')
         if (this.lastRoundCheck(job, stage)) {
@@ -397,7 +420,13 @@ export class Machine {
       const want = stage === 'merging' ? 'APPROVE' : 'ESCALATE'
       const line = firstLine(await this.read(job, 'decision.md') ?? '')
       require(line === want, `decision.md starts with '${line}', not ${want}`)
-      if (stage === 'merging') job.mergeVia = 'approver'
+      if (stage === 'merging') {
+        const head = await git.head(job.worktree)
+        const rec = job.decided ?? undefined
+        require(rec?.round === job.round && rec.commit === head,
+          `decision.md was decided on ${judgedOn(job, rec)}, HEAD is ${head.slice(0, 7)}; run the approver again`)
+        job.mergeVia = 'approver'
+      }
     } else if (old === 'merging') {
       const sync = `${this.roundRel(job)}/sync.md`
       const conflicted = await this.read(job, sync) !== null
@@ -486,6 +515,12 @@ export class Machine {
       await git.addWorktree(job.worktree, job.branch, `refs/remotes/origin/${base}`)
     }
   }
+}
+
+/** A record's short commit for a refusal, saying so when it is from another round. */
+function judgedOn(job: Job, rec: Judged | undefined): string {
+  if (!rec) return 'none'
+  return rec.round === job.round ? rec.commit.slice(0, 7) : `${rec.commit.slice(0, 7)} in round ${rec.round}`
 }
 
 /** merge.md: the record as the factory saved it in job.json, one line per field. */

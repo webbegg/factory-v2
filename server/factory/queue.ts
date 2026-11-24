@@ -197,7 +197,9 @@ export class Queue {
       ended: null,
       error: null,
       paused: null,
-      provenance: await this.provenance()
+      provenance: await this.provenance(),
+      judged: {},
+      decided: null
     }
     await store.write(id, 'issue.md', renderIssue(issue, await ports.github.operator()))
     await store.save(job)

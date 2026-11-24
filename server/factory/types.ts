@@ -24,6 +24,17 @@ export interface IntakeInfo {
   surfaces: string[]
 }
 
+/** What a reviewer or the approver judged, recorded by the factory right after the run. */
+export interface Judged {
+  verdict: string
+  commit: string
+  /** origin/<base> when the run started, null when it couldn't be read */
+  base: string | null
+  round: number
+  /** the round whose PASS was copied instead of running the reviewer again */
+  reusedFrom?: number
+}
+
 export interface JobAgents {
   /** reviewer lens → model alias, e.g. { code: 'sonnet', ux: 'sonnet' } */
   reviewers: Record<string, string>
@@ -90,6 +101,10 @@ export interface Job {
   override?: { by: string, commit: string, overrides: string | null, synced?: string | null } | null
   /** set once when the job is created, written only by the factory; absent in older jobs */
   provenance?: JobProvenance | null
+  /** reviewer lens → its latest record, kept across rounds; written only by the factory; absent in older jobs */
+  judged?: Record<string, Judged>
+  /** the approver's latest decision record, kept across rounds; written only by the factory; absent in older jobs */
+  decided?: Judged | null
   /** who moved the job into merging: the approver's APPROVE or the operator's Merge; set by the machine, absent in older jobs */
   mergeVia?: 'approver' | 'operator' | null
   /** what the factory can prove about the merge, also written as merge.md; never overwritten once set, absent in older jobs */

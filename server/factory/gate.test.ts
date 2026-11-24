@@ -13,6 +13,8 @@ import type { Job, MergeRecord } from './types'
 const ID = '001-add-a-thing'
 const SHA = 'a'.repeat(40)
 const AGENTS = { reviewers: { code: 'haiku' } }
+/** the approver's record on the fake HEAD, which approve → merging requires */
+const DECIDED = { verdict: 'APPROVE', commit: SHA, base: null, round: 1 }
 
 /** checks.sh as committed on origin/<base>, which is the copy the gate runs */
 function withChecks(env: TestEnv, script: string) {
@@ -320,7 +322,7 @@ describe('route', () => {
 describe('merge', () => {
   async function approved(env: TestEnv, fields: Partial<Job> = {}) {
     await withChecks(env, 'true')
-    const job = await seed(env, { stage: 'approve', round: 1, pr: 9, agents: AGENTS, ...fields }, {
+    const job = await seed(env, { stage: 'approve', round: 1, pr: 9, agents: AGENTS, decided: DECIDED, ...fields }, {
       'decision.md': 'APPROVE\n\n## Why\nfine\n'
     })
     await mkdir(job.worktree, { recursive: true })
@@ -434,7 +436,7 @@ describe('merge', () => {
     const trace = join(env.paths.repo, 'trace')
     await withChecks(env, `echo "start $(basename "$PWD")" >> ${trace}; sleep 0.2; echo "end $(basename "$PWD")" >> ${trace}`)
     for (const [id, pr] of [['001-a', 9], ['002-b', 10]] as const) {
-      const job = await seed(env, { id, issue: pr, stage: 'approve', round: 1, pr, agents: AGENTS }, { 'decision.md': 'APPROVE\n' })
+      const job = await seed(env, { id, issue: pr, stage: 'approve', round: 1, pr, agents: AGENTS, decided: DECIDED }, { 'decision.md': 'APPROVE\n' })
       await mkdir(job.worktree, { recursive: true })
     }
     await Promise.all([env.merger.merge('001-a'), env.merger.merge('002-b')])
