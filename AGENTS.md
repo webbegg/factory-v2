@@ -9,7 +9,10 @@ view; this file is for whoever changes the code.
 - `server/factory/` — the engine, plain TypeScript with no Nuxt imports:
   `machine.ts` (stage transitions, each justified by files on disk; it
   re-exports `TERMINAL` and `WAITING`, which live in `types.ts` so the board
-  can import them),
+  can import them; `recordReview` / `recordDecision` save the `job.json`
+  `judged` (per lens) and `decided` records of the commit, base and round a
+  reviewer or the approver judged, kept across rounds, which `review → approve`
+  and `approve → merging` hold against HEAD),
   `store.ts` (job.json + per-step markdown; `appendEvent` adds a line to the
   job's `events.jsonl` and never throws; `list()` skips `<id>.rejected-<n>`
   folders, which `archiveJob` makes, while `Queue.create` numbers new ids
@@ -26,7 +29,12 @@ view; this file is for whoever changes the code.
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
   in the same session, when its report is missing or its first line invalid,
-  while the builder's one second try stays in `build()`), `agents/` (prompts and the
+  while the builder's one second try stays in `build()`; after each reviewer
+  and approver run it records `judged` / `decided` through those machine
+  methods and writes `COMMIT:` / `BASE:` under the report's first line, and
+  `review()` copies a lens's PASS recorded on the current HEAD into the new
+  round, with `REUSED:`, instead of running it; `judged` and `decided` are in
+  `TRUSTED`), `agents/` (prompts and the
   Claude Agent SDK runner), `gh.ts` / `git.ts` (adapters behind `ports.ts`),
   `setup.ts` (`init` / `doctor`; `init` writes the commented prompt addenda
   through `scaffoldAddenda`, which is unit-tested on its own; `baseChecks` runs `checks.sh` on
