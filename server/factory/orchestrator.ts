@@ -8,7 +8,7 @@ import { sandboxNote } from './agents/runner'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
-import { firstLine, section } from './markdown'
+import { body, firstLine, section } from './markdown'
 import { Refused } from './machine'
 import type { Machine } from './machine'
 import type { Merger } from './merge'
@@ -123,7 +123,7 @@ async function snapshot(dir: string): Promise<Map<string, Entry>> {
  * job.json fields only the factory sets; an agent changing them could reroute
  * or skip its own review, or hide or fake a stall that survives a restart.
  */
-const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused'] as const
+const TRUSTED = ['issue', 'branch', 'worktree', 'pr', 'prUrl', 'stage', 'round', 'roundLimit', 'roundReason', 'agents', 'error', 'move', 'provenance', 'paused', 'judged', 'decided'] as const
 
 function trusted(job: Job): string {
   return JSON.stringify(TRUSTED.map(k => job[k]))
@@ -545,8 +545,11 @@ export class Orchestrator extends EventEmitter {
       case 'approve': {
         // an earlier round's APPROVE must never stand in for this round's decision
         await store.archive(job.id, 'decision.md')
+        const judging = await this.judging(job)
         await this.agent(job, 'approver', signal, `PR: #${job.pr}. Final round: ${job.round}.`)
         const line = firstLine(await store.read(job.id, 'decision.md') ?? '')
+        await machine.recordDecision(job.id, { verdict: line, ...judging })
+        await this.stamp(job, 'decision.md', judging)
         if (line === 'APPROVE') await this.merge(job, signal)
         else await machine.advance(job.id, 'needs-human')
         return true
@@ -707,16 +710,68 @@ export class Orchestrator extends EventEmitter {
     return true
   }
 
-  private async review(job: Job, signal: AbortSignal): Promise<boolean> {
+  /** The commit and base a reviewer or the approver is about to judge; the watch refuses one that moves HEAD. */
+  private async judging(job: Job): Promise<{ commit: string, base: string | null }> {
+    const { git } = this.o.ports
+    const { paths, config } = this.o
+    const commit = await git.head(job.worktree)
+    // the base is only shown, so a failed read must not keep the agent from running
+    const base = await git.fetch(paths.repo, config.baseBranch)
+      .then(() => git.remoteHead(paths.repo, config.baseBranch))
+      .catch(() => null)
+    return { commit, base }
+  }
+
+  /**
+   * Puts the factory's `COMMIT:` / `BASE:` lines under a report's first line, dropping any `COMMIT:`,
+   * `BASE:` or `REUSED:` the agent wrote in its header, so a reader sees only the factory's. They are
+   * for the reader: job.json is what counts.
+   */
+  private async stamp(job: Job, rel: string, judged: { commit: string, base: string | null }) {
+    const text = await this.o.store.read(job.id, rel) ?? ''
+    const [first = '', ...rest] = text.split('\n')
+    const end = rest.findIndex(l => !l.trim())
+    const head = (end < 0 ? rest : rest.slice(0, end)).filter(l => !/^\s*(COMMIT|BASE|REUSED)\s*:/i.test(l))
+    const tail = end < 0 ? [''] : rest.slice(end)
+    await this.o.store.write(job.id, rel, [first, `COMMIT: ${judged.commit}`, `BASE: ${judged.base ?? 'unknown'}`, ...head, ...tail].join('\n'))
+  }
+
+  /** Copies a lens's last PASS into this round when it was given on the HEAD under review now. */
+  private async reuse(job: Job, lens: string, head: string): Promise<boolean> {
     const { machine, store } = this.o
+    const rec = job.judged?.[lens]
+    if (!rec || rec.verdict !== 'PASS' || rec.commit !== head || rec.round >= job.round) return false
+    const from = `round-${rec.round}/review-${lens}.md`
+    const isFile = (await lstat(store.path(job.id, from)).catch(() => null))?.isFile()
+    const text = isFile ? await store.read(job.id, from) : null
+    if (text === null || firstLine(text) !== 'VERDICT: PASS') return false
+    const rel = `round-${job.round}/review-${lens}.md`
+    const note = `Reused from ${from}: PASS on ${head.slice(0, 7)}, and HEAD hasn't changed, so reviewer-${lens} was not run.`
+    const lines = ['VERDICT: PASS', `COMMIT: ${head}`, `BASE: ${rec.base ?? 'unknown'}`, `REUSED: round-${rec.round}`]
+    await store.write(job.id, rel, `${[lines.join('\n'), note, body(text)].filter(Boolean).join('\n\n')}\n`)
+    await machine.recordReview(job.id, lens, { verdict: 'PASS', commit: head, base: rec.base, reusedFrom: rec.round })
+    this.send({ type: 'log', message: `${job.id}: reviewer-${lens} not run; reused its PASS from ${from} on the same HEAD` })
+    return true
+  }
+
+  private async review(job: Job, signal: AbortSignal): Promise<boolean> {
+    const { machine, store, ports } = this.o
     const lenses = Object.keys(job.agents?.reviewers ?? {})
     const written = async (r: string) => (await lstat(store.path(job.id, `round-${job.round}/review-${r}.md`)).catch(() => null))?.isFile()
-    // a review with no verdict counts as missing, so its lens runs again instead of blocking every retry
+    const head = await ports.git.head(job.worktree)
+    // a review with no verdict, or with no record of being judged on HEAD this round, counts as missing,
+    // so its lens runs again instead of blocking every retry
     for (const r of lenses) {
       const rel = `round-${job.round}/review-${r}.md`
-      if (!await written(r) || VERDICTS.includes(firstLine(await store.read(job.id, rel) ?? ''))) continue
+      if (!await written(r)) continue
+      const rec = job.judged?.[r]
+      let why = 'has no verdict on its first line'
+      if (VERDICTS.includes(firstLine(await store.read(job.id, rel) ?? ''))) {
+        if (rec?.round === job.round && rec.commit === head) continue
+        why = `has no record of being judged on ${head.slice(0, 7)} in round ${job.round}`
+      }
       await rm(store.path(job.id, rel))
-      this.send({ type: 'log', message: `${job.id}: ${rel} has no verdict on its first line; removed it, so reviewer-${r} runs again` })
+      this.send({ type: 'log', message: `${job.id}: ${rel} ${why}; removed it, so reviewer-${r} runs again` })
     }
     // a resumed review may already have some verdicts on disk
     this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
@@ -725,7 +780,14 @@ export class Orchestrator extends EventEmitter {
     // One at a time: with reviewers side by side, the watch could not tell
     // which of them wrote a verdict, so one could overwrite another's.
     for (const r of missing) {
-      await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
+      if (!await this.reuse(job, r, head)) {
+        const judging = await this.judging(job)
+        await this.agent(job, `reviewer-${r}` as AgentName, signal, `Review round ${job.round}.`)
+        const rel = `round-${job.round}/review-${r}.md`
+        const verdict = firstLine(await store.read(job.id, rel) ?? '').slice('VERDICT: '.length)
+        await machine.recordReview(job.id, r, { verdict, ...judging })
+        await this.stamp(job, rel, judging)
+      }
       // show each verdict on the board as it lands
       this.send({ type: 'job', job: await store.update(job.id, j => machine.sync(j)) })
     }

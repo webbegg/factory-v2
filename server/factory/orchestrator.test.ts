@@ -9,6 +9,7 @@ import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
 import { Refused } from './machine'
+import { firstLine } from './markdown'
 import { Orchestrator } from './orchestrator'
 import type { FactoryEvent } from './orchestrator'
 import { makeEnv, seed } from './testing'
@@ -284,7 +285,8 @@ describe('orchestrator', () => {
     await orch.idle()
     const job = (await env.store.list())[0]!
     expect(job.stage).toBe('merged')
-    expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe(`${report}\n`)
+    expect(await env.store.read(job.id, 'round-1/review-code.md'))
+      .toBe(`VERDICT: PASS\nCOMMIT: ${'a'.repeat(40)}\nBASE: ${'a'.repeat(40)}\n\n## Summary\n- fine\n`)
   })
 
   test('a final reply that is not a report is not saved, and the job stalls', async () => {
@@ -415,7 +417,7 @@ describe('orchestrator', () => {
       orch.retry(job.id)
       await orch.idle()
       expect(orch.errors.get(job.id) ?? '').not.toContain('first line isn\'t a verdict')
-      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe('VERDICT: PASS\n')
+      expect(firstLine(await env.store.read(job.id, 'round-1/review-code.md') ?? '')).toBe('VERDICT: PASS')
       expect((await env.store.load(job.id)).stage).not.toBe('review')
     })
 
@@ -632,7 +634,8 @@ describe('orchestrator', () => {
     await orch.drain()
     await orch.idle()
     expect((await env.store.list())[0]!.stage).toBe('merged')
-    expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver', 'builder', 'reviewer-code', 'approver'])
+    // the conflict round leaves HEAD where round 1's PASS was given, so that review is reused
+    expect(runner.agents()).toEqual(['intake', 'spec-writer', 'builder', 'reviewer-code', 'approver', 'builder', 'approver'])
     expect(runner.tasks[5]!.message).toContain('The branch conflicts with origin/main: read round-1/sync.md, merge origin/main, resolve the conflicts, push, and update build.md for round 2.')
   })
 
@@ -929,6 +932,185 @@ describe('orchestrator', () => {
     await orch.drain()
     await orch.idle()
     expect(seen).toContainEqual({ code: 'PASS', ux: 'pending', ui: 'pending' })
+  })
+
+  describe('reviews and decisions are bound to the commit they judged (#74)', () => {
+    const HEAD = 'a'.repeat(40)
+    const MOVED = 'c'.repeat(40)
+    const BASE = 'b'.repeat(40)
+    const ui: Partial<Record<AgentName, Script>> = {
+      ...happy,
+      'intake': t => write(t, 'intake.md', 'DECISION: ACCEPT\nRISK: medium\nSURFACES: ui\nRESCOPED: no\n'),
+      'reviewer-code': t => write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n\n## Summary\n- read every line\n'),
+      'reviewer-ux': t => write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n'),
+      // CHANGES once, so the job has a second round
+      'reviewer-ui': (t, n) => write(t, `round-${t.round}/review-ui.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
+    }
+
+    /** the running test's env, for scripts that move the fake HEAD or read job.json */
+    let current: TestEnv
+
+    async function drained(scripts: Partial<Record<AgentName, Script>>) {
+      const made = await factory(scripts)
+      current = made.env
+      made.env.git.remoteHeads.set('main', BASE)
+      const logs: string[] = []
+      made.orch.on('event', (e: FactoryEvent) => {
+        if (e.type === 'log') logs.push(e.message)
+      })
+      made.env.github.addIssue({ number: 1 })
+      await made.orch.drain()
+      await made.orch.idle()
+      const job = (await made.env.store.list())[0]!
+      const reviewers = (round: number) => made.runner.tasks.filter(t => t.round === round && t.agent.startsWith('reviewer-')).map(t => t.agent)
+      return { ...made, job, logs, reviewers }
+    }
+
+    test('a PASS on the same HEAD is reused in the next round; a CHANGES lens runs again', async () => {
+      const { env, orch, job, logs, reviewers } = await drained(ui)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job).toMatchObject({ stage: 'merged', round: 2 })
+      expect(reviewers(1)).toEqual(['reviewer-code', 'reviewer-ux', 'reviewer-ui'])
+      expect(reviewers(2)).toEqual(['reviewer-ui'])
+      const started = (await readEvents(env, job.id)).filter(e => e.type === 'agent-start' && e.round === 2).map(e => e.agent)
+      expect(started).toEqual(['builder', 'reviewer-ui', 'approver'])
+      expect(await env.store.read(job.id, 'round-2/review-code.md')).toBe(
+        `VERDICT: PASS\nCOMMIT: ${HEAD}\nBASE: ${BASE}\nREUSED: round-1\n\n`
+        + 'Reused from round-1/review-code.md: PASS on aaaaaaa, and HEAD hasn\'t changed, so reviewer-code was not run.\n\n'
+        + '## Summary\n- read every line\n')
+      expect(await env.store.read(job.id, 'round-2/review-ux.md')).toContain('REUSED: round-1')
+      expect(job.judged).toEqual({
+        code: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2, reusedFrom: 1 },
+        ux: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2, reusedFrom: 1 },
+        ui: { verdict: 'PASS', commit: HEAD, base: BASE, round: 2 }
+      })
+      expect(logs.some(l => l.includes('reviewer-code not run') && l.includes('round-1/review-code.md'))).toBe(true)
+    })
+
+    test('a new HEAD runs every lens again', async () => {
+      const { env, orch, job, reviewers } = await drained({
+        ...ui,
+        builder: async (t, n) => {
+          if (n === 2) {
+            current.git.headSha = MOVED
+            current.git.remoteSha = MOVED
+          }
+          await write(t, 'build.md', 'STATUS: READY\n')
+        }
+      })
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job).toMatchObject({ stage: 'merged', round: 2 })
+      expect(reviewers(2)).toEqual(['reviewer-code', 'reviewer-ux', 'reviewer-ui'])
+      expect(await env.store.read(job.id, 'round-2/review-code.md')).not.toContain('REUSED')
+      expect(job.judged!.code).toEqual({ verdict: 'PASS', commit: MOVED, base: BASE, round: 2 })
+    })
+
+    test('each run records verdict, commit, base and round in job.json and under the report\'s first line', async () => {
+      let atApprove: Job | null = null
+      const { env, orch, job } = await drained({
+        ...happy,
+        // the agent's own COMMIT/BASE lines are dropped for the factory's
+        'reviewer-code': async (t) => {
+          await write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\nCOMMIT: forged\nSCOPE: all\n\n## Summary\n- ok\n')
+        },
+        'approver': async (t) => {
+          atApprove = await current.store.load(t.jobId)
+          await write(t, 'decision.md', 'APPROVE\nBASE: forged\n\n## Why\nok\n')
+        }
+      })
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(job.stage).toBe('merged')
+      expect(atApprove!.judged).toEqual({ code: { verdict: 'PASS', commit: HEAD, base: BASE, round: 1 } })
+      expect(await env.store.read(job.id, 'round-1/review-code.md')).toBe(`VERDICT: PASS\nCOMMIT: ${HEAD}\nBASE: ${BASE}\nSCOPE: all\n\n## Summary\n- ok\n`)
+      expect(job.decided).toEqual({ verdict: 'APPROVE', commit: HEAD, base: BASE, round: 1 })
+      expect(await env.store.read(job.id, 'decision.md')).toBe(`APPROVE\nCOMMIT: ${HEAD}\nBASE: ${BASE}\n\n## Why\nok\n`)
+    })
+
+    test('a base that can\'t be read is recorded as null and shown as unknown', async () => {
+      const { env, orch } = await factory({ ...happy })
+      env.git.remoteHead = async (_cwd: string, branch: string) => {
+        if (branch === 'main') throw new Error('no origin/main')
+        return HEAD
+      }
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(job.judged!.code!.base).toBeNull()
+      expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
+    })
+
+    test('a failed fetch of the base still runs the reviewer and records base as null', async () => {
+      const { env, runner, orch } = await factory({ ...happy })
+      const fetch = env.git.fetch.bind(env.git)
+      let failed = false
+      // the first base fetch in review is the one made right before the reviewer runs
+      env.git.fetch = async (cwd: string, ref: string) => {
+        if (!failed && cwd === env.paths.repo && (await env.store.list())[0]?.stage === 'review') {
+          failed = true
+          throw new Error('could not resolve host')
+        }
+        return fetch(cwd, ref)
+      }
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(failed).toBe(true)
+      expect(orch.errors.get(job.id)).toBeUndefined()
+      expect(runner.agents()).toContain('reviewer-code')
+      expect(job.judged!.code).toEqual({ verdict: 'PASS', commit: HEAD, base: null, round: 1 })
+      expect((await env.store.read(job.id, 'round-1/review-code.md'))!.split('\n')[2]).toBe('BASE: unknown')
+    })
+
+    test('a reviewer that writes judged in job.json is refused and the field restored', async () => {
+      const { orch, job } = await drained({
+        ...happy,
+        'reviewer-code': async (t) => {
+          await write(t, `round-${t.round}/review-code.md`, 'VERDICT: PASS\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, judged: { code: { verdict: 'PASS', commit: HEAD, base: null, round: 1 } } }))
+        }
+      })
+      expect(job.stage).toBe('review')
+      expect(orch.errors.get(job.id)).toContain('reviewer-code changed job.json fields it may not: judged')
+      expect(job.judged).toEqual({})
+    })
+
+    test('an approver that writes decided in job.json is refused and the field restored', async () => {
+      const { env, orch, job } = await drained({
+        ...happy,
+        approver: async (t) => {
+          await write(t, 'decision.md', 'APPROVE\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, decided: { verdict: 'APPROVE', commit: HEAD, base: null, round: 1 } }))
+        }
+      })
+      expect(job.stage).toBe('approve')
+      expect(orch.errors.get(job.id)).toContain('approver changed job.json fields it may not: decided')
+      expect(job.decided).toBeNull()
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+    })
+
+    test('a review with a verdict but no record on HEAD this round runs its lens again', async () => {
+      const { env, runner, orch } = await factory({ ...happy })
+      const logs: string[] = []
+      orch.on('event', (e: FactoryEvent) => {
+        if (e.type === 'log') logs.push(e.message)
+      })
+      const job = await seed(env, { stage: 'review', round: 1, pr: 101, agents: { reviewers: { code: 'haiku' } } }, {
+        'round-1/review-code.md': 'VERDICT: PASS\n'
+      })
+      orch.retry(job.id)
+      await orch.idle()
+      expect(runner.agents()).toEqual(['reviewer-code', 'approver'])
+      expect(logs.some(l => l.includes('round-1/review-code.md has no record') && l.includes('runs again'))).toBe(true)
+      // past approve and into the merge, whose gate fails only because the seeded job has no worktree
+      const done = await env.store.load(job.id)
+      expect(done.stage).toBe('needs-human')
+      expect(await env.store.read(job.id, 'decision.md')).toContain('The gate failed after syncing')
+      expect(done.judged!.code).toEqual({ verdict: 'PASS', commit: HEAD, base: HEAD, round: 1 })
+    })
   })
 
   test('concurrency caps running jobs and the drain finishes them all', async () => {
@@ -1745,10 +1927,10 @@ describe('screenshot folders', () => {
 
   test('a reviewer may not add to its own folder from an earlier round', async () => {
     const { orch, job, dir } = await run({
-      'reviewer-code': (t, n) => write(t, `round-${t.round}/review-code.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n'),
-      'reviewer-ui': async (t) => {
+      // CHANGES in round 1, so round 2 runs it again rather than reusing a PASS on the same HEAD
+      'reviewer-ui': async (t, n) => {
         if (t.round === 2) await writeFile(join(t.jobDir, 'round-1/screenshots-ui/late.png'), PNG)
-        await write(t, `round-${t.round}/review-ui.md`, 'VERDICT: PASS\n')
+        await write(t, `round-${t.round}/review-ui.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
       }
     })
     expect(job.round).toBe(2)
@@ -1777,9 +1959,10 @@ describe('screenshot folders', () => {
 
     const deleted = await run({
       ...firstRound,
-      'reviewer-ux': async (t) => {
+      // CHANGES in round 1, so round 2 runs it again rather than reusing a PASS on the same HEAD
+      'reviewer-ux': async (t, n) => {
         if (t.round === 2) await rm(shot(t))
-        await write(t, `round-${t.round}/review-ux.md`, 'VERDICT: PASS\n')
+        await write(t, `round-${t.round}/review-ux.md`, n === 1 ? 'VERDICT: CHANGES\n' : 'VERDICT: PASS\n')
       }
     })
     expect(deleted.orch.errors.get(deleted.job.id)).toContain('reviewer-ux changed job files it may not: round-1/screenshots-ui/desktop.png (deleted)')

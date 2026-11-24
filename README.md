@@ -136,7 +136,8 @@ default 30; it and everything it started are killed) and each agent run
 stalls with the reason, like any other failure. An agent whose report is
 missing or whose first line isn't valid is asked once more, with the error,
 before the job stalls; `spec.md` must have a `## Acceptance criteria` section,
-and a review without a verdict is removed and run again. A stalled job's error is kept
+and a review without a verdict, or without the factory's record of the commit
+it judged in this round, is removed and run again. A stalled job's error is kept
 in its `job.json`, so it stays stalled across a restart until you retry it.
 Retrying a job that stalled in the middle of a stage change doesn't repeat the
 comments or labels that change already posted.
@@ -201,7 +202,7 @@ in the running factory and is not kept across a restart.
   command it can't read still runs as you (unless the sandbox below is on), so
   protect the base branch on GitHub. After every agent the factory also checks what it changed: any job
   file other than its report (links included, `events.jsonl` too), the job's
-  routing, stage, error and provenance in `job.json`, or a report whose verdict differs
+  routing, stage, error and provenance in `job.json` or the review and decision records, or a report whose verdict differs
   from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.
@@ -243,6 +244,18 @@ in the running factory and is not kept across a restart.
   the round's `checks.md` passed against the current `origin/<base>`. A
   skipped run is written down with its source, only a PASS is reused, and
   protected paths are checked every time.
+- After each reviewer and approver run the factory records the verdict, the
+  worktree HEAD it judged, the `origin/<base>` sha and the round in
+  `job.json` (`judged` per lens, `decided` for the approver), and writes
+  `COMMIT:` and `BASE:` under the first line of `review-<lens>.md` and
+  `decision.md`. Those lines are for you; the record in `job.json` is what
+  counts. A lens whose last verdict was PASS on the HEAD under review now isn't
+  run again: its new `review-<lens>.md` is a copy with `REUSED: round-<k>`
+  naming the round it came from. A CHANGES, a PASS on another commit or a
+  missing record runs the reviewer. `review → approve` needs every routed
+  lens recorded on HEAD in this round, and `approve → merging` needs the
+  decision recorded on HEAD in this round; either refuses naming both commits.
+  Your Merge on an escalated job needs no record.
 - `checks.sh` runs without environment variables named like secrets (`*TOKEN*`,
   `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*CREDENTIAL*`, `AUTH`), so branch code
   never sees the factory's credentials; checks that need one must get it some
