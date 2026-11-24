@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { isWritable, NO_BROWSER, SANDBOX_BUILD } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
+import { defaultConfig } from './config'
 import type { AgentName } from './agents/prompts'
 import { Refused } from './machine'
 import { Orchestrator } from './orchestrator'
@@ -15,7 +16,10 @@ import { makeEnv, seed } from './testing'
 import type { TestEnv } from './testing'
 import type { Job } from './types'
 
-/** returns an error message to fail the agent, `{ reply }` to answer with text, anything else to succeed */
+/**
+ * returns an error message to fail the agent at no cost, `{ failed }` to fail it after it spent the usual
+ * cost, `{ reply }` to answer with text, anything else to succeed
+ */
 type Script = (task: AgentTask, call: number) => unknown
 
 /** Plays each agent by writing the file it would write. */
@@ -36,6 +40,8 @@ class FakeRunner implements AgentRunner {
     try {
       const error: unknown = await this.scripts[task.agent]?.(task, n)
       if (typeof error === 'string') return { ok: false, reply: '', sessionId: null, costUsd: 0, error }
+      const failed = (error as { failed?: string } | undefined)?.failed
+      if (failed) return { ok: false, reply: '', sessionId: `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25, error: failed }
       const reply = (error as { reply?: string } | undefined)?.reply ?? 'done'
       return { ok: true, reply, sessionId: task.resume ?? `${task.jobId}-${task.agent}-${n}`, costUsd: 0.25 }
     } finally {
@@ -520,12 +526,114 @@ describe('orchestrator', () => {
   })
 
   test('every agent run is capped by limits.agentTurns and limits.agentBudgetUsd', async () => {
-    const { env, runner, orch } = await factory({ ...happy }, { limits: { checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
+    const { env, runner, orch } = await factory({ ...happy }, { limits: { ...defaultConfig().limits, checksMinutes: 30, agentTurns: 42, agentBudgetUsd: 3.5 } })
     env.github.addIssue({ number: 1 })
     await orch.drain()
     await orch.idle()
     expect(runner.tasks.length).toBeGreaterThan(0)
     for (const t of runner.tasks) expect(t).toMatchObject({ maxTurns: 42, maxBudgetUsd: 3.5 })
+  })
+
+  describe('limits.agentMinutes and limits.jobBudgetUsd (#77)', () => {
+    /** a builder that runs until its signal aborts, then fails having spent the usual cost */
+    const hung = (t: AgentTask) => new Promise<{ failed: string }>((resolve) => {
+      if (t.signal!.aborted) resolve({ failed: 'aborted' })
+      t.signal!.addEventListener('abort', () => resolve({ failed: 'aborted' }), { once: true })
+    })
+    const limits = (more: Partial<ReturnType<typeof defaultConfig>['limits']>) => ({ limits: { ...defaultConfig().limits, ...more } })
+
+    test('a run past agentMinutes is aborted and stalls the job, with its cost kept and no second try', async () => {
+      const { env, runner, orch } = await factory({ ...happy, builder: hung }, limits({ agentMinutes: 0.001 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      const error = 'builder ran past limits.agentMinutes (0.001)'
+      const job = await env.store.load(id)
+      expect(job.stage).toBe('build')
+      expect(orch.errors.get(id)).toContain(error)
+      expect(job.error?.message).toContain(error)
+      expect(orch.paused.has(id)).toBe(false)
+      expect(job.paused ?? null).toBeNull()
+      const ends = (await readEvents(env, id)).filter(e => e.type === 'agent-end')
+      expect(ends.at(-1)).toMatchObject({ agent: 'builder', ok: false, error })
+      expect(runner.agents(id).filter(a => a === 'builder')).toHaveLength(1)
+      // intake, spec and the aborted builder at 0.25 each
+      expect(job.costUsd).toBe(0.75)
+    })
+
+    test('a cancel under a long agentMinutes still pauses the job instead of stalling it', async () => {
+      const { env, runner, orch } = await factory({ ...happy, builder: hung }, limits({ agentMinutes: 45 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      while (!runner.tasks.some(t => t.agent === 'builder')) await Bun.sleep(5)
+      orch.cancel('001-issue-1')
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(orch.paused.has(job.id)).toBe(true)
+      expect(job.paused).toMatchObject({ reason: 'cancel' })
+      expect(job.error).toBeNull()
+      expect(orch.errors.has(job.id)).toBe(false)
+    }, 20_000)
+
+    test('a job at its budget goes to needs-human before the builder starts; feedback renews the allowance', async () => {
+      const { env, runner, orch } = await factory({ ...happy }, limits({ jobBudgetUsd: 0.5 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      const job = await env.store.load(id)
+      expect(job.stage).toBe('needs-human')
+      expect(runner.agents(id)).toEqual(['intake', 'spec-writer'])
+      const events = await readEvents(env, id)
+      expect(events.some(e => e.type === 'agent-start' && e.agent === 'builder')).toBe(false)
+      expect(events.at(-1)).toMatchObject({ type: 'stage', from: 'build', to: 'needs-human' })
+      const decision = await env.store.read(id, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE\n')
+      expect(decision).toContain('Job budget reached: spent $0.50 of limits.jobBudgetUsd ($0.5).')
+      expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+      expect(env.github.calls.some(c => c[0] === 'comment' && c[1] === 'issue' && String(c[3]).startsWith('### Factory: needs a human')
+        && String(c[3]).includes('Job budget reached'))).toBe(true)
+      expect(orch.errors.has(id)).toBe(false)
+      expect(job.error).toBeNull()
+
+      await orch.feedback(id, 'go on')
+      const renewed = await env.store.load(id)
+      expect(renewed.stage).toBe('build')
+      expect(renewed.budgetLimitUsd).toBe(renewed.costUsd + 0.5)
+      await orch.idle()
+      expect(runner.agents(id)).toContain('builder')
+    })
+
+    test('the budget is checked before each reviewer too', async () => {
+      const { env, runner, orch } = await factory({ ...happy }, limits({ jobBudgetUsd: 0.75 }))
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const id = '001-issue-1'
+      expect((await env.store.load(id)).stage).toBe('needs-human')
+      expect(runner.agents(id)).toEqual(['intake', 'spec-writer', 'builder'])
+      expect((await readEvents(env, id)).some(e => e.type === 'agent-start' && String(e.agent).startsWith('reviewer-'))).toBe(false)
+      expect(await env.store.read(id, 'decision.md')).toContain('spent $0.75 of limits.jobBudgetUsd ($0.75)')
+      expect(orch.errors.has(id)).toBe(false)
+    })
+
+    test('an agent that sets budgetLimitUsd in job.json is refused and the field restored', async () => {
+      const { env, orch } = await factory({
+        ...happy,
+        builder: async (t) => {
+          await write(t, 'build.md', 'STATUS: READY\n')
+          const j = JSON.parse(await readFile(join(t.jobDir, 'job.json'), 'utf8')) as Job
+          await writeFile(join(t.jobDir, 'job.json'), JSON.stringify({ ...j, budgetLimitUsd: 1000 }))
+        }
+      })
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      const job = (await env.store.list())[0]!
+      expect(orch.errors.get(job.id)).toContain('builder changed job.json fields it may not: budgetLimitUsd')
+      expect(job.budgetLimitUsd ?? null).toBeNull()
+    })
   })
 
   test('shutdown aborts running agents and waits for their drivers', async () => {
