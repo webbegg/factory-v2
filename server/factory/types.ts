@@ -71,6 +71,8 @@ export interface Job {
   ended: string | null
   /** the last failure that stalled the job, kept across restarts until it starts again; absent in older jobs */
   error?: { message: string, at: string } | null
+  /** set when `cancel` stopped the job, written only by the factory, kept across restarts until it starts again; absent in older jobs */
+  paused?: { by: string, at: string, reason: string } | null
   /**
    * the unrepeatable steps a stage change has finished while it isn't saved yet, so a retry of the
    * same move skips them; cleared when the move is saved, written only by the machine; absent in older jobs
