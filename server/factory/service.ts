@@ -89,6 +89,8 @@ export interface Fixtures {
   errors: Record<string, string>
   events: FactoryEvent[]
   checks: DoctorCheck[]
+  /** job id → the PR head `gh pr view` would report, shown by the needs-human panel */
+  prHeads: Record<string, string>
 }
 
 /** A sample project the board reads: no orchestrator, no lock, no gh, git or claude. */
@@ -114,7 +116,7 @@ export async function openFixtures(dir: string): Promise<FixtureBoard> {
   const paths = factoryPaths(resolve(dir))
   const config = await loadConfig(paths)
   const raw = JSON.parse(await readFile(join(paths.repo, 'fixture.json'), 'utf8')) as Partial<Fixtures>
-  const fixtures: Fixtures = { running: raw.running ?? [], errors: raw.errors ?? {}, events: raw.events ?? [], checks: raw.checks ?? [] }
+  const fixtures: Fixtures = { running: raw.running ?? [], errors: raw.errors ?? {}, events: raw.events ?? [], checks: raw.checks ?? [], prHeads: raw.prHeads ?? {} }
   return { paths, config, store: new JobStore(paths), fixtures }
 }
 

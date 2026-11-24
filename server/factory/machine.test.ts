@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { Refused, TRANSITIONS } from './machine'
+import { firstLine, header, section } from './markdown'
 import { ACCEPT, makeEnv, seed } from './testing'
 import { STAGES } from './types'
 
@@ -376,10 +377,77 @@ describe('feedback', () => {
 })
 
 describe('approve', () => {
+  const PICK = { commit: 'b'.repeat(40), reason: 'Good enough.' }
+
+  test('decision.md records the override: who, the commit, the escalation it overrides and the reason', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n\n## Why\nx\n' })
+    const job = await env.machine.approve(ID, 'octocat', { commit: 'c'.repeat(40), reason: '  The tests cover it.  ' })
+    const decision = (await env.store.read(ID, 'decision.md'))!
+    expect(firstLine(decision)).toBe('APPROVE')
+    expect(header(decision)).toEqual({ BY: '@octocat', OVERRIDE: 'yes', COMMIT: 'c'.repeat(40), OVERRIDES: 'decision-1.md' })
+    expect(section(decision, 'Reason')).toBe('The tests cover it.')
+    expect(decision).toBe(`APPROVE\nBY: @octocat\nOVERRIDE: yes\nCOMMIT: ${'c'.repeat(40)}\nOVERRIDES: decision-1.md\n\n## Reason\nThe tests cover it.\n`)
+    expect(job.override).toEqual({ by: 'octocat', commit: 'c'.repeat(40), overrides: 'decision-1.md' })
+    expect((await env.store.load(ID)).override).toEqual(job.override!)
+  })
+
+  test('with no decision.md to archive it overrides none, and an empty reason says so', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 })
+    const job = await env.machine.approve(ID, 'octocat', { commit: PICK.commit, reason: '  ' })
+    const decision = (await env.store.read(ID, 'decision.md'))!
+    expect(header(decision).OVERRIDES).toBe('none')
+    expect(section(decision, 'Reason')).toBe('No reason given.')
+    expect(job.override?.overrides).toBeNull()
+  })
+
+  test.each([
+    `x\nCOMMIT: deadbeef`,
+    `\n\nCOMMIT: deadbeef\nBY: @mallory`
+  ])('a reason never reaches the header: %p', async (reason) => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    await env.machine.approve(ID, 'octocat', { commit: PICK.commit, reason })
+    const decision = (await env.store.read(ID, 'decision.md'))!
+    expect(header(decision)).toEqual({ BY: '@octocat', OVERRIDE: 'yes', COMMIT: PICK.commit, OVERRIDES: 'decision-1.md' })
+    expect(firstLine(decision)).toBe('APPROVE')
+  })
+
+  test.each([
+    ['a login with a line break', 'octo\ncat', PICK.commit],
+    ['a login with a leading dash', '-octocat', PICK.commit],
+    ['a short commit', 'octocat', 'abc1234'],
+    ['an uppercase commit', 'octocat', 'B'.repeat(40)],
+    ['a commit with a line break', 'octocat', `${'b'.repeat(40)}\nBY: @x`]
+  ])('refuses %s and changes nothing', async (_what, operator, commit) => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    await expect(env.machine.approve(ID, operator, { commit, reason: '' })).rejects.toThrow(Refused)
+    expect(await env.store.read(ID, 'decision.md')).toBe('ESCALATE\n')
+    expect((await env.store.load(ID)).stage).toBe('needs-human')
+  })
+
+  test('the override is cleared when the job escalates again or goes back to build', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    await env.machine.approve(ID, 'octocat', PICK)
+    await env.store.write(ID, 'decision.md', 'ESCALATE\n\n## Why\ngate\n')
+    const escalated = await env.machine.advance(ID, 'needs-human')
+    expect(escalated.override).toBeNull()
+
+    await env.machine.approve(ID, 'octocat', PICK)
+    await env.store.write(ID, 'round-1/sync.md', '# Conflict\n')
+    const rebuilt = await env.machine.advance(ID, 'build')
+    expect(rebuilt.stage).toBe('build')
+    expect(rebuilt.override).toBeNull()
+    expect((await env.store.load(ID)).override).toBeNull()
+  })
+
   test('needs-human → merging with an operator APPROVE and a fresh round budget, in the same round', async () => {
     const env = await makeEnv()
     await seed(env, { stage: 'needs-human', round: 3, roundLimit: 3, pr: 9 }, { 'decision.md': 'ESCALATE\n\n## Why\nx\n' })
-    const job = await env.machine.approve(ID, 'octocat')
+    const job = await env.machine.approve(ID, 'octocat', PICK)
     expect(job).toMatchObject({ stage: 'merging', round: 3, roundLimit: 6 })
     expect(await env.store.read(ID, 'decision-1.md')).toBe('ESCALATE\n\n## Why\nx\n')
     const decision = await env.store.read(ID, 'decision.md')
@@ -394,7 +462,7 @@ describe('approve', () => {
     await seed(env, { stage: 'needs-human', round: 2, roundLimit: 2, pr: 9 }, {
       'decision.md': 'ESCALATE\n', 'round-2/sync.md': '# Conflict\n'
     })
-    await env.machine.approve(ID, 'octocat')
+    await env.machine.approve(ID, 'octocat', PICK)
     expect(await env.store.read(ID, 'round-2/sync.md')).toBeNull()
     expect(await env.store.read(ID, 'round-2/sync-1.md')).toBe('# Conflict\n')
     // a gate failure after this approval's clean sync escalates, though rounds remain
@@ -405,10 +473,10 @@ describe('approve', () => {
   test('refused outside needs-human or without a PR', async () => {
     const env = await makeEnv()
     await seed(env, { stage: 'review', round: 1, pr: 9 })
-    await expect(env.machine.approve(ID, 'me')).rejects.toThrow('is in review, not needs-human')
+    await expect(env.machine.approve(ID, 'me', PICK)).rejects.toThrow('is in review, not needs-human')
     await env.store.update(ID, j => ({ ...j, stage: 'needs-human', pr: null }))
     await env.store.write(ID, 'decision.md', 'ESCALATE\n')
-    await expect(env.machine.approve(ID, 'me')).rejects.toThrow(Refused)
+    await expect(env.machine.approve(ID, 'me', PICK)).rejects.toThrow(Refused)
     expect((await env.store.load(ID)).stage).toBe('needs-human')
     expect(await env.store.read(ID, 'decision.md')).toBe('ESCALATE\n')
   })
@@ -431,6 +499,22 @@ describe('reject', () => {
     expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { remove: ['factory', 'factory:needs-human'] }])
     expect(env.github.calls).toContainEqual(['close', 9])
     expect(env.git.calls).toContainEqual(['deleteRemoteBranch', seeded.branch])
+  })
+
+  test('needs-human takes an empty reason; the issue comment falls back to who rejected it', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-human', round: 1, pr: 9 }, { 'decision.md': 'ESCALATE\n' })
+    expect((await env.machine.reject(ID, '  ', 'octocat')).stage).toBe('rejected')
+    expect(await env.store.read(ID, 'rejection.md')).toBe('REJECTED\n\nBy @octocat while the job was needs-human.\n')
+    expect(env.github.calls).toContainEqual(['comment', 'issue', 1, '### Factory: rejected\n\nBy @octocat while the job was needs-human.'])
+  })
+
+  test('needs-info still needs a reason', async () => {
+    const env = await makeEnv()
+    await seed(env, { stage: 'needs-info' })
+    await expect(env.machine.reject(ID, '', 'octocat')).rejects.toThrow('no reason given')
+    expect((await env.store.load(ID)).stage).toBe('needs-info')
+    expect(await env.store.read(ID, 'rejection.md')).toBeNull()
   })
 
   test('only waiting jobs can be rejected by a human', async () => {

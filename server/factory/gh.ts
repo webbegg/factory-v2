@@ -81,6 +81,10 @@ export class GhCli implements GitHubPort {
     return (await this.json<{ state: PrState }>('pr', 'view', String(number), '--json', 'state')).state
   }
 
+  async prHead(number: number) {
+    return (await this.json<{ headRefOid: string }>('pr', 'view', String(number), '--json', 'headRefOid')).headRefOid
+  }
+
   async prIsDraft(number: number) {
     return (await this.json<{ isDraft: boolean }>('pr', 'view', String(number), '--json', 'isDraft')).isDraft
   }

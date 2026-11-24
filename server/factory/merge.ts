@@ -131,12 +131,22 @@ export class Merger {
     }
 
     const before = await ports.git.head(job.worktree)
+    const override = job.override
+    // the operator chose Merge for the commit they saw; the factory's own base sync is the only other head allowed
+    if (override && before !== override.commit && before !== override.synced) {
+      return fail(`The branch moved from ${override.commit.slice(0, 7)} to ${before.slice(0, 7)} since @${override.by} chose Merge, `
+        + 'so it was not merged. Look at the new commits and decide again.')
+    }
     await ports.git.fetch(job.worktree, base)
     const synced = await ports.git.merge(job.worktree, `refs/remotes/origin/${base}`)
     if (!synced.ok) {
       await store.write(id, `round-${job.round}/sync.md`, `# Conflict with ${base}\n\n\`\`\`\n${synced.output}\n\`\`\`\n`)
       if (job.round < job.roundLimit) return machine.advance(id, 'build')
       return fail(`The branch conflicts with ${base}:\n\n\`\`\`\n${synced.output}\n\`\`\``)
+    }
+    if (override) {
+      const head = await ports.git.head(job.worktree)
+      await store.update(id, j => ({ ...j, override: j.override && { ...j.override, synced: head } }))
     }
 
     const headUnchanged = await ports.git.head(job.worktree) === before

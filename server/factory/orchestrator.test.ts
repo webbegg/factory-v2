@@ -1129,9 +1129,13 @@ describe('orchestrator', () => {
       return f
     }
 
+    // FakeGit's head and FakeGitHub's PR head both default to this
+    const HEAD = 'a'.repeat(40)
+    const PICK = { commit: HEAD, reason: 'Looks fine to me.' }
+
     test('Merge syncs, gates and merges through GitHub', async () => {
       const { env, orch } = await escalated()
-      await orch.approve('001-issue-1')
+      await orch.approve('001-issue-1', PICK)
       await orch.idle()
       expect((await env.store.load('001-issue-1')).stage).toBe('merged')
       expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
@@ -1144,7 +1148,7 @@ describe('orchestrator', () => {
     test('a conflict at the merge goes back to the builder, even after the last round escalated', async () => {
       const { env, runner, orch } = await escalated({ maxRounds: 1 })
       env.git.mergeResult = { ok: false, output: 'CONFLICT (content): a.txt' }
-      await orch.approve('001-issue-1')
+      await orch.approve('001-issue-1', PICK)
       await orch.idle()
       expect(runner.tasks.filter(t => t.agent === 'builder').at(-1)!.message).toContain('read round-1/sync.md')
       expect((await env.store.load('001-issue-1')).round).toBe(2)
@@ -1154,10 +1158,88 @@ describe('orchestrator', () => {
       const { env, orch } = await escalated()
       const job = await env.store.load('001-issue-1')
       env.github.prStates.set(job.pr!, 'MERGED')
-      expect((await orch.approve(job.id)).stage).toBe('merged')
+      expect((await orch.approve(job.id, PICK)).stage).toBe('merged')
       await orch.idle()
       expect(await env.store.read(job.id, `round-${job.round}/merge-checks.md`)).toBeNull()
       expect(await env.store.read(job.id, 'decision.md')).toStartWith('ESCALATE')
+    })
+
+    test('Merge is refused when the PR head moved since the panel showed it', async () => {
+      const { env, orch } = await escalated()
+      const job = await env.store.load('001-issue-1')
+      const decision = await env.store.read(job.id, 'decision.md')
+      env.github.prHeads.set(job.pr!, 'f'.repeat(40))
+      await expect(orch.approve(job.id, PICK)).rejects.toThrow(Refused)
+      await expect(orch.approve(job.id, PICK)).rejects.toThrow('its head is fffffff, not the aaaaaaa you chose')
+      expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+      expect((await env.store.load(job.id)).stage).toBe('needs-human')
+    })
+
+    test('a branch moved before the merge step\'s sync escalates and merges nothing', async () => {
+      const { env, orch } = await escalated()
+      // someone pushed after the click
+      env.git.headSha = 'e'.repeat(40)
+      await orch.approve('001-issue-1', PICK)
+      await orch.idle()
+      const job = await env.store.load('001-issue-1')
+      expect(job.stage).toBe('needs-human')
+      expect(job.override).toBeNull()
+      expect(await env.store.read(job.id, 'decision.md')).toContain('The branch moved from aaaaaaa to eeeeeee since @operator chose Merge')
+      expect(await env.store.read(job.id, 'decision-2.md')).toStartWith('APPROVE\nBY: @operator\nOVERRIDE: yes')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+      expect(env.git.calls.some(c => c[0] === 'push')).toBe(false)
+    })
+
+    test('a successful sync records its head, so a resumed override merge passes the check', async () => {
+      const { env, orch } = await escalated()
+      await orch.approve('001-issue-1', PICK)
+      await orch.idle()
+      expect((await env.store.load('001-issue-1')).override).toMatchObject({ commit: HEAD, synced: HEAD })
+    })
+
+    test('a resumed override merge whose head is the recorded sync merges', async () => {
+      const { env, orch } = await escalated()
+      const id = '001-issue-1'
+      // approved for 'c…', then the factory's own base sync made 'a…' before a cancel mid-gate
+      env.github.prHeads.set((await env.store.load(id)).pr!, 'c'.repeat(40))
+      await env.machine.approve(id, 'operator', { commit: 'c'.repeat(40), reason: '' })
+      await env.store.update(id, j => ({ ...j, override: { ...j.override!, synced: HEAD } }))
+      orch.retry(id)
+      await orch.idle()
+      expect((await env.store.load(id)).stage).toBe('merged')
+      expect(env.github.calls.some(c => c[0] === 'merge')).toBe(true)
+    })
+
+    describe('Already merged', () => {
+      test('moves a job whose PR GitHub shows merged, without a decision or a merge', async () => {
+        const { env, orch } = await escalated()
+        const events: FactoryEvent[] = []
+        orch.on('event', (e: FactoryEvent) => events.push(e))
+        const job = await env.store.load('001-issue-1')
+        const decision = await env.store.read(job.id, 'decision.md')
+        env.github.prStates.set(job.pr!, 'MERGED')
+        expect((await orch.alreadyMerged(job.id)).stage).toBe('merged')
+        expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+        expect(env.github.calls.some(c => c[0] === 'merge')).toBe(false)
+        expect((await readEvents(env, job.id)).at(-1)).toMatchObject({ type: 'pr', pr: job.pr, state: 'MERGED' })
+        expect(events).toContainEqual(expect.objectContaining({ type: 'job', job: expect.objectContaining({ stage: 'merged' }) }))
+      })
+
+      test('refuses an open PR and leaves the job where it was', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load('001-issue-1')
+        const decision = await env.store.read(job.id, 'decision.md')
+        await expect(orch.alreadyMerged(job.id)).rejects.toThrow(`PR #${job.pr} is OPEN on GitHub, not merged`)
+        expect((await env.store.load(job.id)).stage).toBe('needs-human')
+        expect(await env.store.read(job.id, 'decision.md')).toBe(decision)
+      })
+
+      test('refuses a job that isn\'t waiting on a human', async () => {
+        const { env, orch } = await escalated()
+        await seed(env, { id: '002-other', issue: 2, stage: 'review', round: 1, pr: 200 })
+        env.github.prStates.set(200, 'MERGED')
+        await expect(orch.alreadyMerged('002-other')).rejects.toThrow('not needs-human')
+      })
     })
 
     test('checkMerged moves hand-merged needs-human jobs while paused, and only those', async () => {

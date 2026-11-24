@@ -62,6 +62,11 @@ export interface Job {
    * same move skips them; cleared when the move is saved, written only by the machine; absent in older jobs
    */
   move?: { from: Stage, to: Stage, done: string[] } | null
+  /**
+   * the operator's Merge from needs-human: who, the PR head they saw, the decision file it overrode, and the
+   * head after the merge step's own base sync; cleared on any move but to merging or merged; absent in older jobs
+   */
+  override?: { by: string, commit: string, overrides: string | null, synced?: string | null } | null
 }
 
 /** One line of a job's events.jsonl, written only by the factory. */

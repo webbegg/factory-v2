@@ -161,20 +161,28 @@ export class Machine {
     return { job, file }
   }
 
-  /** needs-human → merging on the operator's word, recorded as an APPROVE decision.md. */
-  async approve(id: string, operator: string): Promise<Job> {
+  /**
+   * needs-human → merging on the operator's word, recorded as an APPROVE decision.md that overrides the
+   * escalation and is pinned to the PR head the operator saw.
+   */
+  async approve(id: string, operator: string, { commit, reason }: { commit: string, reason: string }): Promise<Job> {
     const job = await this.store.update(id, async (raw) => {
       require(raw.stage === 'needs-human', `${id} is in ${raw.stage}, not needs-human`)
       require(raw.pr, `${id} has no PR to merge`)
-      await this.store.archive(id, 'decision.md')
-      await this.store.write(id, 'decision.md', `APPROVE\n\n@${operator} approved the merge from needs-human.\n`)
+      // both go into the header, so neither may carry a line break or anything but its own shape
+      require(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(operator), `'${operator}' isn't a GitHub login`)
+      require(/^[0-9a-f]{40}$/.test(commit), `'${commit}' isn't a full commit sha`)
+      const overrides = await this.store.archive(id, 'decision.md')
+      await this.store.write(id, 'decision.md', `APPROVE\nBY: @${operator}\nOVERRIDE: yes\nCOMMIT: ${commit}\n`
+      + `OVERRIDES: ${overrides ?? 'none'}\n\n## Reason\n${reason.trim() || 'No reason given.'}\n`)
       // the merge runs in this round: a conflict left by an earlier attempt must not count as this one's
       const rd = this.roundRel(raw)
       if (await this.store.read(id, `${rd}/sync.md`) !== null) {
         const k = (await readdir(this.store.path(id, rd))).filter(f => /^sync-\d+\.md$/.test(f)).length + 1
         await this.store.move(id, `${rd}/sync.md`, `${rd}/sync-${k}.md`)
       }
-      return this.transition(await this.sync(raw), 'merging', 'approve', this.steps(raw, 'merging'))
+      const next = await this.transition(await this.sync(raw), 'merging', 'approve', this.steps(raw, 'merging'))
+      return { ...next, override: { by: operator, commit, overrides } }
     })
     await this.logMove(job, 'needs-human')
     return job
@@ -185,10 +193,12 @@ export class Machine {
     let from: Stage = 'rejected'
     const job = await this.store.update(id, async (raw) => {
       require(WAITING.has(raw.stage), `${id} is in ${raw.stage}, not needs-info or needs-human`)
-      require(text.trim(), 'no reason given')
+      // a needs-info rejection answers the issue's author, so it says why; in needs-human the reason is optional
+      require(raw.stage === 'needs-human' || text.trim(), 'no reason given')
       from = raw.stage
+      const reason = text.trim() ? `\n${text.trim()}\n` : ''
       await this.store.write(id, 'rejection.md',
-        `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n\n${text.trim()}\n`)
+        `REJECTED\n\nBy @${operator} while the job was ${raw.stage}.\n${reason}`)
       return this.transition(await this.sync(raw), 'rejected', 'reject', this.steps(raw, 'rejected'))
     })
     await this.logMove(job, from)
@@ -398,6 +408,8 @@ export class Machine {
     // a job that moved on is past whatever stalled it
     job.error = null
     job.move = null
+    // an override holds only for the merge it started: escalating again or going back to build ends it
+    if (stage !== 'merging' && stage !== 'merged') job.override = null
     return job
   }
 

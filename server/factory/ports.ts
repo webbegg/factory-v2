@@ -38,6 +38,8 @@ export interface GitHubPort {
   comment(kind: ThreadKind, number: number, body: string): Promise<void>
   editLabels(kind: ThreadKind, number: number, change: { add?: string[], remove?: string[] }): Promise<void>
   prState(number: number): Promise<PrState>
+  /** sha of the PR's head commit on GitHub */
+  prHead(number: number): Promise<string>
   prIsDraft(number: number): Promise<boolean>
   prReady(number: number): Promise<void>
   prClose(number: number): Promise<void>
