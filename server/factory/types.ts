@@ -27,6 +27,20 @@ export interface JobAgents {
   reviewers: Record<string, string>
 }
 
+/** What made a job: the factory build, the claude CLI and the base it started from. */
+export interface JobProvenance {
+  factoryVersion: string
+  /** the factory package's git HEAD; for the board, read when its snapshot was taken */
+  factorySha: string | null
+  claudeVersion: string | null
+  /** origin/<base> when the job was created */
+  baseSha: string | null
+  /** 12-char sha256 prefixes of `.factory/config.json` and `.factory/checks.sh` on that base, null when missing */
+  configSha: string | null
+  checksSha: string | null
+  sandbox: boolean
+}
+
 export interface Job {
   id: string
   issue: number
@@ -60,15 +74,34 @@ export interface Job {
    * same move skips them; cleared when the move is saved, written only by the machine; absent in older jobs
    */
   move?: { from: Stage, to: Stage, done: string[] } | null
+  /** set once when the job is created, written only by the factory; absent in older jobs */
+  provenance?: JobProvenance | null
 }
+
+/** Where an agent's system prompt came from: the built-in one, or a base `<agent>.md` / `<agent>.append.md` */
+export type PromptSource = 'builtin' | 'override' | 'addendum'
 
 /** One line of a job's events.jsonl, written only by the factory. */
 export type JobEvent = { at: string } & (
   | { type: 'stage', from: Stage, to: Stage }
-  | { type: 'agent-start', agent: string, model: string, round: number }
+  | {
+    type: 'agent-start'
+    agent: string
+    model: string
+    round: number
+    /** the session resumed, null for a new one */
+    sessionId: string | null
+    /** 2 for a second run in the same session */
+    attempt: number
+    /** the worktree's HEAD, null before it exists (intake) */
+    head: string | null
+    base: string | null
+    prompt: { source: PromptSource, sha: string }
+  }
   | { type: 'agent-end', agent: string, model: string, round: number, seconds: number, cost: number, ok: boolean, error?: string }
-  | { type: 'gate', verdict: GateVerdict, seconds: number, commit: string }
-  | { type: 'merge', outcome: Stage | 'error', error?: string }
+  | { type: 'gate', verdict: GateVerdict, seconds: number, commit: string, base: string | null }
+  // commit and base of this attempt's gate, null when none ran
+  | { type: 'merge', outcome: Stage | 'error', commit: string | null, base: string | null, error?: string }
 )
 
 export interface FactoryConfig {
