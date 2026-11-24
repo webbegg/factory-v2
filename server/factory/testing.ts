@@ -75,10 +75,13 @@ export class FakeGitHub implements GitHubPort {
   }
 
   mergeError: string | null = null
+  /** merges the PR, then throws this, as when gh loses GitHub's response */
+  mergeLost: string | null = null
   async prMerge(number: number, method: string, headSha: string) {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
     this.calls.push(['merge', number, method, headSha])
+    if (this.mergeLost) throw new Error(this.mergeLost)
   }
 
   /** answers to `commitChecks`, in order; the last one repeats */

@@ -1238,6 +1238,98 @@ describe('orchestrator', () => {
       expect((await env.store.load(job.id)).stage).toBe('merged')
       expect((await env.store.load('002-other')).stage).toBe('review')
     })
+
+    describe('the PR\'s state on GitHub comes first (#72)', () => {
+      const ID = '001-issue-1'
+
+      test('feedback on a merged PR moves the job to merged and starts nothing', async () => {
+        const { env, runner, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'MERGED')
+        const tasks = runner.tasks.length
+        expect((await orch.feedback(ID, 'go on')).stage).toBe('merged')
+        await orch.idle()
+        expect((await env.store.load(ID)).stage).toBe('merged')
+        expect(existsSync(join(env.paths.jobs, ID, 'feedback-1.md'))).toBe(false)
+        expect(runner.tasks).toHaveLength(tasks)
+        const events = await readEvents(env, ID)
+        expect(events).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'MERGED' }))
+        expect(events).toContainEqual(expect.objectContaining({ type: 'stage', from: 'needs-human', to: 'merged' }))
+      })
+
+      test('feedback on a closed PR is refused and the job stays in needs-human', async () => {
+        const { env, runner, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'CLOSED')
+        const tasks = runner.tasks.length
+        const refusal = orch.feedback(ID, 'go on')
+        await expect(refusal).rejects.toBeInstanceOf(Refused)
+        await expect(refusal).rejects.toThrow('PR closed outside the factory')
+        await orch.idle()
+        expect(await env.store.load(ID)).toMatchObject({ stage: 'needs-human', round: job.round })
+        expect(existsSync(join(env.paths.jobs, ID, 'feedback-1.md'))).toBe(false)
+        expect(runner.tasks).toHaveLength(tasks)
+        expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'CLOSED' }))
+      })
+
+      test('reject on a merged PR moves the job to merged and closes nothing', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'MERGED')
+        expect((await orch.reject(ID, 'no')).stage).toBe('merged')
+        expect((await env.store.load(ID)).stage).toBe('merged')
+        expect(await env.store.read(ID, 'rejection.md')).toBeNull()
+        expect(env.github.calls.some(c => c[0] === 'close')).toBe(false)
+        expect(env.github.calls.some(c => c[0] === 'comment' && String(c[3]).includes('rejected'))).toBe(false)
+      })
+
+      test('reject on a closed PR rejects without closing the PR again', async () => {
+        const { env, orch } = await escalated()
+        const job = await env.store.load(ID)
+        env.github.prStates.set(job.pr!, 'CLOSED')
+        expect((await orch.reject(ID, 'no')).stage).toBe('rejected')
+        expect(env.github.calls.some(c => c[0] === 'close')).toBe(false)
+        expect(env.git.calls).toContainEqual(['deleteRemoteBranch', job.branch])
+        expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: job.pr, state: 'CLOSED' }))
+      })
+    })
+  })
+
+  describe('a builder round reads the PR first (#72)', () => {
+    const ID = '001-issue-1'
+    /** round 1's gate fails, and the PR is `state` on GitHub before round 2's builder */
+    async function secondRound(state: 'MERGED' | 'CLOSED') {
+      const f = await factory({
+        ...happy,
+        builder: async (t, n) => {
+          if (n === 1) await writeFile(join(t.cwd, 'broken'), 'x')
+          await write(t, 'build.md', 'STATUS: READY\n\n# Build\n')
+          f.env.github.prStates.set(101, state)
+        }
+      })
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      return f
+    }
+
+    test('on a merged PR, the job moves to merged with no second builder', async () => {
+      const { env, runner } = await secondRound('MERGED')
+      expect(await env.store.load(ID)).toMatchObject({ stage: 'merged', round: 2 })
+      expect(runner.tasks.filter(t => t.agent === 'builder').map(t => t.round)).toEqual([1])
+      expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: 101, state: 'MERGED' }))
+    })
+
+    test('on a closed PR, the job escalates with no second builder', async () => {
+      const { env, runner } = await secondRound('CLOSED')
+      expect(await env.store.load(ID)).toMatchObject({ stage: 'needs-human', round: 2 })
+      const decision = await env.store.read(ID, 'decision.md') ?? ''
+      expect(decision).toStartWith('ESCALATE')
+      expect(decision).toContain('closed outside the factory')
+      expect(runner.tasks.filter(t => t.agent === 'builder').map(t => t.round)).toEqual([1])
+      expect(env.github.calls).toContainEqual(['labels', 'issue', 1, { add: ['factory:needs-human'] }])
+      expect(await readEvents(env, ID)).toContainEqual(expect.objectContaining({ type: 'pr', pr: 101, state: 'CLOSED' }))
+    })
   })
 
   test('a single issue run while every slot is busy queues, then starts when the slot frees', async () => {

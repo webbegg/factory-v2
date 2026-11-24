@@ -381,6 +381,46 @@ describe('merge', () => {
     expect(await env.store.read(ID, 'decision.md')).toContain('branch protection: 1 review required')
   })
 
+  test('a gh pr merge that fails after GitHub merged finishes as a merge, noted (#72)', async () => {
+    const env = await makeEnv()
+    const job = await approved(env)
+    env.github.mergeLost = 'gh: unexpected EOF\nmore detail'
+    expect((await env.merger.merge(ID)).stage).toBe('merged')
+    const checks = await env.store.read(ID, 'round-1/merge-checks.md') ?? ''
+    expect(checks).toStartWith('GATE: PASS')
+    expect(checks).toContain('## Merge\nmerge response lost: gh pr merge failed (gh: unexpected EOF), but GitHub shows PR #9 merged.\n')
+    expect(env.git.calls).toContainEqual(['deleteRemoteBranch', job.branch])
+    expect(await env.store.read(ID, 'decision.md')).toStartWith('APPROVE')
+    expect(await env.store.read(ID, 'events.jsonl')).toContain('"type":"pr","pr":9,"state":"MERGED","note":"merge response lost"')
+  })
+
+  test('a failed gh pr merge with the PR still open escalates as before (#72)', async () => {
+    const env = await makeEnv()
+    await approved(env)
+    env.github.mergeError = 'gh: HTTP 502'
+    expect((await env.merger.merge(ID)).stage).toBe('needs-human')
+    expect(await env.store.read(ID, 'decision.md')).toContain('The merge failed:\n\n```\ngh: HTTP 502\n```')
+  })
+
+  test('a failed gh pr merge whose PR state can\'t be read escalates with the merge error (#72)', async () => {
+    const env = await makeEnv()
+    await approved(env)
+    env.github.mergeError = 'gh: HTTP 502'
+    let tried = false
+    const prMerge = env.github.prMerge.bind(env.github)
+    env.github.prMerge = (...args) => {
+      tried = true
+      return prMerge(...args)
+    }
+    const prState = env.github.prState.bind(env.github)
+    env.github.prState = async (n) => {
+      if (tried) throw new Error('gh: rate limited')
+      return prState(n)
+    }
+    expect((await env.merger.merge(ID)).stage).toBe('needs-human')
+    expect(await env.store.read(ID, 'decision.md')).toContain('The merge failed:\n\n```\ngh: HTTP 502\n```')
+  })
+
   test('a PR already merged by a person just finishes the job', async () => {
     const env = await makeEnv()
     await approved(env)

@@ -11,7 +11,9 @@ export { TERMINAL, WAITING }
 
 /**
  * Legal stage moves. Any unfinished job may also move to `merged` once its PR
- * is merged on GitHub, by the factory or by a person mid-round.
+ * is merged on GitHub, by the factory or by a person mid-round, and any job
+ * that isn't finished or waiting may move to `needs-human` once its PR is
+ * closed on GitHub, since no builder can push to it any more.
  */
 export const TRANSITIONS: Partial<Record<Stage, readonly Stage[]>> = {
   'intake': ['needs-info', 'rejected', 'spec'],
@@ -241,12 +243,18 @@ export class Machine {
     const { labels, baseBranch: base } = this.config
     const comment = this.commenter(step)
     const editLabels = this.labeller(step)
-    require((TRANSITIONS[old] ?? []).includes(stage) || (stage === 'merged' && !TERMINAL.has(old)),
+    const listed = (TRANSITIONS[old] ?? []).includes(stage)
+    // build → needs-human otherwise needs a BLOCKED build.md, which a closed PR doesn't write
+    const closed = stage === 'needs-human' && holdsSlot(job) && (!listed || old === 'build')
+      && !!job.pr && await github.prState(job.pr) === 'CLOSED'
+    require(listed || closed || (stage === 'merged' && !TERMINAL.has(old)),
       `${job.id}: ${old} → ${stage} is not a legal transition`)
 
     if (stage === 'merged') {
       require(job.pr && await github.prState(job.pr) === 'MERGED', 'the PR isn\'t merged')
       if (old === 'needs-human') await editLabels('issue', job.issue, { remove: [labels.needsHuman] })
+    } else if (closed) {
+      await this.escalate(job, `PR #${job.pr} was closed outside the factory.`)
     } else if (stage === 'rejected' && WAITING.has(old)) {
       require(via === 'reject', 'use reject to reject a waiting job')
       const reason = body(await this.read(job, 'rejection.md') ?? '')
@@ -256,7 +264,10 @@ export class Machine {
       await editLabels('issue', job.issue, { remove: [labels.queue, waiting] })
       if (job.pr) {
         const pr = job.pr
-        await step(`close:pr:${pr}`, () => github.prClose(pr))
+        // closed on GitHub already: closing it again would fail
+        await step(`close:pr:${pr}`, async () => {
+          if (await github.prState(pr) !== 'CLOSED') await github.prClose(pr)
+        })
         await step(`delete-remote:${job.branch}`, () => git.deleteRemoteBranch(job.branch))
       }
     } else if (old === 'intake') {
@@ -363,7 +374,8 @@ export class Machine {
       const decision = await this.read(job, 'decision.md') ?? ''
       const text = `### Factory: needs a human\n\n${decision.split('\n').slice(1).join('\n').trim()}`
       if (job.pr) {
-        if (await github.prIsDraft(job.pr)) await github.prReady(job.pr)
+        // a closed PR can't be marked ready
+        if (!closed && await github.prIsDraft(job.pr)) await github.prReady(job.pr)
         await comment('pr', job.pr, text)
       } else {
         await comment('issue', job.issue, text)
