@@ -21,7 +21,16 @@ view; this file is for whoever changes the code.
   `route.ts`, `merge.ts` (after the push it polls `commitChecks` on the gated
   commit per `ci.wait` / `ci.startMinutes` / `ci.minutes`, through injectable
   `sleep`/`now` that `makeEnv()` fakes; the jobs inside that wait are
-  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`),
+  `Merger.ciWaiting`, sent as the `ci` event and as `/api/state` `ciWaiting`;
+  right before `prMerge` it fetches and compares `origin/<base>` with the
+  gate's `base`, repeating sync, gate, push and CI wait at most twice in the
+  same round; after the merge it reads `prMergeCommit` and, for `merge` and
+  `squash`, compares its tree with `git.tree` of the gated commit, sending a
+  mismatch to needs-human; it saves `job.merge` and `merge.md` through
+  `Machine.recordMerge`, never overwriting a record, with `by` from
+  `job.mergeVia`, which the machine sets on the move into merging; the
+  machine records `by: 'external'` on a move to merged with no record yet;
+  `Queue.sweepMerged` skips a job whose `treeVerified` is `false`),
   `orchestrator.ts` (its in-memory FIFO of issues
   queued by `runIssue` while every slot is busy, started by `fill()` ahead of
   the drain, sent as the `queued` event; `agent()` re-prompts an agent once,
@@ -60,9 +69,12 @@ view; this file is for whoever changes the code.
   A driver failure is saved as `job.json` `error` (not for a shutdown abort),
   cleared by `start()` and by every stage move, and read back into
   `Orchestrator.errors` by `loadErrors()`, which `createFactory()` awaits.
-  A cancel is not saved as an error: it puts the job in `Orchestrator.paused`
-  (in memory, gone on restart), which the drain skips until `start()` clears
-  it; `/api/state` sends `paused` and the `paused` event announces it.
+  A cancel is not saved as an error: once the driver stops it puts the job in
+  `Orchestrator.paused` and saves `job.json` `paused` (`by`, `at`, `reason`;
+  in `TRUSTED`; never for a shutdown abort), which `start()` clears and
+  `loadErrors()` reads back into `Orchestrator.paused`. The drain skips a
+  paused job and `Queue.rows()` shows it as a `skip` row, while it still holds
+  its slot; `/api/state` sends `paused` and the `paused` event announces it.
 - `server/api/` — Nitro routes over `useFactory()` (`server/utils/factory.ts`).
   Engine refusals throw `Refused`; routes wrap calls in `guarded()` → 409.
   The setup routes (`server/api/setup/`) use `projectDir()` instead of

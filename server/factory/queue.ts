@@ -48,6 +48,8 @@ export class Queue {
     const { store, ports, machine } = this.o
     for (const j of await store.list()) {
       if (only && j.stage !== only) continue
+      // merged, but not as gated: it waits for an operator to look
+      if (j.merge?.treeVerified === false) continue
       if (!TERMINAL.has(j.stage) && !driving(j.id) && j.pr && await ports.github.prState(j.pr) === 'MERGED') {
         await machine.advance(j.id, 'merged')
       }
@@ -88,6 +90,8 @@ export class Queue {
         others.push(row('skip', issue.number, j, 're-labeled after rejection: Run again on the board'))
       } else if (j.stage === 'merged') {
         others.push(row('skip', issue.number, j, 'merged'))
+      } else if (j.paused) {
+        others.push(row('skip', issue.number, j, 'paused: Resume on the board'))
       } else {
         running.push(row('resume', issue.number, j, `round ${j.round}`))
       }
@@ -192,6 +196,7 @@ export class Queue {
       started: ports.now(),
       ended: null,
       error: null,
+      paused: null,
       provenance: await this.provenance()
     }
     await store.write(id, 'issue.md', renderIssue(issue, await ports.github.operator()))

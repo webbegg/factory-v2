@@ -27,6 +27,18 @@ describe('queue', () => {
     expect(r[0]).toMatchObject({ job: '001-a', stage: 'build', note: 'round 1' })
   })
 
+  test('a paused job is skipped and still holds its slot', async () => {
+    const env = await makeEnv({ concurrency: 2 })
+    env.github.addIssue({ number: 1 })
+    env.github.addIssue({ number: 2 })
+    env.github.addIssue({ number: 3 })
+    await seed(env, { id: '001-a', issue: 2, stage: 'build', round: 1, paused: { by: 'operator', at: 'x', reason: 'cancel' } })
+    const r = await env.queue.rows()
+    expect(rows(r)).toEqual(['new #1', 'hold #3', 'skip #2'])
+    expect(r[2]).toMatchObject({ job: '001-a', stage: 'build', note: 'paused: Resume on the board' })
+    expect(await env.queue.freeSlots()).toBe(1)
+  })
+
   test('needs-info resumes once the author replied, and takes a slot', async () => {
     const env = await makeEnv({ concurrency: 1 })
     const q = { author: 'operator', body: `${MARKER}\nWhich colour?`, createdAt: '1' }
@@ -78,6 +90,36 @@ describe('queue', () => {
     await env.queue.sweepMerged(() => false)
     expect(rows(await env.queue.rows())).toEqual(['skip #1'])
     expect((await env.store.load('001-a')).stage).toBe('merged')
+  })
+
+  test('a hand-merged needs-human job is recorded as an external merge, with merge.md (#75)', async () => {
+    const env = await makeEnv()
+    await seed(env, { id: '001-a', issue: 1, stage: 'needs-human', round: 1, pr: 5 })
+    env.github.prStates.set(5, 'MERGED')
+    env.github.mergeCommits.set(5, { sha: 'f'.repeat(40), tree: 'e'.repeat(40) })
+    await env.queue.sweepMerged(() => false)
+    const job = await env.store.load('001-a')
+    expect(job.stage).toBe('merged')
+    expect(job.merge).toEqual({
+      by: 'external', approvedCommit: null, gatedCommit: null, base: null,
+      mergeCommit: 'f'.repeat(40), treeVerified: null, ci: null, overrides: []
+    })
+    const md = await env.store.read('001-a', 'merge.md') ?? ''
+    expect(md).toStartWith('# Merge\n\n## Summary\n- by: external\n')
+    expect(md).toContain(`- mergeCommit: ${'f'.repeat(40)}\n`)
+  })
+
+  test('a merge commit that can\'t be read never holds up the move to merged (#75)', async () => {
+    const env = await makeEnv()
+    await seed(env, { id: '001-a', issue: 1, stage: 'needs-human', round: 1, pr: 5 })
+    env.github.prStates.set(5, 'MERGED')
+    env.github.prMergeCommit = async () => {
+      throw new Error('gh: HTTP 502')
+    }
+    await env.queue.sweepMerged(() => false)
+    const job = await env.store.load('001-a')
+    expect(job.stage).toBe('merged')
+    expect(job.merge).toMatchObject({ by: 'external', mergeCommit: null })
   })
 
   test('rows only read: listing the queue changes no job', async () => {

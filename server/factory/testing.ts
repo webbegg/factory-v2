@@ -16,6 +16,11 @@ import type { FactoryConfig, FactoryPaths, Job } from './types'
 
 export type Call = [string, ...unknown[]]
 
+/** the tree FakeGit reports for any ref without its own entry */
+export const FAKE_TREE = 'e'.repeat(40)
+/** the merge commit FakeGitHub's prMerge records when the test set none */
+export const MERGE_SHA = 'd'.repeat(40)
+
 export class FakeGitHub implements GitHubPort {
   calls: Call[] = []
   prStates = new Map<number, PrState>()
@@ -86,8 +91,17 @@ export class FakeGitHub implements GitHubPort {
   async prMerge(number: number, method: string, headSha: string) {
     if (this.mergeError) throw new Error(this.mergeError)
     this.prStates.set(number, 'MERGED')
+    // a merge commit whose tree matches FakeGit's default, unless the test set one (null included)
+    if (!this.mergeCommits.has(number)) this.mergeCommits.set(number, { sha: MERGE_SHA, tree: FAKE_TREE })
     this.calls.push(['merge', number, method, headSha])
     if (this.mergeLost) throw new Error(this.mergeLost)
+  }
+
+  /** PR → its merge commit; a PR without an entry has none */
+  mergeCommits = new Map<number, { sha: string, tree: string } | null>()
+  async prMergeCommit(number: number) {
+    this.calls.push(['prMergeCommit', number])
+    return this.mergeCommits.get(number) ?? null
   }
 
   /** answers to `commitChecks`, in order; the last one repeats */
@@ -166,6 +180,14 @@ export class FakeGit implements GitPort {
 
   async remoteHead(_cwd: string, branch: string) {
     return this.remoteHeads.has(branch) ? this.remoteHeads.get(branch)! : this.remoteSha
+  }
+
+  /** ref → tree sha; any other ref has `defaultTree` */
+  trees = new Map<string, string>()
+  defaultTree = FAKE_TREE
+  async tree(cwd: string, ref: string) {
+    this.calls.push(['tree', cwd, ref])
+    return this.trees.get(ref) ?? this.defaultTree
   }
 
   async commitsAhead(_cwd: string, base: string) {

@@ -71,6 +71,8 @@ export interface Job {
   ended: string | null
   /** the last failure that stalled the job, kept across restarts until it starts again; absent in older jobs */
   error?: { message: string, at: string } | null
+  /** set when `cancel` stopped the job, written only by the factory, kept across restarts until it starts again; absent in older jobs */
+  paused?: { by: string, at: string, reason: string } | null
   /**
    * the unrepeatable steps a stage change has finished while it isn't saved yet, so a retry of the
    * same move skips them; cleared when the move is saved, written only by the machine; absent in older jobs
@@ -83,6 +85,26 @@ export interface Job {
   override?: { by: string, commit: string, overrides: string | null, synced?: string | null } | null
   /** set once when the job is created, written only by the factory; absent in older jobs */
   provenance?: JobProvenance | null
+  /** who moved the job into merging: the approver's APPROVE or the operator's Merge; set by the machine, absent in older jobs */
+  mergeVia?: 'approver' | 'operator' | null
+  /** what the factory can prove about the merge, also written as merge.md; never overwritten once set, absent in older jobs */
+  merge?: MergeRecord | null
+}
+
+export interface MergeRecord {
+  /** `factory` after the approver's APPROVE, `operator` after a Merge from needs-human, `external` when merged outside the factory */
+  by: 'factory' | 'operator' | 'external'
+  /** HEAD when the merge step started */
+  approvedCommit: string | null
+  /** the commit the last merge gate passed, which `gh pr merge` was pinned to */
+  gatedCommit: string | null
+  /** the origin/<base> sha that gate ran against */
+  base: string | null
+  mergeCommit: string | null
+  /** the merge commit's tree equals the gated commit's; null when not compared (rebase, external) */
+  treeVerified: boolean | null
+  ci: 'passed' | 'none-seen' | 'off' | null
+  overrides: string[]
 }
 
 /** Where an agent's system prompt came from: the built-in one, or a base `<agent>.md` / `<agent>.append.md` */
