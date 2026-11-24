@@ -18,9 +18,26 @@ route → spec → build → gate (.factory/checks.sh) ─FAIL→ build
                                 └ ESCALATE → PR ready, you decide (merge, feedback, reject)
 ```
 
-On the board, an escalated job's **Merge** button approves it: the factory
-syncs with the base, gates again, and merges through `gh pr merge`, as after an
-APPROVE. Gating again reuses the round gate's pass, without re-running
+On the board, an escalated job's panel shows the PR head GitHub reports and has
+four actions sharing one text box, which only **Send feedback** requires:
+
+- **Merge** overrides the escalation for that PR head: the factory syncs with
+  the base, gates again, and merges through `gh pr merge`, as after an APPROVE.
+  It writes `decision.md` as `APPROVE` with `BY: @<you>`, `OVERRIDE: yes`,
+  `COMMIT: <the head you saw>` and `OVERRIDES: decision-<k>.md` (the archived
+  ESCALATE, or `none`), then your text, if any, under `## Reason`. Merge is
+  refused if the PR head moved since the panel showed it, and the job comes
+  back to needs-human if the branch moved before the merge step's base sync
+  (the factory's own sync doesn't count). Its card then reads "merged by
+  override".
+- **Already merged** is for a PR you merged on GitHub: the job moves to merged
+  if GitHub shows it merged, and the action is refused otherwise.
+- **Send feedback** sends the builder another round with your text. Text that
+  reads like an approval ("merge", "merged", "go on", "lgtm") first asks
+  "Did you mean Merge?", with Merge, Send as feedback anyway, or Back.
+- **Reject** rejects the job, with your text as the reason if you gave one.
+
+Gating again reuses the round gate's pass, without re-running
 `checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
 `BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
 The factory reads the PR on GitHub before it acts on feedback, an answer, a

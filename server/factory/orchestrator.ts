@@ -268,8 +268,11 @@ export class Orchestrator extends EventEmitter {
     return job
   }
 
-  /** The operator's Merge on an escalated job: the merging step syncs, gates and merges it. */
-  async approve(id: string): Promise<Job> {
+  /**
+   * The operator's Merge on an escalated job, for the PR head they saw: the merging step syncs, gates and
+   * merges it, unless the branch moves first.
+   */
+  async approve(id: string, { commit, reason }: { commit: string, reason: string }): Promise<Job> {
     const { store, machine, ports } = this.o
     const current = await store.load(id)
     // merged by hand already: nothing was approved through the factory, so no APPROVE is written
@@ -278,8 +281,30 @@ export class Orchestrator extends EventEmitter {
       this.send({ type: 'job', job })
       return job
     }
-    const job = await machine.approve(id, await ports.github.operator())
+    if (current.pr) {
+      const head = await ports.github.prHead(current.pr)
+      if (head !== commit) {
+        throw new Refused(`PR #${current.pr} moved: its head is ${head.slice(0, 7)}, not the ${commit.slice(0, 7)} you chose to merge; `
+          + 'look at the new commits again')
+      }
+    }
+    const job = await machine.approve(id, await ports.github.operator(), { commit, reason })
     this.start(id)
+    return job
+  }
+
+  /** The operator says a needs-human job's PR was merged on GitHub; only GitHub's state can confirm it. */
+  async alreadyMerged(id: string): Promise<Job> {
+    const { store, machine, ports } = this.o
+    const current = await store.load(id)
+    if (current.stage !== 'needs-human') throw new Refused(`${id} is in ${current.stage}, not needs-human`)
+    const pr = current.pr
+    if (!pr) throw new Refused(`${id} has no PR`)
+    const state = await ports.github.prState(pr)
+    if (state !== 'MERGED') throw new Refused(`PR #${pr} is ${state} on GitHub, not merged`)
+    const job = await machine.advance(id, 'merged')
+    await this.recordPr(id, pr, state, 'was merged on GitHub, as the operator said; moved to merged')
+    this.send({ type: 'job', job })
     return job
   }
 

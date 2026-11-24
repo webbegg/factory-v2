@@ -66,6 +66,12 @@ export class FakeGitHub implements GitHubPort {
     return this.prStates.get(number) ?? 'OPEN'
   }
 
+  /** PR number → head sha on GitHub; unset PRs report `FakeGit`'s default head */
+  prHeads = new Map<number, string>()
+  async prHead(number: number) {
+    return this.prHeads.get(number) ?? 'a'.repeat(40)
+  }
+
   async prIsDraft(number: number) {
     return this.drafts.has(number)
   }
