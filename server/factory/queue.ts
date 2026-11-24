@@ -168,7 +168,9 @@ export class Queue {
       costUsd: 0,
       started: ports.now(),
       ended: null,
-      error: null
+      error: null,
+      judged: {},
+      decided: null
     }
     await store.write(id, 'issue.md', renderIssue(issue, await ports.github.operator()))
     await store.save(job)
