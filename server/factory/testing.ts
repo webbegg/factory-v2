@@ -278,7 +278,8 @@ export async function makeEnv(overrides: Partial<FactoryConfig> = {}, build: Bui
   const ports: Ports = { github, git, issues, now: () => '2026-11-20T12:00:00Z' }
   const machine = new Machine({ paths, config, store, ports })
   const queue = new Queue({ paths, config, store, ports, machine, build })
-  const gate = new Gate({ paths, config, store, ports })
+  // the real gate sandbox only where it can start; the sandbox's own tests skip elsewhere
+  const gate = new Gate({ paths, config, store, ports, sandboxChecks: realSandbox })
   const clock = { ms: 0 }
   const merger = new Merger({
     config, store, ports, machine, gate,

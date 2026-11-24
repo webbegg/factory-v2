@@ -108,6 +108,12 @@ export interface GateOptions {
   config: FactoryConfig
   store: JobStore
   ports: Ports
+  /**
+   * Tests only: false runs checks.sh outside the sandbox runtime even with
+   * sandbox.enabled, where it can't start (Linux CI, or inside another
+   * sandbox). The factory never sets it.
+   */
+  sandboxChecks?: boolean
 }
 
 /**
@@ -139,7 +145,7 @@ export class Gate {
     if (script === null) {
       return { code: 127, output: `${CHECKS} isn't committed on origin/${baseBranch}: commit and push it first.\n`, seconds: 0, base }
     }
-    const res = await runChecksScript(script, worktree, this.o.config.limits.checksMinutes, signal, gateSandbox(this.o.config, this.o.paths.repo))
+    const res = await runChecksScript(script, worktree, this.o.config.limits.checksMinutes, signal, this.o.sandboxChecks === false ? undefined : gateSandbox(this.o.config, this.o.paths.repo))
     return { code: res.code, output: res.output, seconds: Math.round((performance.now() - start) / 1000), base }
   }
 
