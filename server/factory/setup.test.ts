@@ -3,7 +3,55 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { addendumBody } from './agents/prompts'
-import { agentsGuideCheck, checksScript, detectChecks, ensureGitignore, mergeMethodCheck, scaffoldAddenda, versionAtLeast } from './setup'
+import { agentsGuideCheck, browserCheck, checksScript, detectChecks, ensureGitignore, mergeMethodCheck, sandboxCheck, scaffoldAddenda, versionAtLeast } from './setup'
+
+describe('sandboxCheck (#49)', () => {
+  const all = () => true
+  const none = () => false
+
+  test('off: an optional line that says how to turn it on', () => {
+    const c = sandboxCheck(false, 'darwin', all)
+    expect(c).toMatchObject({ name: 'agent sandbox', ok: false, optional: true })
+    expect(c.detail).toContain('sandbox.enabled')
+  })
+
+  test('on, macOS: needs sandbox-exec; required, since every agent run fails without it', () => {
+    expect(sandboxCheck(true, 'darwin', c => c === 'sandbox-exec')).toMatchObject({ ok: true, optional: false })
+    const missing = sandboxCheck(true, 'darwin', none)
+    expect(missing).toMatchObject({ ok: false, optional: false })
+    expect(missing.detail).toContain('sandbox-exec')
+  })
+
+  test('on, Linux: needs bubblewrap and socat, and names what is missing', () => {
+    expect(sandboxCheck(true, 'linux', all).ok).toBe(true)
+    const c = sandboxCheck(true, 'linux', cmd => cmd === 'bwrap')
+    expect(c.ok).toBe(false)
+    expect(c.detail).toContain('socat')
+    expect(c.detail).not.toContain('bwrap')
+  })
+
+  test('on, other platforms: unsupported', () => {
+    const c = sandboxCheck(true, 'win32', all)
+    expect(c.ok).toBe(false)
+    expect(c.detail).toContain('win32')
+  })
+})
+
+describe('browserCheck', () => {
+  test('installed and no sandbox: the version', () => {
+    expect(browserCheck('agent-browser 0.43.0', false)).toEqual({ name: 'agent-browser (UI reviews)', ok: true, detail: 'agent-browser 0.43.0', optional: true })
+  })
+
+  test('not installed: reviewers review code only', () => {
+    expect(browserCheck(null, false)).toMatchObject({ ok: false, optional: true, detail: expect.stringContaining('not installed') })
+  })
+
+  test('sandbox on: no browser, whatever is installed', () => {
+    const c = browserCheck('agent-browser 0.43.0', true)
+    expect(c).toMatchObject({ ok: false, optional: true })
+    expect(c.detail).toContain('sandbox')
+  })
+})
 
 describe('detectChecks', () => {
   test('package.json scripts in lint → typecheck → test → build order, with the lockfile\'s manager', () => {

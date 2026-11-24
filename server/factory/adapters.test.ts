@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { exec } from './exec'
@@ -50,6 +50,20 @@ describe('GhCli', () => {
       ['issue', 'edit', '7', '--add-label', 'a', '--remove-label', 'b,c'],
       ['pr', 'merge', '9', '--squash', '--match-head-commit', 'abc123']
     ])
+  })
+
+  test('prCreate opens a draft from the branch and reads its number from the URL (#49)', async () => {
+    const seen: string[][] = []
+    const pr = new GhCli(async (args) => {
+      seen.push(args)
+      return 'https://github.com/o/r/pull/42\n'
+    })
+    expect(await pr.prCreate({ base: 'main', head: 'factory/001-x', title: 'T', body: 'Closes #1' }))
+      .toEqual({ number: 42, url: 'https://github.com/o/r/pull/42' })
+    expect(seen).toEqual([['pr', 'create', '--draft', '--base', 'main', '--head', 'factory/001-x', '--title', 'T', '--body', 'Closes #1']])
+    // title and body both come from build.md: both redacted
+    await pr.prCreate({ base: 'main', head: 'b', title: 'T https://u:pw@github.com/o/r', body: 'B https://u:pw@github.com/o/r' })
+    expect(seen[1]!.slice(-3)).toEqual(['T https://***@github.com/o/r', '--body', 'B https://***@github.com/o/r'])
   })
 
   test('commitChecks reads every page of check runs and statuses and maps their states', async () => {
@@ -189,6 +203,16 @@ describe('GitCli against a real repo', () => {
       { status: 'M', path: 'a.txt' }, { status: 'D', path: 'long.txt' }, { status: 'A', path: 'moved.txt' }
     ])
 
+    // verify B1: a ref planted as refs/tags/origin/main wins over the short name, never over the full one the factory uses
+    const planted = join(repo, '.git', 'refs', 'tags', 'origin', 'main')
+    await mkdir(join(planted, '..'), { recursive: true })
+    await writeFile(planted, `${await git.head(wt)}\n`)
+    await git.fetch(repo, 'main')
+    expect(await git.commitsAhead(wt, 'origin/main')).toBe(0)
+    expect(await git.commitsAhead(wt, 'refs/remotes/origin/main')).toBe(2)
+    expect((await git.changedFiles(wt, 'refs/remotes/origin/main')).map(f => f.path)).toEqual(['a.txt', 'long.txt', 'moved.txt'])
+    await rm(planted)
+
     await git.push(wt, 'factory/001-x')
     expect(await git.remoteHead(wt, 'factory/001-x')).toBe(await git.head(wt))
 
@@ -248,6 +272,129 @@ describe('GitCli against a real repo', () => {
       expect(await git.show(repo, 'refs/remotes/origin/main', 'a.txt')).toBe('a\n')
     } finally {
       await exec('git', ['tag', '-d', 'origin/main'], { cwd: repo })
+    }
+  }, 30_000)
+
+  test('a worktree can\'t redirect the factory\'s git to a gitdir it planted, and hooks never run (#49)', async () => {
+    const wt5 = join(repo, '.worktrees', '005-h')
+    await git.addWorktree(wt5, 'factory/005-h', 'origin/main')
+    const marker = join(repo, '..', 'pwned')
+    // an agent points the worktree's .git file at a gitdir whose config runs a command on every status
+    const evil = join(repo, '..', 'evil.git')
+    await exec('git', ['init', '-q', '--bare', evil], { cwd: repo })
+    await exec('git', ['config', '--file', join(evil, 'config'), 'core.bare', 'false'], { cwd: repo })
+    await exec('git', ['config', '--file', join(evil, 'config'), 'core.fsmonitor', `touch ${marker}`], { cwd: repo })
+    const dotGit = join(wt5, '.git')
+    const real = await readFile(dotGit, 'utf8')
+    await writeFile(dotGit, `gitdir: ${evil}\n`)
+    // and a hook the repo's own hooks folder would run on merge
+    const hook = join(repo, '.git', 'hooks', 'post-merge')
+    await writeFile(hook, `#!/bin/sh\ntouch ${marker}-hook\n`, { mode: 0o755 })
+    try {
+      expect(await git.isClean(wt5)).toBe(true)
+      expect(await git.head(wt5)).toBe((await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim())
+      expect(existsSync(marker)).toBe(false)
+      // the base moves, so the merge does something and post-merge would fire
+      await exec('git', ['commit', '-q', '--allow-empty', '-m', 'base moved'], { cwd: repo })
+      await exec('git', ['push', '-q', 'origin', 'main'], { cwd: repo })
+      await git.fetch(repo, 'main')
+      expect((await git.merge(wt5, 'origin/main')).ok).toBe(true)
+      expect(await git.head(wt5)).toBe((await exec('git', ['rev-parse', 'refs/remotes/origin/main'], { cwd: repo })).trim())
+      expect(existsSync(`${marker}-hook`)).toBe(false)
+    } finally {
+      await writeFile(dotGit, real)
+      await rm(hook, { force: true })
+      await rm(marker, { force: true })
+      await rm(`${marker}-hook`, { force: true })
+      await git.removeWorktree(wt5)
+      await git.deleteBranch('factory/005-h')
+    }
+  }, 30_000)
+
+  test('commitAll commits everything a sandboxed builder left, and nothing when there is nothing (#49)', async () => {
+    const wt6 = join(repo, '.worktrees', '006-c')
+    await git.fetch(repo, 'main')
+    await git.addWorktree(wt6, 'factory/006-c', 'refs/remotes/origin/main')
+    try {
+      const before = await git.head(wt6)
+      expect(await git.commitAll(wt6, 'nothing')).toEqual({ committed: false })
+      await writeFile(join(wt6, 'new.txt'), 'new\n')
+      await writeFile(join(wt6, 'a.txt'), 'edited\n')
+      expect(await git.commitAll(wt6, 'Add new (round 1)')).toEqual({ committed: true })
+      expect(await git.isClean(wt6)).toBe(true)
+      expect(await git.head(wt6)).not.toBe(before)
+      expect((await exec('git', ['log', '-1', '--format=%s'], { cwd: wt6 })).trim()).toBe('Add new (round 1)')
+      expect((await exec('git', ['show', '--name-only', '--format=', 'HEAD'], { cwd: wt6 })).trim().split('\n')).toEqual(['a.txt', 'new.txt'])
+      // a nested repository would be committed as a gitlink, and git status would then honour its config: refused
+      const nested = join(wt6, 'sub')
+      await mkdir(nested)
+      await exec('git', ['init', '-q'], { cwd: nested })
+      await writeFile(join(nested, 'f.txt'), 'f\n')
+      await exec('git', ['add', 'f.txt'], { cwd: nested })
+      await exec('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'nested'], { cwd: nested })
+      // and its config runs a filter on any status that recurses into it (verify run 3, B1)
+      const marker = join(wt6, '..', 'pwned-006')
+      await exec('git', ['config', 'filter.evil.clean', `sh -c 'touch ${marker}; cat'`], { cwd: nested })
+      await writeFile(join(nested, '.gitattributes'), '* filter=evil\n')
+      await writeFile(join(nested, 'f.txt'), 'changed\n')
+      const head = await git.head(wt6)
+      try {
+        for (let i = 0; i < 2; i++) {
+          const refused = await git.commitAll(wt6, 'nested')
+          expect(refused.committed).toBe(false)
+          expect(refused.problem).toContain('sub')
+          // unstaged again, so nothing later recurses into it
+          expect((await exec('git', ['diff', '--cached', '--name-only'], { cwd: wt6 })).trim()).toBe('')
+        }
+        await git.isClean(wt6)
+        expect(existsSync(marker)).toBe(false)
+        expect(await git.head(wt6)).toBe(head)
+      } finally {
+        await rm(nested, { recursive: true, force: true })
+        await rm(marker, { force: true })
+      }
+    } finally {
+      await git.removeWorktree(wt6)
+      await git.deleteBranch('factory/006-c')
+    }
+  }, 30_000)
+
+  test('startMerge leaves conflicts for the builder; commitAll refuses markers, then concludes the merge (#49)', async () => {
+    const wt7 = join(repo, '.worktrees', '007-m')
+    await git.fetch(repo, 'main')
+    await git.addWorktree(wt7, 'factory/007-m', 'refs/remotes/origin/main')
+    try {
+      await writeFile(join(wt7, 'm.txt'), 'branch side\n')
+      await git.commitAll(wt7, 'branch change')
+      await writeFile(join(repo, 'm.txt'), 'base side\n')
+      await exec('git', ['add', 'm.txt'], { cwd: repo })
+      await exec('git', ['commit', '-qm', 'base change'], { cwd: repo })
+      await exec('git', ['push', '-q', 'origin', 'main'], { cwd: repo })
+      await git.fetch(repo, 'main')
+
+      expect(await git.startMerge(wt7, 'refs/remotes/origin/main')).toEqual({ ok: false, conflicts: ['m.txt'] })
+      expect(await readFile(join(wt7, 'm.txt'), 'utf8')).toContain('<<<<<<<')
+      const head = await git.head(wt7)
+      const refused = await git.commitAll(wt7, 'merge')
+      expect(refused.committed).toBe(false)
+      expect(refused.problem).toContain('m.txt')
+      expect(await git.head(wt7)).toBe(head)
+
+      await writeFile(join(wt7, 'm.txt'), 'both sides\n')
+      expect(await git.commitAll(wt7, 'Merge main')).toEqual({ committed: true })
+      const parents = (await exec('git', ['rev-list', '--parents', '-1', 'HEAD'], { cwd: wt7 })).trim().split(' ')
+      expect(parents.length).toBe(3)
+      expect(await git.commitsAhead(wt7, 'refs/remotes/origin/main')).toBe(2)
+
+      // no conflict: merged and committed outright
+      await exec('git', ['commit', '-q', '--allow-empty', '-m', 'base moved again'], { cwd: repo })
+      await exec('git', ['push', '-q', 'origin', 'main'], { cwd: repo })
+      await git.fetch(repo, 'main')
+      expect(await git.startMerge(wt7, 'refs/remotes/origin/main')).toEqual({ ok: true, conflicts: [] })
+      expect(await git.isClean(wt7)).toBe(true)
+    } finally {
+      await git.removeWorktree(wt7)
+      await git.deleteBranch('factory/007-m')
     }
   }, 30_000)
 

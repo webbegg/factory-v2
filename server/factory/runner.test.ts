@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { bashRefusal, toolRefusal } from './agents/runner'
+import { bashRefusal, NO_BROWSER, SANDBOX_BUILD, sandboxNote, sandboxSettings, toolRefusal } from './agents/runner'
+import type { AgentTask } from './agents/runner'
 
 const BRANCH = 'factory/001-x'
 const builder = (cmd: string) => bashRefusal(cmd, 'builder', BRANCH)
@@ -148,5 +149,85 @@ describe('toolRefusal', () => {
     expect(toolRefusal('Write', { file_path: '/jobs/1/decision.md' }, task)).toContain('only lets reviewer-code write')
     expect(toolRefusal('Write', { file_path: '/jobs/1/round-1/review-code.md' }, task)).toBeNull()
     expect(toolRefusal('Read', { file_path: '/anything' }, task)).toBeNull()
+  })
+})
+
+describe('sandboxSettings (#49)', () => {
+  const GIT = '/r/.git'
+  const WT = '/r/.worktrees/001-x'
+  const task = (agent: AgentTask['agent'], writable: string[], sandbox: AgentTask['sandbox'] = { gitDir: GIT, domains: [] }) =>
+    ({ agent, cwd: WT, branch: BRANCH, writable, sandbox })
+  const builder = sandboxSettings(task('builder', [`${WT}/`, '/r/.factory/jobs/001-x/build.md']))!
+  const reviewer = sandboxSettings(task('reviewer-code', ['/r/.factory/jobs/001-x/round-1/review-code.md']))!
+  const ui = sandboxSettings(task('reviewer-ui', ['/r/.factory/jobs/001-x/round-1/review-ui.md', '/r/.factory/jobs/001-x/round-1/screenshots-ui/']))!
+
+  test('off unless the task asks for it', () => {
+    expect(sandboxSettings({ agent: 'builder', cwd: WT, writable: [] })).toBeUndefined()
+  })
+
+  test('every shell is sandboxed, fails closed and can\'t opt out per command', () => {
+    for (const s of [builder, reviewer, ui]) {
+      expect(s.enabled).toBe(true)
+      expect(s.failIfUnavailable).toBe(true)
+      expect(s.allowUnsandboxedCommands).toBe(false)
+      expect(s.network?.strictAllowlist).toBe(true)
+    }
+  })
+
+  test('writes: the agent\'s own files and nothing in .git, the builder included (the factory commits for it)', () => {
+    expect(reviewer.filesystem?.allowWrite).toEqual(['/r/.factory/jobs/001-x/round-1/review-code.md'])
+    expect(ui.filesystem?.allowWrite).toContain('/r/.factory/jobs/001-x/round-1/screenshots-ui')
+    expect(builder.filesystem?.allowWrite).toEqual([WT, '/r/.factory/jobs/001-x/build.md'])
+    // nothing grants the repo's config, hooks, other worktrees or other jobs
+    for (const s of [builder, reviewer, ui]) {
+      for (const w of s.filesystem?.allowWrite ?? []) {
+        expect(w === GIT || w === `${GIT}/config` || w.startsWith(`${GIT}/hooks`) || w === '/r/.factory/jobs' || w === '/r/.worktrees').toBe(false)
+      }
+    }
+  })
+
+  test('no shell may write the repo\'s .git (the SDK would let a worktree\'s shell write it), nor the worktree\'s .git file', () => {
+    for (const agent of ['builder', 'spec-writer', 'reviewer-code', 'reviewer-security', 'reviewer-ux', 'reviewer-ui', 'approver'] as const) {
+      const s = sandboxSettings(task(agent, agent === 'builder' ? [`${WT}/`] : ['/r/.factory/jobs/001-x/x.md']))!
+      expect(s.filesystem?.denyWrite).toEqual([`${WT}/.git`, GIT])
+      // deny wins over allow, so nothing the agent must write may sit under a denied path
+      for (const a of s.filesystem?.allowWrite ?? []) {
+        for (const d of s.filesystem?.denyWrite ?? []) expect(a === d || a.startsWith(`${d}/`)).toBe(false)
+      }
+    }
+  })
+
+  test('network: the npm registry (plus configured hosts) for the builder, never GitHub; nothing for the rest', () => {
+    const extra = sandboxSettings(task('builder', [`${WT}/`], { gitDir: GIT, domains: ['pypi.org'] }))!
+    expect(builder.network?.allowedDomains).toEqual(['registry.npmjs.org'])
+    expect(builder.network?.allowMachLookup).toBeUndefined()
+    expect(extra.network?.allowedDomains).toEqual(['registry.npmjs.org', 'pypi.org'])
+    expect(reviewer.network?.allowedDomains).toEqual([])
+    expect(ui.network?.allowedDomains).toEqual([])
+    // dev servers: the builder and the page reviewers bind local ports
+    expect(builder.network?.allowLocalBinding).toBe(true)
+    expect(ui.network?.allowLocalBinding).toBe(true)
+    expect(reviewer.network?.allowLocalBinding).toBe(false)
+    // no browser under the sandbox (Chrome can't start in it), so no unix sockets and no temp folders for anyone
+    for (const s of [builder, reviewer, ui]) {
+      expect(s.network?.allowUnixSockets).toBeUndefined()
+      expect(s.filesystem?.allowWrite?.some(w => w.startsWith('/tmp') || w.startsWith('/var/folders'))).toBe(false)
+    }
+  })
+
+  test('credentials: model keys, GitHub tokens and gh config hidden from every shell, the builder\'s too', () => {
+    const env = (s: typeof builder) => (s.credentials?.envVars ?? []).map(e => (e as { name: string }).name)
+    const files = (s: typeof builder) => s.filesystem?.denyRead ?? []
+    for (const s of [builder, reviewer, ui]) {
+      expect(env(s)).toEqual(expect.arrayContaining(['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN']))
+      expect(files(s)).toEqual(expect.arrayContaining(['~/.ssh', '~/.config/gh', '~/.git-credentials', '~/.aws']))
+    }
+  })
+
+  test('agents are told what the sandbox changes for them', () => {
+    expect(sandboxNote('builder')).toContain(SANDBOX_BUILD)
+    expect(sandboxNote('builder')).toContain(NO_BROWSER)
+    expect(sandboxNote('reviewer-ui')).toBe(NO_BROWSER)
+    expect(sandboxNote('reviewer-code')).toBe('')
   })
 })

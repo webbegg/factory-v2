@@ -129,7 +129,7 @@ export class Merger {
 
     const before = await ports.git.head(job.worktree)
     await ports.git.fetch(job.worktree, base)
-    const synced = await ports.git.merge(job.worktree, `origin/${base}`)
+    const synced = await ports.git.merge(job.worktree, `refs/remotes/origin/${base}`)
     if (!synced.ok) {
       await store.write(id, `round-${job.round}/sync.md`, `# Conflict with ${base}\n\n\`\`\`\n${synced.output}\n\`\`\`\n`)
       if (job.round < job.roundLimit) return machine.advance(id, 'build')

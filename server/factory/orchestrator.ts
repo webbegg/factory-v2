@@ -4,6 +4,7 @@ import { lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile
 import { dirname, join, relative } from 'node:path'
 import { addendumBody, PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
+import { sandboxNote } from './agents/runner'
 import type { AgentEvent, AgentRunner, AgentTask } from './agents/runner'
 import type { Gate, StopCheckRecord } from './gate'
 import { redact } from './exec'
@@ -502,16 +503,64 @@ export class Orchestrator extends EventEmitter {
     return job.sessions.builder ? '' : 'Build the spec.'
   }
 
+  /**
+   * A sandboxed builder can't write .git, so the factory commits for it: the
+   * whole worktree, titled from build.md. Returns what kept it from committing.
+   */
+  private async commitBuild(job: Job): Promise<string | null> {
+    const build = await this.o.store.read(job.id, 'build.md') ?? ''
+    const title = /^# Build:[ \t]*(\S.*)$/m.exec(build)?.[1]?.trim() ?? `Build for #${job.issue}`
+    const res = await this.o.ports.git.commitAll(job.worktree, job.round > 1 ? `${title} (round ${job.round})` : title)
+    return res.problem ?? null
+  }
+
+  /** …then pushes the branch and opens its draft PR, as the builder does when it isn't sandboxed. */
+  private async publishBuild(job: Job): Promise<void> {
+    const { git, github } = this.o.ports
+    const problem = await this.commitBuild(job)
+    if (problem) throw new Refused(`${problem}; resolve them and update build.md`)
+    const base = this.o.config.baseBranch
+    // nothing to push: the machine refuses the build with its own reason
+    if (await git.commitsAhead(job.worktree, `refs/remotes/origin/${base}`) === 0) return
+    await git.push(job.worktree, job.branch)
+    if ((await github.openPrsForBranch(job.branch)).length) return
+    const build = await this.o.store.read(job.id, 'build.md') ?? ''
+    const title = /^# Build:[ \t]*(\S.*)$/m.exec(build)?.[1]?.trim() ?? `Build for #${job.issue}`
+    const summary = section(build, 'Summary')
+    await github.prCreate({ base, head: job.branch, title, body: [`Closes #${job.issue}`, summary].filter(Boolean).join('\n\n') })
+  }
+
+  /** A sandboxed builder can't merge either: on a conflict round the factory starts the merge and leaves the conflicts to it. */
+  private async startSync(job: Job): Promise<string | null> {
+    const { git } = this.o.ports
+    if (!this.o.config.sandbox.enabled || job.roundReason !== 'sync') return null
+    const base = this.o.config.baseBranch
+    // a dirty worktree is a merge (or work) already under way: never abort it
+    if (!await git.isClean(job.worktree)) {
+      return `A merge of origin/${base} is under way in your worktree: resolve any conflict markers left (read round-${job.round - 1}/sync.md), then update build.md for round ${job.round}.`
+    }
+    await git.fetch(job.worktree, base)
+    const merged = await git.startMerge(job.worktree, `refs/remotes/origin/${base}`)
+    return merged.ok
+      ? `The factory merged origin/${base} into your branch without conflicts; check that everything still works, then update build.md for round ${job.round}.`
+      : `The factory started merging origin/${base} into your branch; resolve the conflict markers in ${merged.conflicts.join(', ')} (read round-${job.round - 1}/sync.md), then update build.md for round ${job.round}.`
+  }
+
   private async build(job: Job, signal: AbortSignal): Promise<boolean> {
     const { machine, store, gate } = this.o
+    const sandboxed = this.o.config.sandbox.enabled
     const resuming = !job.sessions.builder && (await store.read(job.id, 'build.md')) !== null
-    const purpose = [this.buildPurpose(job), resuming ? 'A previous builder stopped mid-round: read build.md and git log to see how far it got.' : '']
+    const sync = await this.startSync(job)
+    const purpose = [sync ?? this.buildPurpose(job), resuming ? 'A previous builder stopped mid-round: read build.md and git log to see how far it got.' : '']
       .filter(Boolean).join(' ')
     // a record from an earlier build of this job must never stand in for this one's
     this.stopChecks.delete(job.id)
     const stopCheck = async () => {
       this.stopChecks.delete(job.id)
       const { git } = this.o.ports
+      // committed first, so a pass covers what the gate will check
+      const problem = sandboxed ? await this.commitBuild(job) : null
+      if (problem) return `The factory couldn't commit your work: ${problem}. Resolve them, or write STATUS: BLOCKED in build.md if you can't.`
       const before = await git.head(job.worktree)
       const cleanBefore = await git.isClean(job.worktree)
       const checks = await gate.runChecks(job.worktree, signal)
@@ -544,6 +593,7 @@ export class Orchestrator extends EventEmitter {
         this.stopChecks.delete(job.id)
         await machine.advance(job.id, 'needs-human')
       } else {
+        if (sandboxed) await this.publishBuild(job)
         await machine.advance(job.id, 'gate')
       }
     }
@@ -778,8 +828,9 @@ export class Orchestrator extends EventEmitter {
     const shots = this.screenshots(job, agent)
     // made up front: screenshot tools run through Bash rarely create the folder
     if (shots) await mkdir(shots, { recursive: true })
+    const noBrowser = this.o.config.sandbox.enabled ? sandboxNote(agent) : ''
     const message = [this.header(job), lead, port === null ? '' : `Port: ${port}.`, purpose,
-      `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : ''].filter(Boolean).join(' ')
+      `Write your report to ${this.report(job, agent)}.`, shots ? `Save screenshots in ${shots}/.` : '', noBrowser].filter(Boolean).join(' ')
     const resume = opts.resume ?? (agent === 'builder' ? job.sessions.builder : undefined)
     const task: AgentTask = {
       agent,
@@ -793,6 +844,7 @@ export class Orchestrator extends EventEmitter {
       tools: TOOLS[agent],
       writable: this.writable(job, agent),
       branch: job.branch,
+      sandbox: this.o.config.sandbox.enabled ? { gitDir: join(paths.repo, '.git'), domains: this.o.config.sandbox.domains } : undefined,
       maxTurns: this.o.config.limits.agentTurns,
       maxBudgetUsd: this.o.config.limits.agentBudgetUsd,
       resume,

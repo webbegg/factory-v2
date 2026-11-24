@@ -41,7 +41,9 @@ agents (Claude Agent SDK). Every step writes one markdown file in
 
 Bun ≥ 1.4, git, an authenticated [`gh`](https://cli.github.com/) that can push
 to the repo, and Claude Code ≥ 2.1.257 (the agents run through it). Optional:
-`agent-browser`, so the UX and UI reviewers can look at pages.
+`agent-browser`, so the UX and UI reviewers can look at pages (not under the
+sandbox, below), and for the agent sandbox on Linux, `bubblewrap` and `socat`
+(macOS has `sandbox-exec` built in).
 
 ## Use
 
@@ -144,13 +146,36 @@ in the running factory and is not kept across a restart.
   `gh`, or pass or change git config; read-only agents run only git reads, and
   the builder pushes only by naming its own branch, without force. The guard
   reads commands, it is not a sandbox: a shell that writes files or builds a
-  command it can't read still runs as you, so protect the base branch on
-  GitHub. After every agent the factory also checks what it changed: any job
+  command it can't read still runs as you (unless the sandbox below is on), so
+  protect the base branch on GitHub. After every agent the factory also checks what it changed: any job
   file other than its report (links included, `events.jsonl` too), the job's
   routing, stage and error in `job.json`, or a report whose verdict differs
   from the agent's reply, is put back or refused and the job stalls, and so does an agent that only reads but
   moved the branch or left uncommitted files. Reviewers run one after another,
   so each can be held to its own verdict.
+- Opt-in agent sandbox: `"sandbox": { "enabled": true, "domains": [] }` in
+  `.factory/config.json` runs every agent's shell in the Claude Agent SDK
+  sandbox, and an agent run fails if the sandbox can't start (`doctor` says
+  whether it can). A shell may write the agent's own files and its working
+  folder, the job's worktree (the SDK always allows that; after a read-only
+  agent the factory still checks that HEAD didn't move and no files were
+  left). No shell may write the repo's `.git`, which the SDK would otherwise
+  open to a shell in a worktree, so no agent can move refs, plant objects or
+  redirect git. The builder therefore doesn't commit, push or open its PR:
+  it leaves its changes in the worktree, and each time it stops the factory
+  commits all of them (titled from the `# Build:` line of `build.md`, refused
+  while conflict markers are left), pushes the branch and opens the draft PR.
+  On a conflict round the factory starts the merge and the builder resolves
+  the conflicted files. Only the builder reaches the network, and only for
+  packages: the npm registry and the hosts in `domains`, never GitHub. The
+  builder and the UX and UI reviewers may bind local ports for dev servers.
+  Model keys, GitHub tokens and `gh` config are hidden from every shell. The
+  factory names refs in full (`refs/remotes/origin/<base>`) whether the
+  sandbox is on or not. Verified on macOS; Linux is untested. There is no browser
+  under the sandbox, since Chrome can't start in it: agents that view pages are
+  told to read the code and `curl` their dev server. The sandbox covers shells
+  only. Write and Edit stay with the guard above, and the gate's `checks.sh`
+  runs outside it.
 - The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
   `.factory/checks.sh`, `.factory/config.json`, `.github/*`) or anywhere in

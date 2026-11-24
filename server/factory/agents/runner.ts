@@ -1,4 +1,5 @@
-import { basename, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
+import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentName } from './prompts'
 
 export interface AgentEvent {
@@ -22,6 +23,8 @@ export interface AgentTask {
   writable: string[]
   /** the job branch: the only one the builder may push */
   branch?: string
+  /** run the agent's shell in the SDK sandbox; `gitDir` is the main checkout's .git */
+  sandbox?: { gitDir: string, domains: string[] }
   maxTurns?: number
   maxBudgetUsd?: number
   /** Agent SDK session to continue */
@@ -250,6 +253,63 @@ export function toolRefusal(tool: string, input: unknown, task: Pick<AgentTask, 
   return `The factory only lets ${task.agent} write: ${task.writable.join(', ')}`
 }
 
+// ---- SDK sandbox ------------------------------------------------------------
+//
+// The guard reads commands; the sandbox contains what they do. It covers the
+// Bash tool only: Write and Edit stay with the PreToolUse hook above.
+
+const REGISTRY_HOSTS = ['registry.npmjs.org']
+/** agents that start a dev server and look at it */
+const SERVES = new Set<AgentName>(['builder', 'reviewer-ux', 'reviewer-ui'])
+/**
+ * Chrome can't start in the sandbox (its singleton socket and crash reporter
+ * need the shared user temp folder and Mach services), so with the sandbox on
+ * the agents that look at pages are told there is no browser.
+ */
+export const NO_BROWSER = 'The sandbox is on, so there is no browser: agent-browser won\'t start. Check pages by reading the code and fetching your dev server with curl.'
+/** with .git closed to its shell, the builder hands its work to the factory (orchestrator: commitBuild, publishBuild) */
+export const SANDBOX_BUILD = 'The sandbox is on, so your shell can\'t write .git or reach GitHub: skip the Commit, push, PR steps (no git add, commit, merge or push, and no gh). Leave your changes in the worktree, uncommitted. Each time you stop, the factory commits all of them, titled from the `# Build:` line of build.md, then pushes the branch and opens the draft PR.'
+
+/** what an agent is told about the sandbox it runs in */
+export function sandboxNote(agent: AgentName): string {
+  return [agent === 'builder' ? SANDBOX_BUILD : '', SERVES.has(agent) ? NO_BROWSER : ''].filter(Boolean).join(' ')
+}
+/** the claude process keeps these; no shell needs them */
+const MODEL_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']
+/** the factory pushes and opens PRs for a sandboxed builder, so no shell needs these either */
+const GITHUB_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
+const SECRET_FILES = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.npmrc', '~/.docker/config.json', '~/.config/gh', '~/.git-credentials']
+
+/**
+ * The SDK sandbox for one agent's shell: writes only to its own files, never
+ * the repo's .git (the SDK grants a shell in a worktree the main .git, so it
+ * is denied outright, and deny wins), network only for the builder's package
+ * installs, and no credentials. Commands may not opt out.
+ */
+export function sandboxSettings(task: Pick<AgentTask, 'agent' | 'cwd' | 'writable' | 'sandbox'>): SandboxSettings | undefined {
+  if (!task.sandbox) return undefined
+  const { gitDir, domains } = task.sandbox
+  return {
+    enabled: true,
+    failIfUnavailable: true,
+    allowUnsandboxedCommands: false,
+    filesystem: {
+      allowWrite: task.writable.map(w => w.replace(/\/+$/, '')),
+      // the shell may write its working folder (the worktree), never the file that tells git where its repo is, nor the repo
+      denyWrite: [join(task.cwd, '.git'), gitDir],
+      denyRead: SECRET_FILES
+    },
+    network: {
+      allowedDomains: task.agent === 'builder' ? [...REGISTRY_HOSTS, ...domains] : [],
+      strictAllowlist: true,
+      allowLocalBinding: SERVES.has(task.agent)
+    },
+    credentials: {
+      envVars: [...MODEL_ENV, ...GITHUB_ENV].map(name => ({ name, mode: 'deny' as const }))
+    }
+  }
+}
+
 function describeTool(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>
   const detail = i.command ?? i.file_path ?? i.pattern ?? i.path ?? ''
@@ -284,6 +344,7 @@ export class SdkRunner implements AgentRunner {
           allowedTools: task.tools,
           permissionMode: 'dontAsk',
           settingSources: [],
+          sandbox: sandboxSettings(task),
           env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'factory-v2' },
           hooks: {
             PreToolUse: [{

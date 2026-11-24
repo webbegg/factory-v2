@@ -3,7 +3,7 @@
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { defaultConfig, factoryPaths, loadConfig } from './config'
 import { run } from './exec'
 import { runChecksScript, TAIL } from './gate'
@@ -253,6 +253,35 @@ export async function baseChecks(repoDir: string, opts: { signal?: AbortSignal }
   }
 }
 
+/** what the SDK sandbox needs on each platform it supports */
+const SANDBOX_NEEDS: Partial<Record<NodeJS.Platform, string[]>> = { darwin: ['sandbox-exec'], linux: ['bwrap', 'socat'] }
+
+/**
+ * Can the agent sandbox start here? Required once it's on: the runner fails
+ * closed, so every agent run would fail without it.
+ */
+export function sandboxCheck(enabled: boolean, platform: NodeJS.Platform, has: (cmd: string) => boolean): DoctorCheck {
+  const name = 'agent sandbox'
+  if (!enabled) return { name, ok: false, optional: true, detail: 'off: set sandbox.enabled in .factory/config.json to contain agent shells' }
+  const needs = SANDBOX_NEEDS[platform]
+  if (!needs) return { name, ok: false, optional: false, detail: `not supported on ${platform}: turn sandbox.enabled off` }
+  const missing = needs.filter(cmd => !has(cmd))
+  return missing.length
+    ? { name, ok: false, optional: false, detail: `missing ${missing.join(', ')}: install ${missing.map(c => c === 'bwrap' ? 'bubblewrap' : c).join(', ')} or turn sandbox.enabled off` }
+    : { name, ok: true, optional: false, detail: `on (${needs.join(', ')})` }
+}
+
+/** agent-browser lets the UX and UI reviewers look at pages, except under the sandbox, where Chrome can't start */
+export function browserCheck(version: string | null, sandboxed: boolean): DoctorCheck {
+  const name = 'agent-browser (UI reviews)'
+  if (sandboxed) return { name, ok: false, optional: true, detail: 'sandbox on: no browser, UX/UI reviewers read the code and curl the dev server' }
+  return version === null
+    ? { name, ok: false, optional: true, detail: 'not installed: UX/UI reviewers review code only' }
+    : { name, ok: true, optional: true, detail: version }
+}
+
+const onPath = (cmd: string) => (process.env.PATH ?? '').split(delimiter).some(dir => dir && existsSync(join(dir, cmd)))
+
 /**
  * Preflight: can the factory run in this project? `baseChecks` also runs
  * checks.sh on origin/<base>, which takes as long as the checks do.
@@ -284,6 +313,8 @@ export async function doctor(repoDir: string, opts: { baseChecks?: boolean } = {
   }
   const hasConfig = config !== null
   add('.factory/config.json', hasConfig, hasConfig ? 'ok' : configError)
+  const sandboxed = config?.sandbox.enabled ?? false
+  out.push(sandboxCheck(sandboxed, process.platform, onPath))
   if (config) {
     const base = config.baseBranch
     const remote = await sh('git', ['ls-remote', '--exit-code', '--heads', 'origin', base])
@@ -328,6 +359,6 @@ export async function doctor(repoDir: string, opts: { baseChecks?: boolean } = {
   const unignored = IGNORED.filter(l => !gi.split('\n').map(x => x.trim()).includes(l))
   add('.gitignore', !unignored.length, unignored.length ? `missing: ${unignored.join(' ')}` : 'ok')
   const browser = await sh('agent-browser', ['--version'])
-  add('agent-browser (UI reviews)', browser.code === 0, browser.code === 0 ? browser.stdout.trim() : 'not installed: UX/UI reviewers review code only', true)
+  out.push(browserCheck(browser.code === 0 ? browser.stdout.trim() : null, sandboxed))
   return out
 }

@@ -76,6 +76,34 @@ describe('ci config', () => {
   })
 })
 
+describe('sandbox config (#49)', () => {
+  async function load(raw: unknown) {
+    const env = await makeEnv()
+    await mkdir(env.paths.factory, { recursive: true })
+    await writeFile(join(env.paths.factory, 'config.json'), JSON.stringify(raw))
+    return (await loadConfig(env.paths)).sandbox
+  }
+
+  test('off by default, and when the block is missing or not an object', async () => {
+    expect(defaultConfig().sandbox).toEqual({ enabled: false, domains: [] })
+    expect(await load({})).toEqual({ enabled: false, domains: [] })
+    expect(await load({ sandbox: true })).toEqual({ enabled: false, domains: [] })
+  })
+
+  test('on, with extra domains for the builder', async () => {
+    expect(await load({ sandbox: { enabled: true } })).toEqual({ enabled: true, domains: [] })
+    expect(await load({ sandbox: { enabled: true, domains: ['pypi.org', '*.pythonhosted.org'] } }))
+      .toEqual({ enabled: true, domains: ['pypi.org', '*.pythonhosted.org'] })
+  })
+
+  test('only a boolean true turns it on, and a bad domain is dropped', async () => {
+    expect(await load({ sandbox: { enabled: 'yes' } })).toEqual({ enabled: false, domains: [] })
+    expect(await load({ sandbox: { enabled: true, domains: ['ok.dev', '', 'a b', 42, '*', 'x/y'] } }))
+      .toEqual({ enabled: true, domains: ['ok.dev'] })
+    expect(await load({ sandbox: { enabled: true, domains: 'pypi.org' } })).toEqual({ enabled: true, domains: [] })
+  })
+})
+
 describe('defaultConfig', () => {
   test('the UI reviewer defaults to sonnet; a config that sets it keeps its value', async () => {
     expect(defaultConfig().surfaceReviewers.ui!.ui).toBe('sonnet')

@@ -139,6 +139,14 @@ export class GhCli implements GitHubPort {
       'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url')
   }
 
+  async prCreate(pr: { base: string, head: string, title: string, body: string }) {
+    const out = await this.gh(['pr', 'create', '--draft', '--base', pr.base, '--head', pr.head, '--title', redact(pr.title), '--body', redact(pr.body)])
+    const url = out.trim().split('\n').pop() ?? ''
+    const number = Number(url.split('/').pop())
+    if (!Number.isInteger(number) || number <= 0) throw new Error(`gh pr create gave no PR URL: ${redact(out.trim().slice(0, 200))}`)
+    return { number, url }
+  }
+
   /** Files a new request on the queue; returns the issue number. */
   async createIssue(title: string, body: string, label: string): Promise<number> {
     const url = (await this.gh(['issue', 'create', '--label', label, '--title', title, '--body', body])).trim()

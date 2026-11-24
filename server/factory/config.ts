@@ -22,7 +22,9 @@ export function defaultConfig(): FactoryConfig {
     protectedPaths: ['.factory/checks.sh', '.factory/config.json', '.github/*'],
     ports: { base: 5100, step: 10 },
     limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 },
-    ci: { wait: true, startMinutes: 2, minutes: 30 }
+    ci: { wait: true, startMinutes: 2, minutes: 30 },
+    // off until a live job has gone through every stage under it
+    sandbox: { enabled: false, domains: [] }
   }
 }
 
@@ -45,6 +47,11 @@ function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
     return [key, positive((raw.limits as Record<string, unknown> | undefined)?.[key], fallback)]
   })) as FactoryConfig['limits']
   const ci: Record<string, unknown> = isObject(raw.ci) ? raw.ci : {}
+  const sandbox: Record<string, unknown> = isObject(raw.sandbox) ? raw.sandbox : {}
+  // a host name or a *.wildcard of one: anything else would widen or break the allow list
+  const domains = Array.isArray(sandbox.domains)
+    ? sandbox.domains.filter((d): d is string => typeof d === 'string' && /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(d))
+    : []
   return {
     ...defaults,
     ...raw,
@@ -53,7 +60,8 @@ function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
       wait: typeof ci.wait === 'boolean' ? ci.wait : defaults.ci.wait,
       startMinutes: positive(ci.startMinutes, defaults.ci.startMinutes),
       minutes: positive(ci.minutes, defaults.ci.minutes)
-    }
+    },
+    sandbox: { enabled: sandbox.enabled === true, domains }
   }
 }
 

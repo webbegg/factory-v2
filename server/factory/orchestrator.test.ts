@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isWritable } from './agents/runner'
+import { isWritable, NO_BROWSER, SANDBOX_BUILD } from './agents/runner'
 import type { AgentResult, AgentRunner, AgentTask } from './agents/runner'
 import { PROMPTS, withAddendum } from './agents/prompts'
 import type { AgentName } from './agents/prompts'
@@ -122,6 +122,155 @@ describe('orchestrator', () => {
     expect(review.message).toContain(`Write your report to ${join(review.jobDir, 'round-1/review-code.md')}.`)
     const build = runner.tasks.find(t => t.agent === 'builder')!
     expect(build.message).toContain(`Write your report to ${join(build.jobDir, 'build.md')}.`)
+  })
+
+  test('with sandbox on, every agent run carries the repo\'s .git and the configured hosts; off, none does (#49)', async () => {
+    const on = await factory({ ...happy }, { sandbox: { enabled: true, domains: ['pypi.org'] } })
+    on.env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await on.orch.drain()
+    await on.orch.idle()
+    expect(on.runner.tasks.length).toBeGreaterThan(3)
+    for (const t of on.runner.tasks) expect(t.sandbox).toEqual({ gitDir: join(on.env.paths.repo, '.git'), domains: ['pypi.org'] })
+    // Chrome can't start in the sandbox: agents that look at pages are told so, the rest aren't
+    const looks = new Set(['builder', 'reviewer-ux', 'reviewer-ui'])
+    expect(on.runner.tasks.some(t => looks.has(t.agent))).toBe(true)
+    for (const t of on.runner.tasks) expect(t.message.includes(NO_BROWSER)).toBe(looks.has(t.agent))
+    // the builder can't write .git: it is told the factory commits, pushes and opens the PR
+    for (const t of on.runner.tasks) expect(t.message.includes(SANDBOX_BUILD)).toBe(t.agent === 'builder')
+
+    const off = await factory({ ...happy })
+    off.env.github.addIssue({ number: 1, title: 'Add subtract' })
+    await off.orch.drain()
+    await off.orch.idle()
+    for (const t of off.runner.tasks) expect(t.sandbox).toBeUndefined()
+    for (const t of off.runner.tasks) expect(t.message).not.toContain(NO_BROWSER)
+    for (const t of off.runner.tasks) expect(t.message).not.toContain(SANDBOX_BUILD)
+  })
+
+  describe('a sandboxed builder: the factory commits, pushes and opens the PR (#49)', () => {
+    const SANDBOX = { sandbox: { enabled: true, domains: [] } }
+    const BUILD = 'STATUS: READY\n\n# Build: Add subtract\n\n## Summary\n- adds subtract\n\n## Changes\nsrc/math.ts\n'
+
+    test('after the builder stops, its changes are committed with the build title, pushed, and a draft PR opened', async () => {
+      const f = await factory({
+        ...happy,
+        builder: async (t) => {
+          // the builder can't write .git: its work is left uncommitted, and it opens no PR
+          const job = await f.env.store.load(t.jobId)
+          f.env.github.openPrs.delete(job.branch)
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+        }
+      }, SANDBOX)
+      f.env.github.addIssue({ number: 1, title: 'Add subtract' })
+      await f.orch.drain()
+      await f.orch.idle()
+      const job = (await f.env.store.list())[0]!
+      expect(f.orch.errors.size).toBe(0)
+      expect(job.stage).toBe('merged')
+      const git = f.env.git.calls.filter(c => c[0] === 'commitAll' || c[0] === 'push').slice(0, 2)
+      expect(git).toEqual([['commitAll', job.worktree, 'Add subtract'], ['push', job.worktree, job.branch]])
+      const created = f.env.github.calls.find(c => c[0] === 'prCreate')!
+      expect(created[1]).toEqual({ base: 'main', head: job.branch, title: 'Add subtract', body: 'Closes #1\n\n- adds subtract' })
+      expect(job.pr).toBe(f.env.github.openPrs.get(job.branch)![0]!.number)
+    })
+
+    test('the stop check commits first, so the gate can reuse it; a later round names its round', async () => {
+      const f = await factory({
+        ...happy,
+        'builder': async (t) => {
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+          expect(await t.stopCheck!()).toBeNull()
+        },
+        'reviewer-code': (t, n) => write(t, `round-${t.round}/review-code.md`, n === 1 ? 'VERDICT: CHANGES\n\n## Findings\n- x\n' : 'VERDICT: PASS\n')
+      }, SANDBOX)
+      f.env.git.remoteHeads.set('main', 'b'.repeat(40))
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      const job = (await f.env.store.list())[0]!
+      expect(job.stage).toBe('merged')
+      expect(await f.env.store.read(job.id, 'round-1/checks.md')).toContain('reused the builder\'s stop check')
+      const messages = f.env.git.calls.filter(c => c[0] === 'commitAll').map(c => c[2])
+      expect(messages).toContain('Add subtract')
+      expect(messages).toContain('Add subtract (round 2)')
+    })
+
+    test('conflict markers left: nothing is committed and the builder is told where, once', async () => {
+      const f = await factory({
+        ...happy,
+        builder: async (t) => {
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+        }
+      }, SANDBOX)
+      f.env.git.commitProblems = ['conflict markers are left in src/a.ts']
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      const builds = f.runner.tasks.filter(t => t.agent === 'builder')
+      expect(builds.length).toBe(2)
+      expect(builds[1]!.message).toContain('conflict markers are left in src/a.ts')
+      expect((await f.env.store.list())[0]!.stage).toBe('merged')
+    })
+
+    test('a conflict round: the factory starts the merge and tells the builder which files to resolve', async () => {
+      const f = await factory({
+        ...happy,
+        builder: async (t, n) => {
+          if (n === 2) f.env.git.mergeResult = { ok: true, output: '' }
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+        }
+      }, SANDBOX)
+      f.env.git.mergeResult = { ok: false, output: 'CONFLICT (content): src/a.ts' }
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      const job = (await f.env.store.list())[0]!
+      expect(job.stage).toBe('merged')
+      const round2 = f.runner.tasks.filter(t => t.agent === 'builder')[1]!
+      expect(round2.message).toContain('The factory started merging origin/main into your branch; resolve the conflict markers in src/a.ts')
+      const started = f.env.git.calls.findIndex(c => c[0] === 'startMerge')
+      expect(f.env.git.calls[started]).toEqual(['startMerge', job.worktree, 'refs/remotes/origin/main'])
+      expect(f.env.git.calls.slice(started).some(c => c[0] === 'commitAll' && c[2] === 'Add subtract (round 2)')).toBe(true)
+    })
+
+    test('a conflict round resumed mid-merge (dirty worktree): no new merge, and no "merge and push" text', async () => {
+      const f = await factory({
+        ...happy,
+        builder: async (t, n) => {
+          if (n === 2) f.env.git.mergeResult = { ok: true, output: '' }
+          f.env.git.clean = false
+          await write(t, 'build.md', BUILD)
+        }
+      }, SANDBOX)
+      f.env.git.mergeResult = { ok: false, output: 'CONFLICT (content): src/a.ts' }
+      // the sync round starts on a dirty worktree, as after a restart mid-merge
+      const merge = f.env.git.merge.bind(f.env.git)
+      f.env.git.merge = async (cwd, ref) => {
+        const r = await merge(cwd, ref)
+        if (!r.ok) f.env.git.clean = false
+        return r
+      }
+      f.env.github.addIssue({ number: 1 })
+      await f.orch.drain()
+      await f.orch.idle()
+      const round2 = f.runner.tasks.filter(t => t.agent === 'builder')[1]!
+      expect(f.env.git.calls.some(c => c[0] === 'startMerge')).toBe(false)
+      expect(round2.message).toContain('A merge of origin/main is under way in your worktree')
+      expect(round2.message).not.toContain('merge origin/main, resolve the conflicts, push')
+    })
+
+    test('without the sandbox the builder commits and opens its PR itself', async () => {
+      const { env, orch } = await factory({ ...happy })
+      env.github.addIssue({ number: 1 })
+      await orch.drain()
+      await orch.idle()
+      expect(env.git.calls.some(c => c[0] === 'commitAll' || c[0] === 'startMerge')).toBe(false)
+      expect(env.github.calls.some(c => c[0] === 'prCreate')).toBe(false)
+    })
   })
 
   test('a report answered as the final reply instead of written is saved for the agent', async () => {
