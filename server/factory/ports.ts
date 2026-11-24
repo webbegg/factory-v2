@@ -78,7 +78,7 @@ export interface GitPort {
    * commit: `committed` false. Conflict markers left: nothing is committed and
    * `problem` says where.
    */
-  commitAll(cwd: string, message: string): Promise<{ committed: boolean, problem?: string }>
+  commitAll(cwd: string, message: string, maxFileBytes?: number): Promise<{ committed: boolean, problem?: string }>
 }
 
 /** Refreshes a job's issue.md from GitHub (quoted as data). */

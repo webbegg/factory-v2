@@ -24,7 +24,7 @@ export function defaultConfig(): FactoryConfig {
     limits: { checksMinutes: 30, agentTurns: 300, agentBudgetUsd: 15 },
     ci: { wait: true, startMinutes: 2, minutes: 30 },
     // off until a live job has gone through every stage under it
-    sandbox: { enabled: false, domains: [] }
+    sandbox: { enabled: false, domains: [], maxFileMB: 10 }
   }
 }
 
@@ -61,7 +61,7 @@ function withDefaults(raw: Partial<FactoryConfig>): FactoryConfig {
       startMinutes: positive(ci.startMinutes, defaults.ci.startMinutes),
       minutes: positive(ci.minutes, defaults.ci.minutes)
     },
-    sandbox: { enabled: sandbox.enabled === true, domains }
+    sandbox: { enabled: sandbox.enabled === true, domains, maxFileMB: positive(sandbox.maxFileMB, defaults.sandbox.maxFileMB) }
   }
 }
 

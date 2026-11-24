@@ -15,6 +15,13 @@ import type { FactoryConfig, FactoryPaths, Job } from './types'
 
 export type Call = [string, ...unknown[]]
 
+/**
+ * Tests that start the real gate sandbox: macOS ships sandbox-exec (Linux
+ * needs bubblewrap and socat, which CI doesn't install), and a sandbox can't
+ * start inside another, as when the factory gates its own repo (#68).
+ */
+export const realSandbox = process.platform === 'darwin' && process.env.SANDBOX_RUNTIME !== '1'
+
 export class FakeGitHub implements GitHubPort {
   calls: Call[] = []
   prStates = new Map<number, PrState>()
@@ -195,8 +202,8 @@ export class FakeGit implements GitPort {
 
   /** a problem `commitAll` reports instead of committing, once per entry */
   commitProblems: string[] = []
-  async commitAll(cwd: string, message: string) {
-    this.calls.push(['commitAll', cwd, message])
+  async commitAll(cwd: string, message: string, maxFileBytes?: number) {
+    this.calls.push(['commitAll', cwd, message, ...maxFileBytes === undefined ? [] : [maxFileBytes]])
     const problem = this.commitProblems.shift()
     if (problem) return { committed: false, problem }
     if (this.clean) return { committed: false }

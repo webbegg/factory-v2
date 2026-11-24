@@ -84,23 +84,32 @@ describe('sandbox config (#49)', () => {
     return (await loadConfig(env.paths)).sandbox
   }
 
+  const OFF = { enabled: false, domains: [], maxFileMB: 10 }
+  const ON = { ...OFF, enabled: true }
+
   test('off by default, and when the block is missing or not an object', async () => {
-    expect(defaultConfig().sandbox).toEqual({ enabled: false, domains: [] })
-    expect(await load({})).toEqual({ enabled: false, domains: [] })
-    expect(await load({ sandbox: true })).toEqual({ enabled: false, domains: [] })
+    expect(defaultConfig().sandbox).toEqual(OFF)
+    expect(await load({})).toEqual(OFF)
+    expect(await load({ sandbox: true })).toEqual(OFF)
   })
 
-  test('on, with extra domains for the builder', async () => {
-    expect(await load({ sandbox: { enabled: true } })).toEqual({ enabled: true, domains: [] })
+  test('on, with extra domains for the builder and the gate', async () => {
+    expect(await load({ sandbox: { enabled: true } })).toEqual(ON)
     expect(await load({ sandbox: { enabled: true, domains: ['pypi.org', '*.pythonhosted.org'] } }))
-      .toEqual({ enabled: true, domains: ['pypi.org', '*.pythonhosted.org'] })
+      .toEqual({ ...ON, domains: ['pypi.org', '*.pythonhosted.org'] })
   })
 
   test('only a boolean true turns it on, and a bad domain is dropped', async () => {
-    expect(await load({ sandbox: { enabled: 'yes' } })).toEqual({ enabled: false, domains: [] })
+    expect(await load({ sandbox: { enabled: 'yes' } })).toEqual(OFF)
     expect(await load({ sandbox: { enabled: true, domains: ['ok.dev', '', 'a b', 42, '*', 'x/y'] } }))
-      .toEqual({ enabled: true, domains: ['ok.dev'] })
-    expect(await load({ sandbox: { enabled: true, domains: 'pypi.org' } })).toEqual({ enabled: true, domains: [] })
+      .toEqual({ ...ON, domains: ['ok.dev'] })
+    expect(await load({ sandbox: { enabled: true, domains: 'pypi.org' } })).toEqual(ON)
+  })
+
+  test('maxFileMB caps a file the factory commits for a sandboxed builder; a bad value keeps 10 (#68)', async () => {
+    expect(await load({ sandbox: { enabled: true, maxFileMB: 50 } })).toEqual({ ...ON, maxFileMB: 50 })
+    expect(await load({ sandbox: { enabled: true, maxFileMB: 0.5 } })).toEqual({ ...ON, maxFileMB: 0.5 })
+    for (const bad of [0, -1, '50', null, Infinity]) expect(await load({ sandbox: { enabled: true, maxFileMB: bad } })).toEqual(ON)
   })
 })
 

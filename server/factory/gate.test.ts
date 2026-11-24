@@ -6,7 +6,7 @@ import { globToRegExp } from './gate'
 import type { StopCheckRecord } from './gate'
 import type { CommitCheck } from './ports'
 import { route } from './route'
-import { makeEnv, seed } from './testing'
+import { makeEnv, realSandbox, seed } from './testing'
 import type { TestEnv } from './testing'
 import type { Job } from './types'
 
@@ -105,6 +105,18 @@ describe('gate', () => {
       delete process.env.FACTORY_TEST_TOKEN
     }
   })
+
+  test.skipIf(!realSandbox)('with sandbox on, checks.sh can\'t write outside the worktree; off, it can (#68)', async () => {
+    for (const enabled of [true, false]) {
+      const env = await makeEnv({ sandbox: { enabled, domains: [], maxFileMB: 10 } })
+      withChecks(env, `touch ${counter(env)} 2>&1 || true\ntouch made.txt`)
+      const job = await gateJob(env)
+      expect((await env.gate.run(ID)).verdict).toBe('PASS')
+      expect(await Bun.file(join(job.worktree, 'made.txt')).exists()).toBe(true)
+      expect(await Bun.file(counter(env)).exists()).toBe(!enabled)
+      if (enabled) expect(await env.store.read(ID, 'round-1/checks.log')).toContain('Operation not permitted')
+    }
+  }, 30_000)
 
   test('checks.sh that runs past limits.checksMinutes fails the gate', async () => {
     const env = await makeEnv({ limits: { ...defaultConfig().limits, checksMinutes: 0.005 } })

@@ -104,11 +104,13 @@ export interface FactoryConfig {
     /** checks still pending this long after the push send the job to a human */
     minutes: number
   }
-  /** agents' shells run in the Claude Agent SDK sandbox (OS-level write, network and credential limits) */
+  /** agents' shells and the gate's checks.sh run sandboxed (OS-level write, network and credential limits) */
   sandbox: {
     enabled: boolean
-    /** hosts the builder may reach beyond GitHub and the npm registry (another package registry, say) */
+    /** hosts the builder and checks.sh may reach beyond the npm registry (another package registry, say) */
     domains: string[]
+    /** largest file, in MB, the factory commits for a sandboxed builder */
+    maxFileMB: number
   }
 }
 

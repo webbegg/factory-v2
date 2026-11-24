@@ -1,7 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { run } from './exec'
+import { type GateSandbox, wrapChecks } from './gate-sandbox'
 import { Refused } from './machine'
 import { header } from './markdown'
 import type { Ports } from './ports'
@@ -14,18 +15,35 @@ export const TAIL = 80
  * Runs a checks.sh script the way the gate does: from a temp file, in `cwd`,
  * with `CI=1`, no secrets in the environment and the `checksMinutes` timeout
  * (exit 124). The gate and doctor's base check share it so they can't drift.
+ * With `sandbox`, it runs in the sandbox runtime (see gate-sandbox.ts), and a
+ * sandbox that can't start fails the run.
  */
-export async function runChecksScript(script: string, cwd: string, checksMinutes: number, signal?: AbortSignal): Promise<{ code: number, output: string, seconds: number }> {
+export async function runChecksScript(script: string, cwd: string, checksMinutes: number, signal?: AbortSignal, sandbox?: GateSandbox): Promise<{ code: number, output: string, seconds: number }> {
   const start = performance.now()
-  const dir = await mkdtemp(join(tmpdir(), 'factory-checks-'))
+  // the real path: the sandbox matches paths as they resolve (/var is /private/var on macOS)
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'factory-checks-')))
   try {
     const file = join(dir, 'checks.sh')
     await writeFile(file, script)
-    const res = await run('bash', [file], { cwd, env: { CI: '1' }, scrub: true, signal, timeoutMs: checksMinutes * 60_000 })
+    const opts = { cwd, scrub: true, signal, timeoutMs: checksMinutes * 60_000 }
+    let res
+    if (sandbox) {
+      const wrapped = await wrapChecks(file, await realpath(cwd), dir, sandbox).catch((err: unknown) => err instanceof Error ? err : new Error(String(err)))
+      res = wrapped instanceof Error
+        ? { code: 1, stdout: '', stderr: `[factory] the gate sandbox couldn't start: ${wrapped.message}\n` }
+        : await run(wrapped.cmd, wrapped.args, { ...opts, env: { ...wrapped.env, CI: '1' } })
+    } else {
+      res = await run('bash', [file], { ...opts, env: { CI: '1' } })
+    }
     return { code: res.code, output: res.stdout + res.stderr, seconds: Math.round((performance.now() - start) / 1000) }
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+/** The gate sandbox for this config: branch code runs in it once the sandbox is on (#68). */
+export function gateSandbox(config: FactoryConfig, repo: string): GateSandbox | undefined {
+  return config.sandbox.enabled ? { gitDir: join(repo, '.git'), domains: config.sandbox.domains } : undefined
 }
 
 /** Shell-style glob where `*` also crosses `/` (so `.factory/*` covers subfolders). */
@@ -121,7 +139,7 @@ export class Gate {
     if (script === null) {
       return { code: 127, output: `${CHECKS} isn't committed on origin/${baseBranch}: commit and push it first.\n`, seconds: 0, base }
     }
-    const res = await runChecksScript(script, worktree, this.o.config.limits.checksMinutes, signal)
+    const res = await runChecksScript(script, worktree, this.o.config.limits.checksMinutes, signal, gateSandbox(this.o.config, this.o.paths.repo))
     return { code: res.code, output: res.output, seconds: Math.round((performance.now() - start) / 1000), base }
   }
 
