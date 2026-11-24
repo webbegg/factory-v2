@@ -23,6 +23,12 @@ syncs with the base, gates again, and merges through `gh pr merge`, as after an
 APPROVE. Gating again reuses the round gate's pass, without re-running
 `checks.sh`, when the sync left HEAD unchanged and `origin/<base>` is still the
 `BASE:` that pass recorded. A PR you merge by hand on GitHub moves its job to merged.
+The factory reads the PR on GitHub before it acts on feedback, an answer, a
+reject or a builder round: a PR already merged moves the job to merged, and a
+PR closed on GitHub sends a builder round to needs-human and refuses feedback or
+an answer (a reject still rejects, without closing the PR again). A `gh pr
+merge` that fails while GitHub shows the PR merged, as when its response is
+lost, ends in merged, noted in `merge-checks.md`.
 
 The board's **Inbox** lists what waits on you: escalated (needs-human) jobs and
 stalled jobs, each once. Jobs whose intake asked the issue's author a question
