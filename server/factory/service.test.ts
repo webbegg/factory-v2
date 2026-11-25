@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { acquireLock, fixtureDir, fixtureMode, fixtureRefusal, fixtureState, isLocalHost, jobFiles, openFixtures, readJobFile, requestRefusal } from './service'
+import { SESSION_REQUIRED } from './session'
 import { makeEnv, newJob, seed } from './testing'
 import { STAGES } from './types'
 
@@ -143,9 +144,10 @@ describe('fixture mode', () => {
 })
 
 describe('requestRefusal', () => {
+  const token = 'a'.repeat(43)
   const req = (over: Partial<Parameters<typeof requestRefusal>[0]> = {}) => requestRefusal({
-    host: 'localhost:4400', method: 'POST', path: '/api/run', contentType: 'application/json', ...over
-  })
+    host: 'localhost:4400', method: 'POST', path: '/api/run', contentType: 'application/json', session: token, ...over
+  }, token)
 
   test('the board\'s own requests pass', () => {
     expect(req({ origin: 'http://localhost:4400', fetchSite: 'same-origin' })).toBeNull()
@@ -169,6 +171,32 @@ describe('requestRefusal', () => {
   test('API writes must be JSON', () => {
     expect(req({ contentType: 'application/x-www-form-urlencoded' })).toMatchObject({ status: 415 })
     expect(req({ method: 'GET', contentType: undefined })).toBeNull()
+  })
+
+  // #85: a local process sends no Origin and no Sec-Fetch-Site, so only the cookie tells it apart
+  const write = { host: 'localhost:4400', method: 'POST', path: '/api/settings/config', contentType: 'application/json' }
+
+  test('a write with no Origin and no cookie, or a wrong one, is refused when a token is set', () => {
+    expect(requestRefusal(write, token)).toEqual({ status: 403, message: SESSION_REQUIRED })
+    expect(requestRefusal({ ...write, session: 'b'.repeat(43) }, token)).toEqual({ status: 403, message: SESSION_REQUIRED })
+    expect(requestRefusal({ ...write, session: 'short' }, token)).toEqual({ status: 403, message: SESSION_REQUIRED })
+  })
+
+  test('the same write with the matching cookie passes', () => {
+    expect(requestRefusal({ ...write, session: token }, token)).toBeNull()
+  })
+
+  test('reads need the cookie too; pages and fixture mode don\'t', () => {
+    expect(requestRefusal({ host: 'localhost:4400', method: 'GET', path: '/api/state' }, token)).toMatchObject({ status: 403 })
+    expect(requestRefusal({ host: 'localhost:4400', method: 'GET', path: '/api/events' }, token)).toMatchObject({ status: 403 })
+    expect(requestRefusal({ host: 'localhost:4400', method: 'GET', path: '/' }, token)).toBeNull()
+    expect(requestRefusal(write, null)).toBeNull()
+    expect(SESSION_REQUIRED).not.toContain(token)
+  })
+
+  test('the earlier checks still come first', () => {
+    expect(requestRefusal({ ...write, host: 'evil.com' }, token)).toEqual({ status: 403, message: 'factory UI is local only' })
+    expect(requestRefusal({ ...write, contentType: 'text/plain' }, token)).toMatchObject({ status: 415 })
   })
 })
 

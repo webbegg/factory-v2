@@ -10,6 +10,8 @@ export type Stage = typeof STAGES[number]
 // Here rather than in machine.ts, which has Node imports, so the board can use them too.
 export const TERMINAL: ReadonlySet<Stage> = new Set(['merged', 'rejected'])
 export const WAITING: ReadonlySet<Stage> = new Set(['needs-info', 'needs-human'])
+/** The API's 403 without the session cookie; the board shows its own message on it. ASCII only: it is an HTTP status text. */
+export const SESSION_REQUIRED = 'open the board from the URL that factory printed in the terminal'
 export type Risk = 'low' | 'medium' | 'high'
 export type Verdict = 'PASS' | 'CHANGES' | 'pending' | 'invalid'
 export type GateVerdict = 'PASS' | 'FAIL'
