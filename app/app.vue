@@ -2,7 +2,7 @@
 import { newlyWaiting, pageTitle, waitingCount, waitingReasons } from '~/utils/waiting'
 import type { WaitingReason } from '~/utils/waiting'
 
-const { state, connected, reconnecting, connect, refresh, act } = useBoard()
+const { state, connected, reconnecting, sessionMissing, connect, refresh, act } = useBoard()
 const { checks, recheck } = useSetup()
 const { active: notifying } = useNotifications()
 onMounted(() => {
@@ -56,7 +56,22 @@ const links = computed(() => [
 
 <template>
   <UApp>
+    <main
+      v-if="sessionMissing"
+      class="min-h-dvh flex items-center justify-center p-6"
+    >
+      <div class="max-w-md space-y-3 text-center">
+        <h1 class="text-lg font-semibold">
+          Open the board from the terminal
+        </h1>
+        <p class="text-muted">
+          This board only answers the browser that opened the URL <code>factory</code> printed in the terminal
+          (<code>http://localhost:&lt;port&gt;/?token=…</code>). Open that URL to continue.
+        </p>
+      </div>
+    </main>
     <UHeader
+      v-if="!sessionMissing"
       :title="`Factory · ${projectName}`"
       to="/"
     >
@@ -90,7 +105,10 @@ const links = computed(() => [
       </template>
     </UHeader>
 
-    <UMain class="h-[calc(100dvh-var(--ui-header-height))] min-h-0 flex flex-col">
+    <UMain
+      v-if="!sessionMissing"
+      class="h-[calc(100dvh-var(--ui-header-height))] min-h-0 flex flex-col"
+    >
       <UAlert
         v-if="reconnecting"
         role="status"

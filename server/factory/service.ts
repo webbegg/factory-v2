@@ -17,6 +17,7 @@ import type { Ports } from './ports'
 import { buildInfo } from './provenance'
 import type { BuildInfo } from './provenance'
 import { Queue } from './queue'
+import { SESSION_REQUIRED, tokenMatches } from './session'
 import type { DoctorCheck } from './setup'
 import { JobStore } from './store'
 import type { FactoryConfig, FactoryPaths } from './types'
@@ -237,6 +238,8 @@ export interface RequestFacts {
   method: string
   path: string
   contentType?: string
+  /** the value of the request's session cookie */
+  session?: string
 }
 
 /**
@@ -245,8 +248,10 @@ export interface RequestFacts {
  * foreign Host headers (DNS rebinding), any other Origin, including other
  * localhost ports where job dev servers run branch code, and cross-site or
  * same-site fetches, reads included. Writes must be JSON, which no form can send.
+ * A local process sends no Origin at all, so every API call also needs the
+ * session cookie set from the URL `factory` printed; `token` is null in fixture mode.
  */
-export function requestRefusal(r: RequestFacts): { status: number, message: string } | null {
+export function requestRefusal(r: RequestFacts, token: string | null): { status: number, message: string } | null {
   if (!isLocalHost(r.host)) return { status: 403, message: 'factory UI is local only' }
   if (!r.path.startsWith('/api/')) return null
   if (r.origin !== undefined) {
@@ -264,5 +269,6 @@ export function requestRefusal(r: RequestFacts): { status: number, message: stri
   if (r.method !== 'GET' && r.method !== 'HEAD' && !(r.contentType ?? '').startsWith('application/json')) {
     return { status: 415, message: 'send application/json' }
   }
+  if (token !== null && !tokenMatches(r.session, token)) return { status: 403, message: SESSION_REQUIRED }
   return null
 }

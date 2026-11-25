@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import type { FactoryEvent } from './orchestrator'
 import { BUILD_SHA_ENV, factorySha, factoryVersion } from './provenance'
 import { acquireLock, createFactory } from './service'
+import { announceBoardUrl, sessionToken } from './session'
 import { doctor, init } from './setup'
 import type { Job } from './types'
 import { run } from './exec'
@@ -77,8 +78,11 @@ async function ui(repo: string, args: string[]) {
   process.env.FACTORY_PROJECT = repo
   process.env.NITRO_HOST = '127.0.0.1'
   process.env.NITRO_PORT = port
+  // before the import, so the server shares this token and leaves the printing to us
+  const token = sessionToken()
+  announceBoardUrl()
   await import(entry)
-  const url = `http://localhost:${port}/`
+  const url = `http://localhost:${port}/?token=${token}`
   console.log(`factory board for ${repo}: ${url}`)
   if (!args.includes('--no-open')) {
     await run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url], { cwd: repo })

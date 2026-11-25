@@ -1,5 +1,6 @@
 import type { FactoryConfig, Job, Stage } from '~~/server/factory/types'
 import type { FeedEntry, FeedKind } from '~/utils/feed'
+import { SESSION_REQUIRED } from '~~/server/factory/types'
 
 export type { Job, Stage }
 
@@ -48,6 +49,16 @@ let attempt = 0
 // true from an error until the next open, so the first connection never shows the banner
 const reconnecting = ref(false)
 let checkedMerged = false
+/** the API refused this browser for want of the session cookie */
+const sessionMissing = ref(false)
+
+/** True, and sets `sessionMissing`, when a fetch failed for want of the session cookie. */
+export function sessionRefused(err: unknown): boolean {
+  const e = err as { statusCode?: number, data?: { statusMessage?: string, message?: string } }
+  if (e.statusCode !== 403 || (e.data?.statusMessage ?? e.data?.message) !== SESSION_REQUIRED) return false
+  sessionMissing.value = true
+  return true
+}
 
 const MAX_LINES = 300
 
@@ -65,7 +76,11 @@ export function useBoard() {
   const toast = useToast()
 
   async function refresh() {
-    state.value = await $fetch<FactoryState>('/api/state')
+    try {
+      state.value = await $fetch<FactoryState>('/api/state')
+    } catch (err) {
+      if (!sessionRefused(err)) throw err
+    }
   }
 
   function refreshSoon() {
@@ -115,7 +130,8 @@ export function useBoard() {
 
   function connect() {
     // A closed stream is reopened by the reconnect timer, or sooner by Initialize.
-    if ((source && source.readyState !== EventSource.CLOSED) || import.meta.server) return
+    // without the session cookie every reopen would be another 403
+    if ((source && source.readyState !== EventSource.CLOSED) || import.meta.server || sessionMissing.value) return
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -165,13 +181,14 @@ export function useBoard() {
       refreshSoon()
       return res
     } catch (err) {
+      if (sessionRefused(err)) return null
       const e = err as { data?: { statusMessage?: string, message?: string } }
       toast.add({ title: 'The factory refused', description: e.data?.statusMessage ?? e.data?.message ?? String(err), color: 'error' })
       return null
     }
   }
 
-  return { state, activity, feed, drafts, connected, reconnecting, refresh, connect, act }
+  return { state, activity, feed, drafts, connected, reconnecting, sessionMissing, refresh, connect, act }
 }
 
 export function elapsed(job: Job): string {

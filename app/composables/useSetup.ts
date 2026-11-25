@@ -20,6 +20,7 @@ export function useSetup() {
       checksScript.value = res.checksScript
       error.value = null
     } catch (err) {
+      if (sessionRefused(err)) return
       const e = err as { data?: { statusMessage?: string, message?: string }, message?: string }
       error.value = e.data?.statusMessage ?? e.data?.message ?? e.message ?? String(err)
     } finally {
