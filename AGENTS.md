@@ -102,7 +102,17 @@ view; this file is for whoever changes the code.
   `server/middleware/local-only.ts` applies `requestRefusal` (`service.ts`):
   foreign Host headers, API calls from another Origin or with
   `Sec-Fetch-Site` other than same-origin/none, and non-JSON writes are
-  refused: keep every new write route a JSON POST, and keep GET routes
+  refused, and so is every `/api/` call without the session cookie
+  (`factory_session_<port>`, `sessionCookieName`) matching `sessionToken()`
+  (`server/factory/session.ts`): one random token per process on a
+  `globalThis` `Symbol.for` slot, shared by the CLI and the Nitro bundle it
+  imports. The token never goes into `process.env` (agents and `checks.sh`
+  inherit it) or a file; `ui()` prints it in the board URL, and
+  `server/middleware/session-landing.ts` (`tokenLanding`) answers that URL
+  with a redirect without the token that sets the cookie only when it matches.
+  The 403's message is `SESSION_REQUIRED` (in `types.ts`), on which
+  `useBoard()` sets `sessionMissing` and `app/app.vue` shows a plain message.
+  Fixture mode has no session check. Keep every new write route a JSON POST, and keep GET routes
   read-only (the merged sweep runs in the orchestrator's tick, not in
   `/api/queue`; while paused, the board's `/api/merged` POST is the check
   for needs-human jobs merged by hand, on load and when a job panel opens).
@@ -181,7 +191,9 @@ FACTORY_FIXTURES=1 bun run dev --port <n>
 columns, a running job, one waiting on you, a two-round review, a merged job,
 activity events). It takes no `orchestrator.lock`, starts no jobs, runs no
 `gh`, `git` or `claude`, writes nothing, and answers every API write with a
-403. `FACTORY_PROJECT` is ignored in this mode. Stop only the server on your
+403. `FACTORY_PROJECT` is ignored in this mode, and it needs no token.
+Without fixtures the API needs the session cookie: the dev server prints a
+`?token=` URL (`server/plugins/session.ts`), which you open to set it. Stop only the server on your
 port when done (`lsof -tiTCP:<n> -sTCP:LISTEN`).
 
 Never point a second board at a live project (`FACTORY_PROJECT=…` or the

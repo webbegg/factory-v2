@@ -92,7 +92,7 @@ cd ~/code/my-project
 bun ~/code/factory-v2/bin/factory.ts init     # .factory/, .gitignore lines, GitHub labels
 # review .factory/checks.sh: lint, typecheck, tests, build; it must pass on main
 bun ~/code/factory-v2/bin/factory.ts doctor   # runs checks.sh on origin/main, checks mergeMethod, AGENTS.md
-bun ~/code/factory-v2/bin/factory.ts          # board on http://localhost:4400
+bun ~/code/factory-v2/bin/factory.ts          # opens the printed board URL, http://localhost:4400/?token=…
 ```
 
 `factory doctor` runs `checks.sh` as committed on `origin/<base>` in a
@@ -241,8 +241,9 @@ in the running factory and is not kept across a restart.
   the npm registry and `domains` only, may bind local ports for tests, and
   never sees secrets (nor Claude's or the factory's own files). Binding local
   ports also lets it, like the builder, connect to any port on localhost,
-  the board's included: the sandbox can't single one port out, and the board
-  doesn't yet tell its own page from a local script that sends no `Origin`. A repo's own tests that start this sandbox can't, inside
+  the board's included: the sandbox can't single one port out, but the board's
+  API requires a per-run session cookie set from the URL `factory` prints, so
+  a local process that sends no `Origin` gets a 403. A repo's own tests that start this sandbox can't, inside
   it: skip them when `SANDBOX_RUNTIME=1`, as factory-v2's do.
 - The gate runs `checks.sh` as committed on `origin/<base>`, fetched right before, and fails a branch that adds,
   edits, deletes or renames a file under `protectedPaths` (default
@@ -278,8 +279,16 @@ in the running factory and is not kept across a restart.
   credentials in URLs and GitHub/Anthropic tokens masked.
 - The board listens on 127.0.0.1, refuses foreign `Host` headers, API calls
   from any other origin (other localhost ports included, where job dev servers
-  run branch code) and non-JSON writes. A local process that sends no
-  `Origin`, such as `curl` from a branch's tests, still gets through.
+  run branch code) and non-JSON writes. Every API call, reads and the live
+  stream included, also needs a session cookie: `factory` makes a random token
+  each run, kept only in its memory (never in a file or the environment agents
+  and `checks.sh` inherit), and prints `http://localhost:<port>/?token=<t>`.
+  Opening that URL sets an `HttpOnly`, `SameSite=Strict` cookie and drops the
+  token from the address bar, so a local process that sends no `Origin`, such
+  as `curl` from a branch's tests, gets a 403. A browser without the cookie
+  sees a page pointing to the terminal URL. Cookies are not scoped by port, so
+  a job's dev server on `localhost` receives the board's cookie if you open it
+  in the same browser.
 - Attached screenshots are uploaded to GitHub as user attachments of the
   project's repository (the way `gh issue create --attach` does it); nothing is
   committed or released. Anyone who can see the repository can open them:
